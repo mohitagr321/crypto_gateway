@@ -1,0 +1,1405 @@
+openapi: 3.0.3
+info:
+  title: Crypto Payment Gateway API
+  version: "1.1.0"
+  description: >
+    USDT payment gateway supporting BEP20 (BNB Smart Chain) and TRC20 (Tron).
+    Merchant endpoints authenticate with API key + HMAC signature; dashboard
+    endpoints authenticate with JWT. The target chain is chosen per-payment via
+    the optional `network` field (defaults to BEP20 for backward compatibility);
+    TRC20 must be enabled server-side. Amounts are always human USDT strings —
+    the gateway handles each chain's decimals (BEP20=18, TRC20=6) internally.
+servers:
+  - url: https://gateway.example.com/api/v1
+  - url: http://localhost:4000/api/v1
+tags:
+  - name: Auth
+  - name: Payments
+  - name: Payment links
+  - name: Invoices
+    description: >
+      Fiat-denominated documents with line items. An invoice mints no public
+      token of its own — its pay page is a single-use payment link, so the
+      already-reviewed public checkout surface is the only one a customer meets.
+  - name: Subscriptions
+    description: >
+      Recurring billing. Each cycle issues an invoice rather than pulling funds:
+      crypto has no direct-debit mandate, and the API does not pretend otherwise.
+  - name: Rates
+  - name: Payouts
+  - name: Account
+  - name: Admin
+
+components:
+  securitySchemes:
+    # Two API key modes coexist. Which one applies is decided by the key itself
+    # (api_keys.auth_mode), not by the caller — presenting an HMAC key without a
+    # signature, or a bearer token with one, is rejected rather than downgraded.
+    #
+    # 1. HMAC-signed: ApiKey carries the PUBLIC id (pk_live_…), and Signature +
+    #    Timestamp must accompany it. The secret never crosses the wire.
+    #
+    #    X-Timestamp is unix SECONDS. The signed string is the timestamp, a
+    #    literal ".", then the exact raw request body:
+    #        X-Signature = hex( HMAC_SHA256( apiSecret, "${X-Timestamp}.${rawBody}" ) )
+    #    For a request with no body (any GET) the raw body is "", so the signed
+    #    string is "${X-Timestamp}.". Serialize the body once and send those
+    #    exact bytes — re-serializing changes them and invalidates the
+    #    signature. Requests more than 300 s from server time are rejected as
+    #    replays. Verified against backend/src/middleware/auth.ts.
+    ApiKey:      { type: apiKey, in: header, name: X-Api-Key }
+    Signature:   { type: apiKey, in: header, name: X-Signature }
+    Timestamp:   { type: apiKey, in: header, name: X-Timestamp }
+    # 2. Bearer: the X-Api-Key value IS the secret (ak_live_…), sent alone.
+    #    Simpler to integrate, but the credential is on the wire every call, so
+    #    such keys are never granted the payouts:write scope.
+    ApiKeyBearer: { type: apiKey, in: header, name: X-Api-Key }
+    BearerAuth:  { type: http, scheme: bearer, bearerFormat: JWT }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        message: { type: string }
+    ApiKeySummary:
+      type: object
+      properties:
+        id:       { type: string }
+        apiKey:
+          type: string
+          description: Public id (hmac) or a masked prefix (simple). Never the secret.
+        label:    { type: string, nullable: true }
+        authMode: { type: string, enum: [hmac, simple] }
+        scopes:   { type: array, items: { type: string } }
+        status:   { type: string, enum: [active, revoked] }
+        createdAt:  { type: string, format: date-time }
+        lastUsedAt: { type: string, format: date-time, nullable: true }
+        revokedAt:  { type: string, format: date-time, nullable: true }
+    Payment:
+      type: object
+      properties:
+        paymentId: { type: string, example: pay_01HZY... }
+        orderId:   { type: string, example: order_789 }
+        amount:    { type: string, example: "50.00" }
+        amountReceived: { type: string, example: "0" }
+        currency:  { type: string, example: USDT }
+        network:   { type: string, enum: [BEP20, TRC20, ERC20, BTC], example: BEP20 }
+        asset:
+          type: string
+          description: >
+            Ledger asset; always equal to `currency`. Both are returned because
+            `currency` is the historical field name and `asset` is what the
+            multi-asset endpoints key on.
+          example: USDT
+        address:   { type: string, description: "BEP20 0x… or TRC20 T… deposit address", example: "0xabc..." }
+        qrCode:    { type: string, description: base64 data URI }
+        status:    { type: string, enum: [waiting,confirming,confirmed,partial,failed,expired,swept] }
+        confirmations: { type: integer }
+        txHash:    { type: string, nullable: true }
+        expiresAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        fiat:
+          $ref: '#/components/schemas/FiatQuote'
+    FiatQuote:
+      type: object
+      description: >
+        The frozen fiat quote, present ONLY on a payment that was priced in fiat.
+        Its absence means the payment was priced directly in crypto.
+
+        The rate is captured when the payment is created and is never recomputed:
+        a customer quoted 52.581765 USDT for ₹5,000 owes that amount whenever they
+        pay, and it is what the QR encodes and what confirmation is measured
+        against. Treat it as an audit record of a decision, not a live price.
+      properties:
+        currency: { type: string, example: INR, description: ISO-4217 code the merchant priced in }
+        amount:   { type: string, example: "5000", description: What the merchant asked for, in that currency }
+        rate:
+          type: string
+          example: "95.09"
+          description: Price of one unit of `asset` in `currency`, at `lockedAt`.
+        source:
+          type: string
+          nullable: true
+          example: coingecko
+          description: >
+            Provenance, including whether the rate was served stale
+            (`coingecko:stale`). A stale quote is legitimate — the gateway
+            prefers a slightly old price to a failed payment — but it is never
+            silent.
+        lockedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the rate was FETCHED upstream, not when it was used.
+    CreatePayment:
+      type: object
+      required: [orderId]
+      description: >
+        Supply EXACTLY ONE pricing basis: `amount` (in crypto) or `fiatAmount` +
+        `fiatCurrency`. Supplying both is a 400 — two prices would mean two
+        answers to what the customer owes.
+      properties:
+        amount:
+          type: string
+          example: "50.00"
+          description: Amount in `asset`. Omit when pricing in fiat.
+        fiatAmount:
+          type: string
+          example: "5000"
+          description: >
+            Price in `fiatCurrency`. Converted to `asset` once, at creation, and
+            frozen onto the payment (see FiatQuote). Returns 503 if no rate can
+            be obtained at all — retry, or price directly in crypto.
+        fiatCurrency:
+          type: string
+          example: INR
+          description: >
+            ISO-4217 code. Must be one this gateway can quote — see GET /rates.
+            Required with `fiatAmount`.
+        orderId:     { type: string, example: order_789 }
+        description: { type: string, example: "Order #789 — Pro plan" }
+        network:
+          type: string
+          enum: [BEP20, TRC20, ERC20, BTC]
+          default: BEP20
+          description: >
+            Chain to settle on. Omit for BEP20 (back-compat). TRC20 requires the
+            gateway to have Tron enabled, else the request returns 400.
+    Invoice:
+      type: object
+      description: >
+        A fiat-denominated document with line items. It mints no public token of
+        its own: the customer-facing capability is `token`, which belongs to the
+        invoice's single-use payment link.
+      properties:
+        id:       { type: string, example: inv_01HZY... }
+        number:   { type: string, example: INV-0001, description: Sequential WITHIN this merchant }
+        customerName:  { type: string, nullable: true }
+        customerEmail: { type: string, nullable: true }
+        currency: { type: string, example: INR }
+        subtotal: { type: string, example: "3000.00" }
+        taxAmount: { type: string, example: "450.00" }
+        total:    { type: string, example: "3450.00" }
+        notes:    { type: string, nullable: true }
+        dueDate:  { type: string, format: date, nullable: true }
+        status:   { type: string, enum: [draft, open, paid, void] }
+        overdue:
+          type: boolean
+          description: >
+            DERIVED from `dueDate` at read time, never stored — no job has to age
+            a row into it, so an invoice cannot get stuck waiting for a clock.
+        asset:    { type: string, nullable: true, description: Pinned settlement asset, or null to let the customer choose }
+        network:  { type: string, nullable: true }
+        token:
+          type: string
+          nullable: true
+          description: >
+            The pay link's token; the URL is {PUBLIC_PANEL_URL}/pay/{token}.
+            Null while the invoice is a draft.
+        paymentId: { type: string, nullable: true, description: The payment that settled it }
+        subscriptionId: { type: string, nullable: true }
+        cycleNumber:    { type: integer, nullable: true }
+        issuedAt: { type: string, format: date-time, nullable: true }
+        sentAt:   { type: string, format: date-time, nullable: true }
+        paidAt:   { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        items:
+          type: array
+          description: Empty in LIST responses; populated by GET /invoices/{id}.
+          items: { $ref: '#/components/schemas/InvoiceItem' }
+    InvoiceItem:
+      type: object
+      properties:
+        id:          { type: string }
+        description: { type: string }
+        quantity:    { type: string, example: "2.5", description: May be fractional }
+        unitPrice:   { type: string, example: "200" }
+        amount:      { type: string, example: "500.00", description: quantity × unitPrice, stored }
+    CreateInvoice:
+      type: object
+      required: [currency, items]
+      properties:
+        currency: { type: string, example: INR, description: Fiat code — see GET /rates }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [description, unitPrice]
+            properties:
+              description: { type: string }
+              quantity:    { type: string, default: "1" }
+              unitPrice:   { type: string }
+        customerName:  { type: string }
+        customerEmail: { type: string, format: email }
+        notes:    { type: string }
+        dueDate:  { type: string, format: date, example: "2026-08-22" }
+        taxAmount: { type: string }
+        asset:    { type: string, description: Pin a settlement asset; requires `network` }
+        network:  { type: string, enum: [BEP20, TRC20, ERC20, BTC] }
+        issue:
+          type: boolean
+          default: true
+          description: Mint the pay link immediately. False saves a draft instead.
+    Subscription:
+      type: object
+      description: >
+        A recurring billing SCHEDULE. Each cycle issues an invoice the customer
+        chooses to pay — there is no stored mandate to pull funds from.
+      properties:
+        id:    { type: string, format: uuid }
+        title: { type: string, example: Pro plan }
+        description:   { type: string, nullable: true }
+        customerName:  { type: string, nullable: true }
+        customerEmail: { type: string, nullable: true }
+        currency: { type: string, example: INR }
+        amount:   { type: string, example: "1499" }
+        asset:    { type: string, nullable: true }
+        network:  { type: string, nullable: true }
+        intervalUnit:  { type: string, enum: [day, week, month, year] }
+        intervalCount: { type: integer, example: 1 }
+        status:
+          type: string
+          enum: [active, paused, canceled, needs_attention]
+          description: >
+            `needs_attention` means the plan fell further behind schedule than
+            `maxCyclesBehind` allows, so billing stopped rather than emitting a
+            burst of back-dated invoices. Resume it to restart on a clean
+            schedule; the missed cycles are not billed.
+        nextRunAt:
+          type: string
+          format: date-time
+          description: >
+            Advanced by exactly one interval from its own previous value, never
+            from now(), so a worker outage does not shift every future billing
+            date.
+        totalCycles:   { type: integer, nullable: true, description: Null = bill indefinitely }
+        cyclesBilled:  { type: integer }
+        dueDays:  { type: integer, description: Days from issue to due date on each invoice }
+        autoSend: { type: boolean, description: Email each invoice; requires customerEmail }
+        lastInvoiceId: { type: string, nullable: true }
+        lastRunAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+    CreateSubscription:
+      type: object
+      required: [title, amount, currency, intervalUnit]
+      properties:
+        title:    { type: string }
+        description: { type: string }
+        amount:   { type: string, example: "1499" }
+        currency: { type: string, example: INR, description: Fiat code; each cycle's crypto amount is quoted when it is paid }
+        intervalUnit:  { type: string, enum: [day, week, month, year] }
+        intervalCount: { type: integer, default: 1, minimum: 1, maximum: 366 }
+        customerName:  { type: string }
+        customerEmail: { type: string, format: email }
+        asset:    { type: string }
+        network:  { type: string, enum: [BEP20, TRC20, ERC20, BTC] }
+        startAt:  { type: string, format: date-time, description: When the FIRST invoice is minted. Defaults to now. }
+        totalCycles: { type: integer }
+        dueDays:  { type: integer, default: 7 }
+        autoSend: { type: boolean }
+
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Dashboard login (merchant or admin). Returns JWT (+ MFA challenge for admins).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:    { type: string }
+                password: { type: string }
+                mfaToken: { type: string, description: TOTP, required for admins }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:  { type: string }
+                  refreshToken: { type: string }
+                  mfaRequired:  { type: boolean }
+                  emailVerified:
+                    type: boolean
+                    description: >
+                      false for a self-registered merchant who has not clicked
+                      their confirmation link. They can sign in, but the client
+                      is still `pending` and cannot transact.
+                  clientStatus: { type: string, nullable: true }
+
+  /assets:
+    get:
+      tags: [Payments]
+      summary: Which (network, asset) pairs this gateway can settle
+      description: >
+        Companion to /networks. An ASSET is the pair (network, symbol): USDT on
+        BEP20 and USDT on TRC20 are different assets with different contracts and
+        different decimals, and balances never sum across them.
+
+
+        Drive every coin picker from this — it returns only what the deployment
+        will actually accept, so a merchant cannot select something that 400s at
+        submit. Contract addresses are deliberately NOT exposed; they are an
+        implementation detail whose wrongness loses funds.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  assets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        symbol:    { type: string, example: USDC }
+                        network:   { type: string, enum: [BEP20, TRC20, ERC20, BTC] }
+                        name:      { type: string, example: USD Coin }
+                        decimals:  { type: integer, example: 18 }
+                        minAmount: { type: string, example: "1.0" }
+                        isNative:
+                          type: boolean
+                          description: >
+                            True for the chain's OWN coin (BNB on BEP20, TRX on
+                            TRC20) rather than a token on it. Surface this to a
+                            customer: a native coin has no contract address to
+                            verify, and withdrawing one from an exchange means
+                            selecting the matching network or losing it.
+
+  /payment-links:
+    get:
+      tags: [Payment links]
+      summary: List this merchant's hosted-checkout links
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      responses:
+        "200": { description: OK }
+    post:
+      tags: [Payment links]
+      summary: Create a shareable checkout link
+      description: >
+        Returns a `token`. The customer-facing URL is
+        `<panel>/pay/<token>`. Omit `amount` for an open amount (tips,
+        donations). Pinning `asset` also requires `network` — the same symbol on
+        two chains is two different assets.
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title:       { type: string, maxLength: 120 }
+                description: { type: string, maxLength: 500 }
+                amount:      { type: string, description: Omit for an open amount }
+                asset:       { type: string }
+                network:     { type: string, enum: [BEP20, TRC20, ERC20, BTC] }
+                reusable:    { type: boolean, default: true }
+                maxUses:     { type: integer, minimum: 1 }
+                expiresAt:   { type: string, format: date-time }
+      responses:
+        "201": { description: Created }
+        "400": { description: Invalid amount, or an asset this gateway cannot settle }
+
+  /pay/{token}:
+    get:
+      tags: [Payment links]
+      summary: "PUBLIC: resolve a checkout link (no authentication)"
+      description: >
+        Reachable by anyone holding the link URL — the token IS the capability.
+        Returns the business name, amount and accepted assets, and NOTHING that
+        identifies the merchant further: no id, email, wallet, balance, webhook
+        or keys. `usable: false` with `unusableReason` means expired, disabled or
+        used up; render that as a dead end rather than an error.
+      parameters:
+        - { in: path, name: token, required: true, schema: { type: string } }
+      responses:
+        "200": { description: OK }
+        "404": { description: Unknown link, or the merchant is not approved }
+        "429": { description: Rate limited }
+
+  /pay/{token}/payments:
+    post:
+      tags: [Payment links]
+      summary: "PUBLIC: start a payment from a link"
+      description: >
+        Claims one use of the link under a row lock, so a single-use link cannot
+        be claimed twice by concurrent opens. Anything the link pins (amount,
+        asset, network) overrides the request body — a crafted request cannot
+        reduce a fixed price or pay in an excluded asset.
+      parameters:
+        - { in: path, name: token, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                asset:   { type: string, description: Only used if the link does not pin one }
+                network: { type: string }
+                amount:  { type: string, description: Required only for open-amount links }
+      responses:
+        "201": { description: Deposit address and QR }
+        "400": { description: Link expired, disabled, used up, or no amount given }
+        "429": { description: Rate limited }
+
+  /pay/{token}/payments/{paymentId}:
+    get:
+      tags: [Payment links]
+      summary: "PUBLIC: poll a payment's status"
+      description: >
+        Scoped by the link token on purpose: a leaked payment id alone reveals
+        nothing, and payments created through the API (which have no link) are
+        never readable here.
+      parameters:
+        - { in: path, name: token, required: true, schema: { type: string } }
+        - { in: path, name: paymentId, required: true, schema: { type: string } }
+      responses:
+        "200": { description: OK }
+        "404": { description: Not a payment of this link }
+
+  /pay/{token}/invoice:
+    get:
+      tags: [Invoices]
+      summary: "PUBLIC: the invoice behind a pay link"
+      description: >
+        An invoice's pay link IS its capability, so whoever holds the URL is
+        exactly who should be able to read the document. Returns 404 when the
+        link is an ordinary checkout link rather than an invoice — the checkout
+        page probes this for every link and renders line items only if it gets
+        something back.
+
+        The response carries the document and the merchant's business name, and
+        nothing else about the merchant: no id, email, wallet, balance, webhook,
+        or other invoices.
+      parameters:
+        - { in: path, name: token, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  number:       { type: string }
+                  merchantName: { type: string }
+                  customerName: { type: string, nullable: true }
+                  currency:     { type: string }
+                  subtotal:     { type: string }
+                  taxAmount:    { type: string }
+                  total:        { type: string }
+                  notes:        { type: string, nullable: true }
+                  dueDate:      { type: string, format: date, nullable: true }
+                  status:       { type: string, enum: [open, paid, void] }
+                  overdue:      { type: boolean }
+                  issuedAt:     { type: string, format: date-time, nullable: true }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        description: { type: string }
+                        quantity:    { type: string }
+                        unitPrice:   { type: string }
+                        amount:      { type: string }
+        "404": { description: This link has no invoice, or does not exist }
+
+  /rates:
+    get:
+      tags: [Rates]
+      summary: Exchange rates for every fiat currency this gateway can price in
+      description: >
+        Unauthenticated, like /networks and /assets: it publishes public market
+        prices and this gateway's currency list, and reveals nothing about any
+        merchant.
+
+        `source` and `ageSeconds` are part of the contract, not debug output. A
+        caller displaying a converted price is entitled to know it is looking at
+        a stale quote — the gateway deliberately serves a slightly old rate
+        rather than failing, and says so.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rates:
+                    type: object
+                    description: rates[FIAT][SYMBOL] = price of one SYMBOL in FIAT.
+                    example: { USD: { USDT: "0.999498" }, INR: { USDT: "95.09" } }
+                  currencies: { type: array, items: { type: string }, example: [USD, INR, EUR] }
+                  source:     { type: string, example: coingecko, description: "`coingecko:stale` when served past freshness" }
+                  ageSeconds: { type: integer, example: 12 }
+                  fetchedAt:  { type: string, format: date-time }
+        "503":
+          description: >
+            No rate is available and the last cached one is too old to quote
+            from. Payments priced directly in crypto are unaffected.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /invoices:
+    get:
+      tags: [Invoices]
+      summary: List invoices
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      parameters:
+        - { in: query, name: status, schema: { type: string, enum: [draft, open, paid, void] } }
+        - { in: query, name: limit, schema: { type: integer, default: 100, maximum: 200 } }
+      responses:
+        "200":
+          description: OK. `items` is empty here — use GET /invoices/{id} for line items.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Invoice' } }
+    post:
+      tags: [Invoices]
+      summary: Create an invoice
+      description: >
+        Invoicing is money-IN, so an API key of either mode may do it. Issuing
+        mints a single-use payment link whose token is the customer's pay URL.
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateInvoice' }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Invoice' }
+        "400": { description: Bad request }
+
+  /invoices/{id}:
+    get:
+      tags: [Invoices]
+      summary: Retrieve an invoice, with line items
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Invoice' }
+        "404": { description: Not found }
+
+  /invoices/{id}/send:
+    post:
+      tags: [Invoices]
+      summary: Email the invoice to its customer
+      description: >
+        Rate limited per merchant per hour, on top of the usual key limiter:
+        this is the only route that sends mail to an address the caller chooses,
+        with content the caller wrote, which is a spam relay if left unbounded.
+
+        `sent: false` means the gateway has no SMTP configured and logged the
+        message instead — the documented development behaviour, not a failure.
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent: { type: boolean }
+                  to:   { type: string }
+        "400": { description: Still a draft, voided, or no customer email }
+        "429": { description: Too many invoices sent this hour }
+
+  /invoices/{id}/void:
+    post:
+      tags: [Invoices]
+      summary: Withdraw an invoice and disable its pay link
+      description: >
+        Both happen together. An invoice marked void whose link still worked
+        would be a withdrawn demand a customer could still pay. A PAID invoice
+        cannot be voided — the money has moved.
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Invoice' }
+        "400": { description: Already paid }
+
+  /subscriptions:
+    get:
+      tags: [Subscriptions]
+      summary: List subscriptions
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Subscription' } }
+    post:
+      tags: [Subscriptions]
+      summary: Create a recurring billing plan
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSubscription' }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+        "400": { description: Bad request }
+
+  /subscriptions/{id}:
+    get:
+      tags: [Subscriptions]
+      summary: Retrieve a subscription
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+        "404": { description: Not found }
+
+  /subscriptions/{id}/invoices:
+    get:
+      tags: [Subscriptions]
+      summary: The invoices this plan has issued
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: OK }
+        "404": { description: Not found }
+
+  /subscriptions/{id}/pause:
+    post:
+      tags: [Subscriptions]
+      summary: Stop billing without cancelling
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+
+  /subscriptions/{id}/resume:
+    post:
+      tags: [Subscriptions]
+      summary: Resume billing (also the way out of needs_attention)
+      description: >
+        Resuming does NOT back-bill. `nextRunAt` moves forward to the next
+        boundary at or after now, so a plan paused for two months does not fire
+        two months of invoices the moment it comes back.
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+
+  /subscriptions/{id}/cancel:
+    post:
+      tags: [Subscriptions]
+      summary: Cancel permanently
+      description: Terminal. A cancelled plan is never reactivated, only replaced.
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+
+  /auth/signup-status:
+    get:
+      tags: [Auth]
+      summary: Is self-registration open on this gateway?
+      description: >
+        Unauthenticated capability probe. The client panel calls it to decide
+        whether to render signup links at all. When false, every route below
+        returns 404 rather than 403 — a closed gateway does not advertise the
+        feature.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled: { type: boolean }
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Create an UNVERIFIED merchant account (self-registration)
+      description: >
+        Creates a user (email_verified=false) and a client with status
+        'pending'. Mints NO API key — the key is created from the dashboard
+        after a settlement wallet exists.
+
+
+        ENUMERATION SAFETY: always answers 202 with the same message whether or
+        not the address is already registered. A duplicate causes a notice to be
+        emailed to the real owner and nothing else. Never branch on the response.
+
+
+        Rate limited to SIGNUP_RATE_LIMIT_MAX per IP per hour.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, businessName]
+              properties:
+                email:        { type: string, format: email }
+                password:     { type: string, minLength: 10 }
+                businessName: { type: string, minLength: 2, maxLength: 120 }
+                websiteUrl:
+                  type: string
+                  description: Must start with http:// or https://
+                country:      { type: string, maxLength: 80 }
+      responses:
+        "202":
+          description: Accepted (says nothing about whether the address existed)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  message: { type: string }
+        "404": { description: Self-registration disabled on this gateway }
+        "429": { description: Rate limited }
+
+  /auth/verify-email:
+    post:
+      tags: [Auth]
+      summary: Consume the emailed confirmation token; approves and signs in
+      description: >
+        Single use, expires after EMAIL_VERIFY_TTL_HOURS. On success sets
+        email_verified, flips the client 'pending' -> 'approved' with
+        approved_by = NULL, and returns a token pair so the merchant lands in
+        the dashboard rather than at another login form.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        "200":
+          description: Verified and signed in
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:   { type: string }
+                  refreshToken:  { type: string }
+                  emailVerified: { type: boolean }
+        "400": { description: Token invalid, already used, or expired }
+
+  /auth/resend-verification:
+    post:
+      tags: [Auth]
+      summary: Re-send the confirmation link (enumeration-safe, always 202)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "202": { description: Accepted }
+        "429": { description: Rate limited }
+
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Send a password reset link (enumeration-safe, always 202)
+      description: >
+        Available even when SIGNUP_ENABLED=false — a gateway that has closed
+        registration still has merchants who forget passwords.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "202": { description: Accepted }
+        "429": { description: Rate limited }
+
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Consume a reset token and set a new password
+      description: >
+        Single use, expires after PASSWORD_RESET_TTL_MINUTES. Also marks the
+        address verified — proving inbox control is at least as strong as
+        clicking the original confirmation link.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, newPassword]
+              properties:
+                token:       { type: string }
+                newPassword: { type: string, minLength: 10 }
+      responses:
+        "200": { description: Password updated }
+        "400": { description: Token invalid, already used, or expired }
+
+  /account/api-keys:
+    get:
+      tags: [Account]
+      summary: List this merchant's API keys (never a secret)
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      parameters:
+        - in: query
+          name: includeRevoked
+          schema: { type: string, enum: ["true"] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApiKeySummary' }
+    post:
+      tags: [Account]
+      summary: Create an API key; the secret is returned exactly ONCE
+      description: >
+        DASHBOARD SESSION ONLY — an API key cannot mint another API key.
+        Requesting payouts:write on a simple (bearer) key is a 400, not a silent
+        downgrade.
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:    { type: string, maxLength: 60 }
+                authMode: { type: string, enum: [hmac, simple], default: hmac }
+                scopes:
+                  type: array
+                  items: { type: string, enum: [payments:read, payments:write, payouts:write] }
+      responses:
+        "201":
+          description: Created. apiSecret appears here and nowhere else, ever.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:        { type: string }
+                  apiKey:    { type: string }
+                  apiSecret: { type: string }
+                  authMode:  { type: string, enum: [hmac, simple] }
+                  scopes:    { type: array, items: { type: string } }
+        "400": { description: Invalid scope for the chosen mode, or key limit reached }
+        "401": { description: Called with an API key instead of a dashboard session }
+
+  /account/api-keys/{id}:
+    delete:
+      tags: [Account]
+      summary: Revoke an API key (dashboard session only)
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Revoked }
+        "404": { description: Not found or already revoked }
+
+  /account/api-keys/primary:
+    get:
+      tags: [Account]
+      summary: The key the dashboard displays (never a secret)
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKeySummary' }
+        "404": { description: No active key }
+
+  /account/api-keys/regenerate:
+    post:
+      tags: [Account]
+      summary: Roll a key's secret (dashboard session only)
+      description: >
+        DASHBOARD SESSION ONLY, for the same reason as creation — a leaked API
+        key must not be able to mint itself a fresh credential. The new secret is
+        returned exactly once.
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Rolled. apiSecret appears here and nowhere else, ever.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:        { type: string }
+                  apiKey:    { type: string }
+                  apiSecret: { type: string }
+        "401": { description: Called with an API key instead of a dashboard session }
+
+  /account/settings:
+    get:
+      tags: [Account]
+      summary: Webhook URL, payout wallets and preferences
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      responses:
+        "200": { description: OK }
+    put:
+      tags: [Account]
+      summary: Update settings (dashboard session only)
+      description: >
+        DASHBOARD SESSION ONLY. This is the endpoint that decides where money
+        lands, so no API key of either mode may reach it — that rule is what
+        stops a stolen key from redirecting settlements.
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200": { description: Updated }
+        "401": { description: Called with an API key instead of a dashboard session }
+
+  /account/commission:
+    get:
+      tags: [Account]
+      summary: The commission agreement currently applied to this account
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      responses:
+        "200": { description: OK }
+
+  /account/change-password:
+    post:
+      tags: [Account]
+      summary: Change the dashboard password (dashboard session only)
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200": { description: Changed }
+        "400": { description: Current password wrong, or new password too weak }
+        "401": { description: Called with an API key instead of a dashboard session }
+
+  /account/analytics:
+    get:
+      tags: [Account]
+      summary: Aggregated payment figures for this merchant's dashboard
+      description: >
+        Server-side aggregates over a rolling window, so a caller does not have
+        to page the whole payment history to draw a chart.
+
+
+        AMOUNTS ARE STRINGS. They are numeric(38,18) in the database and JSON
+        numbers are IEEE-754 doubles, so parsing them into a number loses
+        precision. Counts are integers.
+
+
+        `byAsset` is the AUTHORITATIVE breakdown — one row per (network, asset),
+        never summed, because balances are not fungible across chains or assets.
+        The `...Approx` fields in `totals` are convenience sums ACROSS assets and
+        are named accordingly: they are not a balance and are not withdrawable.
+        Use GET /balance?all=true for withdrawable figures.
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      parameters:
+        - in: query
+          name: days
+          description: Window length. Bounded to keep the query cheap.
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  range:
+                    type: object
+                    properties:
+                      days: { type: integer }
+                      from: { type: string, format: date-time }
+                      to:   { type: string, format: date-time }
+                  totals:
+                    type: object
+                    properties:
+                      settledVolumeApprox:  { type: string, description: Cross-asset sum. NOT a balance. }
+                      settledCount:         { type: integer }
+                      inFlightCount:        { type: integer }
+                      inFlightAmountApprox: { type: string }
+                      failedCount:          { type: integer }
+                      expiredCount:         { type: integer }
+                      partialCount:         { type: integer }
+                      successRate:
+                        type: number
+                        description: >
+                          Settled as a percentage of payments that reached a
+                          terminal state. In-flight payments are excluded from
+                          both sides.
+                      previousSettledVolumeApprox: { type: string }
+                      volumeChangePct:
+                        type: number
+                        nullable: true
+                        description: >
+                          null when there is no prior volume to compare against.
+                          "No baseline" and "no change" are different facts.
+                  byStatus:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        status: { type: string }
+                        count:  { type: integer }
+                  byAsset:
+                    type: array
+                    description: One row per (network, asset). Never sum across rows.
+                    items:
+                      type: object
+                      properties:
+                        network: { type: string }
+                        asset:   { type: string }
+                        count:   { type: integer }
+                        volume:  { type: string }
+                  timeseries:
+                    type: array
+                    description: One bucket per day; days with no activity are present with 0.
+                    items:
+                      type: object
+                      properties:
+                        date:   { type: string, example: "2026-08-08" }
+                        volume: { type: string }
+                        count:  { type: integer }
+        "400": { description: days outside 1..365 }
+
+  /account/webhook-logs:
+    get:
+      tags: [Account]
+      summary: Webhook delivery attempts, with status codes and retry schedule
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      parameters:
+        - { in: query, name: page,  schema: { type: integer, default: 1 } }
+        - { in: query, name: limit, schema: { type: integer, default: 20 } }
+      responses:
+        "200": { description: OK }
+
+  /account/unexpected-deposits:
+    get:
+      tags: [Account]
+      summary: Funds received at an address that was not expecting them
+      description: >
+        Deposits that arrived after a payment expired, or in an asset the
+        payment was not for. They are recorded rather than silently credited,
+        because crediting the wrong asset is unrecoverable.
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      responses:
+        "200": { description: OK }
+
+  /account/unexpected-deposits/{id}/recover:
+    post:
+      tags: [Account]
+      summary: Attempt to sweep an unexpected deposit (dashboard session only)
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        "202": { description: Recovery attempt queued }
+        "401": { description: Called with an API key instead of a dashboard session }
+
+  /networks:
+    get:
+      tags: [Rates]
+      summary: Which chains this gateway can settle on right now
+      description: >
+        Unauthenticated capability probe, like /assets and /rates. Panels call it
+        so they can offer only networks that will actually succeed, instead of
+        erroring on submit.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  networks:
+                    type: array
+                    items: { type: string, example: BEP20 }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Exchange a refresh token for a new access token
+      responses:
+        "200": { description: OK }
+        "401": { description: Refresh token invalid or expired }
+
+  /account/onboarding:
+    get:
+      tags: [Account]
+      summary: Get-started checklist state (derived, not stored flags)
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  steps:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:          { type: string }
+                        title:       { type: string }
+                        description: { type: string }
+                        done:        { type: boolean }
+                        href:        { type: string, nullable: true }
+                        required:    { type: boolean }
+                  complete:          { type: boolean }
+                  completedRequired: { type: integer }
+                  totalRequired:     { type: integer }
+                  warnings:
+                    type: object
+                    properties:
+                      simpleKeyWithoutIpAllowlist: { type: boolean }
+
+  /payments:
+    post:
+      tags: [Payments]
+      summary: Create a payment (generates a fresh BEP20 or TRC20 deposit address + QR)
+      security: [{ ApiKey: [], Signature: [], Timestamp: [] }]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePayment' }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        "400": { description: "Unsupported/disabled network", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "401": { description: Bad signature, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    get:
+      tags: [Payments]
+      summary: List payments (paginated)
+      security: [{ ApiKey: [], Signature: [], Timestamp: [] }]
+      parameters:
+        - { in: query, name: status, schema: { type: string } }
+        - { in: query, name: page,   schema: { type: integer, default: 1 } }
+        - { in: query, name: limit,  schema: { type: integer, default: 25 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Payment' } }
+                  page: { type: integer }
+                  total: { type: integer }
+
+  /payments/{id}:
+    get:
+      tags: [Payments]
+      summary: Retrieve a payment
+      security: [{ ApiKey: [], Signature: [], Timestamp: [] }]
+      parameters: [{ in: path, name: id, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Payment' } } } }
+        "404": { description: Not found }
+
+  /balance:
+    get:
+      tags: [Account]
+      summary: Merchant available/pending balance
+      security: [{ ApiKey: [], Signature: [], Timestamp: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  available: { type: string }
+                  pending:   { type: string }
+                  currency:  { type: string, example: USDT }
+
+  /payouts:
+    get:
+      tags: [Payouts]
+      summary: List payouts
+      description: >
+        Readable with any credential. Note the asymmetry with POST below:
+        reading settlement history is a read, but INITIATING one moves money and
+        so is restricted to HMAC-signed keys.
+      security: [{ BearerAuth: [] }, { ApiKey: [], Signature: [], Timestamp: [] }, { ApiKeyBearer: [] }]
+      parameters:
+        - { in: query, name: page,  schema: { type: integer, default: 1 } }
+        - { in: query, name: limit, schema: { type: integer, default: 20 } }
+      responses:
+        "200": { description: OK }
+    post:
+      tags: [Payouts]
+      summary: Request a payout to the configured payout wallet
+      security: [{ ApiKey: [], Signature: [], Timestamp: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { type: string }
+                network:
+                  type: string
+                  enum: [BEP20, TRC20, ERC20, BTC]
+                  default: BEP20
+                  description: >
+                    Chain to settle on. TRC20 requires a payout_wallet_trc20 to be
+                    configured and Tron enabled server-side, else returns 400.
+      responses:
+        "202": { description: Accepted (queued) }
+        "400": { description: "No wallet for network / amount exceeds balance", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /admin/clients:
+    post:
+      tags: [Admin]
+      summary: Create / onboard a client
+      security: [{ BearerAuth: [] }]
+      responses: { "201": { description: Created } }
+  /admin/clients/{id}:
+    put:
+      tags: [Admin]
+      summary: Approve / suspend / update a client, or regenerate API keys
+      security: [{ BearerAuth: [] }]
+      parameters: [{ in: path, name: id, required: true, schema: { type: string } }]
+      responses: { "200": { description: OK } }
+  /admin/commission:
+    put:
+      tags: [Admin]
+      summary: Set a client's commission (creates a new versioned row)
+      security: [{ BearerAuth: [] }]
+      responses: { "200": { description: OK } }
+  /admin/transactions:
+    get:
+      tags: [Admin]
+      summary: Global transaction monitoring
+      security: [{ BearerAuth: [] }]
+      responses: { "200": { description: OK } }
+  /admin/payout:
+    post:
+      tags: [Admin]
+      summary: Manually trigger a payout / settlement
+      security: [{ BearerAuth: [] }]
+      responses: { "202": { description: Accepted } }
+
+webhooks:
+  paymentConfirmed:
+    post:
+      summary: Sent to the client's webhook_url when a payment changes state
+      description: >
+        Delivered for payment.created, payment.confirming, payment.confirmed,
+        payment.expired, payment.reverted, payment.swept, payout.completed and
+        invoice.paid. The hex signature is sent both in the `signature` body
+        field and in the `X-Gateway-Signature` header; the event name is also in
+        `X-Gateway-Event`.
+
+
+        VERIFYING — the signature does NOT cover the raw bytes. It is
+        HMAC-SHA256, keyed by the client's webhook secret, over this same JSON
+        object with `signature` set to the empty string, serialized compactly
+        (no spaces) in the key order below. To verify: parse the body, set
+        `signature` to "", re-serialize preserving key order, HMAC that, and
+        compare to the delivered value in constant time. Hashing the raw body
+        will never match, because the raw body already contains the signature.
+
+
+        Deliveries retry with exponential backoff until they receive a 2xx, so
+        the same event can arrive more than once — fulfil idempotently.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              # Key order is part of the contract: it is the order the signature
+              # was computed over. Do not reorder these properties.
+              properties:
+                event:     { type: string, example: payment.confirmed }
+                paymentId: { type: string }
+                orderId:   { type: string }
+                amount:    { type: string }
+                txHash:    { type: string, nullable: true }
+                status:    { type: string }
+                signature:
+                  type: string
+                  description: >
+                    Hex HMAC-SHA256 over this payload with `signature` set to "".
+                    See the description above — it is NOT a hash of the raw body.
+      responses:
+        "200": { description: Acknowledged }

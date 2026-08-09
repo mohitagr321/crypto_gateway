@@ -1,0 +1,91 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: gateway
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    command: node dist/index.js
+    env_file:
+      - .env
+      - .env.docker   # overrides DATABASE_URL/REDIS_URL to service hostnames
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports: ["4000:4000"]
+    restart: unless-stopped
+
+  worker:
+    build: ./backend
+    command: node dist/workers/index.js
+    env_file:
+      - .env
+      - .env.docker
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  listener:
+    build: ./backend
+    command: node dist/blockchain/listener.js
+    env_file:
+      - .env
+      - .env.docker
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  # TRC20 (Tron) listener. Idles as a harmless no-op while TRON_ENABLED=false, so
+  # it is safe to keep declared; it begins polling once Tron is configured + on.
+  listener-tron:
+    build: ./backend
+    command: node dist/blockchain/tronListener.js
+    env_file:
+      - .env
+      - .env.docker
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  admin-panel:
+    build: ./admin-panel
+    ports: ["5173:80"]
+    depends_on: [api]
+
+  client-panel:
+    build: ./client-panel
+    ports: ["5174:80"]
+    depends_on: [api]
+
+volumes:
+  pgdata:
+  redisdata:

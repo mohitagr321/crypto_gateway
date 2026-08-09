@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+build/
+
+# Environment — NEVER commit. Holds the HD mnemonic and hot-wallet keys.
+.env
+.env.*
+!.env.example
+*.local
+
+# Legacy provisioning scripts. Superseded by deploy-crypto-gateway.sh, which
+# reads secrets from an existing .env instead of embedding them. These two
+# hardcode a live HD mnemonic and gas-station private key, so they must never
+# reach git history. Kept on disk only as a local backup of those values.
+deploy_crypto.sh
+server-setup.sh
+
+# Logs / runtime
+*.log
+npm-debug.log*
+yarn-error.log*
+pids/
+*.pid
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Test / coverage
+coverage/

@@ -1,0 +1,9 @@
+# Local override: remap published host ports to avoid conflicts with
+# host-native postgres/redis already listening on 5432/6379.
+# Inter-service traffic still uses the Docker network (postgres:5432 / redis:6379).
+# `!override` replaces the base ports list instead of appending to it.
+services:
+  postgres:
+    ports: !override ["55432:5432"]
+  redis:
+    ports: !override ["56379:6379"]

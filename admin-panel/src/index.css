@@ -1,0 +1,118 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  html {
+    /* Tell the BROWSER which theme is active, not just our own CSS. Without
+       this, an operator whose OS is dark but who picks the light theme in-app
+       gets UA-rendered controls (input fills, scrollbars, date pickers,
+       autofill) painted dark on our white cards. Mirrors the client panel. */
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-gray-50 text-gray-900 antialiased;
+    @apply dark:bg-gray-950 dark:text-gray-100;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  * {
+    @apply border-gray-200 dark:border-gray-800;
+  }
+
+  /* Thin, theme-aware scrollbars, matching the client panel. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(148 163 184 / 0.5) transparent;
+  }
+}
+
+@layer components {
+  /* Raised surface rather than an outlined rectangle — the border-only
+     treatment is why this panel read flat next to the client panel. */
+  .card {
+    @apply rounded-xl border border-gray-200 bg-white shadow-soft dark:border-gray-800 dark:bg-gray-900;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm outline-none
+      transition placeholder:text-gray-400
+      focus:border-brand-500 focus:ring-2 focus:ring-brand-500/30
+      dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder:text-gray-500;
+  }
+
+  .label {
+    @apply mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300;
+  }
+
+  /* All six states, and a `focus-visible` ring so a mouse click does not leave
+     one behind while a Tab always shows one. */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium
+      outline-none transition active:scale-[0.98]
+      focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-white
+      disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100
+      dark:focus-visible:ring-offset-gray-900;
+  }
+
+  .btn-primary {
+    @apply btn bg-brand-600 text-white shadow-soft hover:bg-brand-700 hover:shadow-lift focus-visible:ring-brand-500;
+  }
+
+  .btn-secondary {
+    @apply btn border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 focus-visible:ring-brand-500
+      dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700;
+  }
+
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-500;
+  }
+
+  .btn-ghost {
+    @apply btn text-gray-600 hover:bg-gray-100 focus-visible:ring-brand-500 dark:text-gray-300 dark:hover:bg-gray-800;
+  }
+
+  /* Money and any figure read down a column. Tabular numerals hold digits at a
+     fixed width so amounts line up instead of jittering row to row. */
+  .num {
+    @apply tabular-nums;
+  }
+
+  /* Loading placeholder with a sweep rather than a static grey block. */
+  .skeleton {
+    @apply relative overflow-hidden rounded-lg bg-gray-100 dark:bg-gray-800/70;
+  }
+  .skeleton::after {
+    @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r
+           from-transparent via-white/50 to-transparent dark:via-white/5;
+    content: '';
+  }
+}
+
+/* Custom scrollbar for a tidy look */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-gray-300 dark:bg-gray-700;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+  }
+}

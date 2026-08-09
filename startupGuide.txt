@@ -1,0 +1,6 @@
+docker compose ps                    # see status of all services
+docker compose logs -f api           # tail API logs (or: worker, listener, admin-panel)
+docker compose restart api           # restart one service
+docker compose down                  # stop everything (keeps data)
+docker compose down -v               # stop + wipe DB/redis volumes (full reset)
+docker compose up -d --build         # rebuild after code changes

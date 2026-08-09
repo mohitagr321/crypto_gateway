@@ -1,0 +1,455 @@
+/* Inter Variable, self-hosted. Tailwind has named Inter as the sans stack since
+   the beginning, but nothing ever loaded it — every screen silently fell back to
+   system-ui. A variable font is one file for the whole weight range, so the
+   display sizes below can use weights the static cut never had. */
+@import '@fontsource-variable/inter';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: Inter, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    /* Tell the BROWSER which theme is active, not just our own CSS.
+       Without this, a user whose OS is in dark mode but who selects the light
+       theme in-app gets UA-rendered controls (input fills, scrollbars, date
+       pickers, autofill) painted dark on our white cards — the input on the
+       checkout page rendered as a dark grey block. `color-scheme` is the only
+       thing that reaches those. */
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+  }
+  /* Thin, theme-aware scrollbars. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(148 163 184 / 0.5) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-slate-300 dark:bg-slate-700;
+  }
+}
+
+@layer components {
+  /* The dashboard's primary surface. Slightly warmer border and a soft shadow
+     so cards read as raised rather than as outlined rectangles — the old
+     border-only treatment is why the panel looked flat in dark mode. */
+  .card {
+    @apply rounded-2xl border border-slate-200/90 bg-white shadow-soft
+           dark:border-slate-800 dark:bg-slate-900/70;
+  }
+  /* Interactive card (a link, a tile you can click). */
+  .card-hover {
+    @apply card transition duration-200 hover:-translate-y-0.5 hover:shadow-lift
+           hover:border-slate-300 dark:hover:border-slate-700;
+  }
+  .input {
+    @apply w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-soft outline-none transition placeholder:text-slate-400 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-100;
+  }
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300;
+  }
+  /* Every control ships all six states: default, hover, focus, active,
+     disabled, loading. The ring is `focus-visible`, not `focus` — a mouse
+     click should not leave a ring behind, but a Tab must always show one. */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition duration-150 outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-50 active:scale-[0.98] dark:focus-visible:ring-offset-slate-900;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white shadow-soft hover:bg-brand-700 hover:shadow-lift focus-visible:ring-brand-500;
+  }
+  .btn-secondary {
+    @apply btn border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 focus-visible:ring-brand-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700;
+  }
+  .btn-ghost {
+    @apply btn text-slate-600 hover:bg-slate-100 focus-visible:ring-brand-500 dark:text-slate-300 dark:hover:bg-slate-800;
+  }
+  /* Destructive. Red here is a WARNING about the action, which is the same
+     meaning red carries on a failed payment — consistent, not a collision. */
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-500;
+  }
+
+  /* Money and any figure read in a column. Tabular numerals keep digits at a
+     fixed width so amounts line up vertically instead of jittering. */
+  .num {
+    @apply tabular-nums;
+  }
+
+  /* Inline code inside prose — an identifier, header or literal the reader may
+     need to type exactly. Distinct from CodeBlock, which is for whole snippets.
+     Slate rather than brand: it is a noun, not something you can click. */
+  .code {
+    @apply rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11.5px] text-slate-800
+           dark:bg-slate-800 dark:text-slate-200;
+  }
+
+  /* Section label above a group of cards. */
+  .section-label {
+    @apply text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500;
+  }
+
+  /* Bento tile. Spans are applied per instance so importance drives size —
+     the grid itself stays dumb. */
+  .tile {
+    @apply card flex flex-col p-5 sm:p-6;
+  }
+
+  /* Loading placeholder with a sweep, rather than a static grey block. */
+  .skeleton {
+    @apply relative overflow-hidden rounded-xl bg-slate-100 dark:bg-slate-800/70;
+  }
+  .skeleton::after {
+    @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r
+           from-transparent via-white/50 to-transparent dark:via-white/5;
+    content: '';
+  }
+
+  /* ===================================================================
+   * MARKETING LAYER
+   * Used only by the public routes (landing, pricing, signup funnel).
+   * The dashboard classes above are untouched — the signed-in product must
+   * look exactly as it did. Everything here is additive.
+   * =================================================================== */
+
+  .btn-lg {
+    @apply btn px-6 py-3 text-base;
+  }
+  .btn-primary-lg {
+    @apply btn-lg bg-brand-600 text-white shadow-lg shadow-brand-600/20
+           hover:bg-brand-700 hover:shadow-brand-600/30 focus:ring-brand-500;
+  }
+  .btn-secondary-lg {
+    @apply btn-lg border border-slate-300 bg-white/80 text-slate-700 backdrop-blur
+           hover:bg-white dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-200
+           dark:hover:bg-slate-800;
+  }
+
+  /* Frosted panel that reads on both the mesh gradient and a flat background. */
+  .glass-card {
+    @apply rounded-2xl border border-slate-200/70 bg-white/70 shadow-sm backdrop-blur-xl
+           dark:border-slate-800/70 dark:bg-slate-900/60;
+  }
+
+  .section {
+    @apply mx-auto w-full max-w-6xl px-5 py-16 sm:px-8 sm:py-24;
+  }
+  .eyebrow {
+    @apply text-xs font-semibold uppercase tracking-[0.14em] text-brand-600 dark:text-brand-400;
+  }
+  /* Display type. `clamp()` rather than breakpoint jumps so the headline scales
+     continuously with the viewport — on a 360px phone it lands at 2.5rem, on a
+     wide desktop at 5.5rem, with no step where it looks wrong. Optical sizing
+     and tight tracking are what a variable font buys us; at display sizes the
+     default letter-spacing reads loose and cheap. */
+  .h-display {
+    /* Tuned so the primary CTA stays ABOVE THE FOLD on a 1440x900 laptop and on
+       a 360x640 phone. An oversized hero that pushes the button off-screen
+       looks impressive in a screenshot and costs signups in practice. */
+    font-size: clamp(2.25rem, 1.5rem + 3vw, 4.5rem);
+    line-height: 1.02;
+    letter-spacing: -0.035em;
+    font-weight: 680;
+    font-optical-sizing: auto;
+    text-wrap: balance;
+    @apply text-slate-900 dark:text-slate-50;
+  }
+  .h-section {
+    font-size: clamp(1.875rem, 1.1rem + 2.4vw, 3rem);
+    line-height: 1.06;
+    letter-spacing: -0.028em;
+    font-weight: 660;
+    text-wrap: balance;
+    @apply text-slate-900 dark:text-slate-50;
+  }
+  .lede {
+    @apply text-lg leading-relaxed text-slate-600 dark:text-slate-400;
+  }
+
+  /* Small capability pill (e.g. "BEP20 · live"). */
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-slate-200
+           bg-white/70 px-3 py-1 text-xs font-medium text-slate-600 backdrop-blur
+           dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300;
+  }
+
+  /* Gradient text for the one phrase that carries the headline. Travels
+     brand -> accent (indigo -> violet). It must never reach green: on a
+     payments page green is reserved for "funds arrived". */
+  .text-gradient {
+    @apply bg-gradient-to-br from-brand-500 via-brand-600 to-accent-600
+           bg-clip-text text-transparent dark:from-brand-300 dark:via-brand-400 dark:to-accent-400;
+  }
+
+  /* ===================================================================
+   * SEMANTIC COLOUR — meaning, never decoration.
+   *
+   *   brand (indigo)  the action you can take
+   *   emerald         money arrived / verified / healthy
+   *   amber           waiting on someone or something
+   *   red             money failed, or you are about to lose something
+   *   slate           everything else
+   *
+   * Colour is never the ONLY carrier of meaning — every status also ships a
+   * word, and Badge adds a dot for shape. Do not add a per-card accent hue.
+   * =================================================================== */
+
+  /* Money that went up / came in, and money that went out / failed. Paired
+     with `.num` so columns of figures stay aligned. */
+  .amount-in {
+    @apply num font-medium text-emerald-700 dark:text-emerald-400;
+  }
+  .amount-out {
+    @apply num font-medium text-slate-700 dark:text-slate-300;
+  }
+  .amount-fail {
+    @apply num font-medium text-red-700 dark:text-red-400;
+  }
+}
+
+@layer utilities {
+  /* Soft radial mesh behind the hero. Pure CSS — no image request, and it
+     recolours for dark mode instead of washing out. */
+  .bg-mesh {
+    background-image:
+      radial-gradient(58rem 32rem at 12% -8%, rgb(99 102 241 / 0.15), transparent 60%),
+      radial-gradient(48rem 28rem at 92% 4%, rgb(139 92 246 / 0.12), transparent 62%),
+      radial-gradient(40rem 26rem at 50% 108%, rgb(67 56 202 / 0.10), transparent 60%);
+  }
+  :is(.dark) .bg-mesh {
+    background-image:
+      radial-gradient(58rem 32rem at 12% -8%, rgb(99 102 241 / 0.22), transparent 60%),
+      radial-gradient(48rem 28rem at 92% 4%, rgb(139 92 246 / 0.16), transparent 62%),
+      radial-gradient(40rem 26rem at 50% 108%, rgb(67 56 202 / 0.14), transparent 60%);
+  }
+
+  /* Faint grid, masked to fade out at the edges. */
+  .bg-grid {
+    background-image:
+      linear-gradient(to right, rgb(100 116 139 / 0.07) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(100 116 139 / 0.07) 1px, transparent 1px);
+    background-size: 56px 56px;
+    -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 55%, transparent 100%);
+    mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 55%, transparent 100%);
+  }
+
+  /* ===================================================================
+   * MOTION
+   *
+   * Two implementations of the same effect, in priority order:
+   *
+   *   1. NATIVE scroll-driven animation (`animation-timeline: view()`).
+   *      Runs on the compositor, so it is exactly as smooth as the scroll
+   *      itself and cannot jank on the main thread. ~84% of browsers.
+   *   2. The `.is-visible` class from useReveal(), for everyone else
+   *      (notably Firefox stable, where the feature is still flagged).
+   *
+   * The fallback is the DEFAULT and the native path is layered on top inside
+   * `@supports`, so a browser that understands neither still ends up with
+   * visible content — the failure mode of a scroll animation must never be a
+   * blank page.
+   * =================================================================== */
+  .reveal {
+    opacity: 0;
+    transform: translateY(18px);
+    transition:
+      opacity 0.6s cubic-bezier(0.22, 1, 0.36, 1),
+      transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .reveal.is-visible {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@supports (animation-timeline: view()) {
+  @layer utilities {
+    /* Native path. The JS observer still runs and still adds .is-visible; it
+       simply has nothing left to do, because the animation has already settled
+       the element at its end state. */
+    .reveal {
+      opacity: 1;
+      transform: none;
+      transition: none;
+      animation: cg-reveal linear both;
+      animation-timeline: view();
+      /* Start as the element's top edge enters, finish well before it centres,
+         so content is fully readable by the time the eye arrives. */
+      animation-range: entry 8% cover 34%;
+    }
+
+    /* Slower, smaller counter-movement on anything marked as depth. Parallax
+       is the single cheapest way to make a flat page feel built out of layers. */
+    .parallax-slow {
+      animation: cg-parallax linear both;
+      animation-timeline: view();
+      animation-range: cover;
+    }
+
+    /* Reading-progress bar in the header. Driven by the ROOT scroller rather
+       than an element's visibility, which is what scroll() is for. */
+    .scroll-progress {
+      transform-origin: 0 50%;
+      animation: cg-progress linear both;
+      animation-timeline: scroll(root block);
+    }
+  }
+}
+
+@keyframes cg-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(26px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes cg-parallax {
+  from {
+    transform: translateY(28px);
+  }
+  to {
+    transform: translateY(-28px);
+  }
+}
+
+@keyframes cg-progress {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@layer utilities {
+
+  /* Marquee of supported assets. Duplicated content + a -50% translate is what
+     makes the loop seamless; `w-max` on the track is load-bearing, otherwise it
+     wraps and the seam becomes visible. Paused on hover so a reader can
+     actually read a ticker rather than chase it. */
+  .animate-marquee {
+    animation: cg-marquee 38s linear infinite;
+  }
+  .marquee-mask {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 8%, #000 92%, transparent);
+    mask-image: linear-gradient(to right, transparent, #000 8%, #000 92%, transparent);
+  }
+
+  /* Slow specular sweep across a surface. The one piece of pure decoration
+     here — it reads as glass catching light and costs a single transform. */
+  .animate-sheen {
+    animation: cg-sheen 7s ease-in-out infinite;
+  }
+
+  /* Depth field behind the hero. Two counter-drifting radial blooms; far
+     cheaper than a canvas and it recolours for dark mode instead of washing
+     out. `filter: blur()` on a large element is expensive, so this uses soft
+     gradient stops instead of a blur. */
+  .aurora::before,
+  .aurora::after {
+    content: '';
+    position: absolute;
+    inset: -30%;
+    pointer-events: none;
+    background: radial-gradient(
+      38% 44% at var(--x, 30%) var(--y, 32%),
+      rgb(99 102 241 / 0.30),
+      transparent 68%
+    );
+    animation: cg-drift 22s ease-in-out infinite alternate;
+  }
+  .aurora::after {
+    --x: 74%;
+    --y: 62%;
+    background: radial-gradient(
+      34% 40% at var(--x) var(--y),
+      rgb(139 92 246 / 0.26),
+      transparent 68%
+    );
+    animation-duration: 28s;
+    animation-direction: alternate-reverse;
+  }
+
+  .animate-float {
+    animation: cg-float 6s ease-in-out infinite;
+  }
+  /* Dashes travel along the payment-flow connectors in the hero diagram. */
+  .animate-flow {
+    stroke-dasharray: 5 7;
+    animation: cg-flow 1.1s linear infinite;
+  }
+  .animate-pulse-ring {
+    animation: cg-pulse-ring 2.4s ease-out infinite;
+  }
+}
+
+@keyframes cg-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+@keyframes cg-flow {
+  to { stroke-dashoffset: -24; }
+}
+@keyframes cg-pulse-ring {
+  0% { transform: scale(0.85); opacity: 0.55; }
+  70% { transform: scale(1.5); opacity: 0; }
+  100% { opacity: 0; }
+}
+@keyframes cg-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+@keyframes cg-sheen {
+  0%, 62% { transform: translateX(-120%) skewX(-14deg); }
+  100% { transform: translateX(320%) skewX(-14deg); }
+}
+@keyframes cg-drift {
+  from { transform: translate3d(-4%, -3%, 0) scale(1); }
+  to { transform: translate3d(5%, 4%, 0) scale(1.12); }
+}
+
+/* Accessibility: honour the OS setting. Reveals must still END VISIBLE — the
+   content is the point, the motion is decoration. */
+@media (prefers-reduced-motion: reduce) {
+  /* `animation: none` is what kills the scroll-driven path — without it the
+     @supports block above would keep animating for a user who asked us not to.
+     The element must be left at the animation's END state, never its start. */
+  .reveal,
+  .parallax-slow {
+    opacity: 1;
+    transform: none;
+    transition: none;
+    animation: none;
+  }
+  /* The progress bar is information, not decoration, so it stays — but it
+     snaps rather than travels. */
+  .scroll-progress {
+    animation-duration: 1ms;
+  }
+  .animate-float,
+  .animate-flow,
+  .animate-pulse-ring,
+  .animate-marquee,
+  .animate-sheen {
+    animation: none;
+  }
+  /* A demo that advances on a timer is content, not motion decoration — but it
+     must not also slide, so the transition is dropped, not the sequence. */
+  .demo-step {
+    transition: none;
+  }
+}
