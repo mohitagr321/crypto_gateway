@@ -42,7 +42,10 @@ export default {
         },
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
+        // 'Inter Variable' is the family name @fontsource-variable/inter
+        // actually registers. Asking for plain 'Inter' silently fell through to
+        // system-ui on every screen — see the note at the top of src/index.css.
+        sans: ['Inter Variable', 'Inter', 'system-ui', 'sans-serif'],
         mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       // Elevation is expressed as soft, low-opacity shadows rather than the

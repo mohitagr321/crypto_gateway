@@ -1,8 +1,17 @@
-/* Inter Variable, self-hosted. Tailwind has named Inter as the sans stack since
-   the beginning, but nothing ever loaded it — every screen silently fell back to
-   system-ui. A variable font is one file for the whole weight range, so the
-   display sizes below can use weights the static cut never had. */
-@import '@fontsource-variable/inter';
+/* Inter Variable, self-hosted.
+   The comment that used to sit here said Tailwind had named Inter as the sans
+   stack since the beginning but nothing ever loaded it, so every screen fell
+   back to system-ui. Importing the font did not actually fix that: fontsource
+   registers the family as 'Inter Variable', while both this file and
+   tailwind.config.js asked for 'Inter' — a family that is still not installed.
+   So the bug the old comment described survived its own fix, and every screen
+   was STILL rendering in system-ui. The name below is the one that matches.
+
+   `/opsz.css` rather than the barrel: the barrel ships the wght axis only, so
+   `font-optical-sizing: auto` on .h-display/.h-section was a no-op. This build
+   carries wght 100-900 AND the optical-size axis, which is what makes the
+   display sizes tighten correctly instead of looking like scaled-up body text. */
+@import '@fontsource-variable/inter/opsz.css';
 
 @tailwind base;
 @tailwind components;
@@ -10,7 +19,7 @@
 
 @layer base {
   html {
-    font-family: Inter, system-ui, sans-serif;
+    font-family: 'Inter Variable', Inter, system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
     /* Tell the BROWSER which theme is active, not just our own CSS.
        Without this, a user whose OS is in dark mode but who selects the light
@@ -272,8 +281,24 @@
   }
 }
 
+/* NOTE: deliberately NOT wrapped in `@layer utilities`.
+   It used to be, and that silently broke the guard: `@layer` is a Tailwind
+   build-time directive, so Tailwind hoisted these rules into its utilities
+   layer and DISCARDED the enclosing @supports. The compiled CSS shipped them
+   unconditionally — verified by grepping dist: `@supports` appeared zero times
+   and `.reveal` was emitted twice, the second copy unguarded.
+
+   Two things broke as a result, in every browser without scroll-driven
+   animation support. The unguarded `transition: none` killed the
+   IntersectionObserver path, so the documented fallback produced no motion at
+   all and the revealDelay() stagger was inert everywhere. And `.scroll-progress`
+   ran `cg-progress` (scaleX(0) -> scaleX(1)) with `both` fill and no duration,
+   which pins it at its END state: a permanently full progress bar under the
+   header on the first screen a prospect sees.
+
+   Plain CSS after the @tailwind directives keeps both the guard and the
+   intended precedence over the base .reveal above. */
 @supports (animation-timeline: view()) {
-  @layer utilities {
     /* Native path. The JS observer still runs and still adds .is-visible; it
        simply has nothing left to do, because the animation has already settled
        the element at its end state. */
@@ -303,7 +328,6 @@
       animation: cg-progress linear both;
       animation-timeline: scroll(root block);
     }
-  }
 }
 
 @keyframes cg-reveal {
