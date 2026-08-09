@@ -20,6 +20,7 @@ import { scheduleExpiryJob } from './workers/queues';
 import { closePool } from './db/pool';
 import { closeRedis } from './db/redis';
 import { validateAssets } from './blockchain/assets';
+import { describeMailTransport } from './services/emailService';
 import { primeRates, validateRateConfig } from './services/rateService';
 
 const app = express();
@@ -96,7 +97,16 @@ async function start(): Promise<void> {
   }
 
   const server = app.listen(config.port, () => {
-    logger.info({ port: config.port, env: config.nodeEnv }, 'API listening');
+    logger.info(
+      {
+        port: config.port,
+        env: config.nodeEnv,
+        // "No verification email arrived" is nearly always this line saying
+        // 'log' on a box nobody meant to leave unconfigured.
+        mail: describeMailTransport(),
+      },
+      'API listening',
+    );
   });
 
   // Handle listen errors (esp. EADDRINUSE) with a clear message instead of an

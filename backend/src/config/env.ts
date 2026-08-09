@@ -272,14 +272,36 @@ const EnvSchema = z.object({
   // never silently on 0%.
   SIGNUP_DEFAULT_COMMISSION_PERCENT: z.string().default('1'),
 
+  // ---- Outbound email: Brevo (preferred) ----
+  // Setting BREVO_API_KEY selects Brevo's transactional API and SMTP is not
+  // touched at all — see services/emailService.ts for the precedence rule.
+  // The API is preferred over Brevo's SMTP relay because it needs no outbound
+  // port 587 (routinely blocked by cloud providers), it returns a messageId
+  // that can be matched against Brevo's dashboard, and a rejected send comes
+  // back as a readable JSON error instead of an SMTP status code.
+  BREVO_API_KEY: z.string().optional().default(''),
+  // The From address. MUST be a sender or domain already verified in the Brevo
+  // account — Brevo rejects anything else with 400 `invalid_parameter`, so a
+  // typo here fails every send rather than degrading. Falls back to SMTP_FROM.
+  BREVO_SENDER_EMAIL: z.string().optional().default(''),
+  // Display name on the From line. Falls back to BRAND_NAME.
+  BREVO_SENDER_NAME: z.string().optional().default(''),
+  // Optional Reply-To. Worth setting to a monitored inbox: the sender address is
+  // usually no-reply, and merchants do reply to verification mail.
+  BREVO_REPLY_TO: z.string().optional().default(''),
+  // Overridable only so a test can point it at a local stub.
+  BREVO_API_URL: z.string().url().default('https://api.brevo.com/v3/smtp/email'),
+  BREVO_TIMEOUT_MS: numberish(10_000),
+
   // ---- Outbound email (SMTP) ----
   // Self-registration needs email: verification links and password resets are
-  // the only proof of address ownership. Leave SMTP_HOST empty in development —
-  // emailService then LOGS the rendered message (link included) instead of
-  // sending, so the whole flow is testable with no mail server. In production
-  // with SIGNUP_ENABLED=true, SMTP_HOST and SMTP_FROM are required (see the
-  // superRefine below) — booting without them would strand every new signup on
-  // an unverified account with no way to proceed.
+  // the only proof of address ownership. Leave BREVO_API_KEY and SMTP_HOST both
+  // empty in development — emailService then LOGS the rendered message (link
+  // included) instead of sending, so the whole flow is testable with no mail
+  // provider. In production with SIGNUP_ENABLED=true, one of the two transports
+  // must be fully configured (see the superRefine below) — booting without
+  // either would strand every new signup on an unverified account with no way
+  // to proceed.
   SMTP_HOST: z.string().optional().default(''),
   SMTP_PORT: numberish(587),
   SMTP_SECURE: boolish.default(false), // true for implicit TLS on 465
@@ -290,7 +312,7 @@ const EnvSchema = z.object({
   // Keep in sync with VITE_BRAND_NAME in the panels (client-panel/src/lib/brand.ts).
   // A verification email from one name about a checkout branded with another
   // reads exactly like a phish.
-  BRAND_NAME: z.string().default('SecuriPay'),
+  BRAND_NAME: z.string().default('PayCrypo'),
   SUPPORT_EMAIL: z.string().optional().default(''),
 
   // ---- Rate limiting ----
@@ -349,18 +371,38 @@ const EnvSchema = z.object({
       });
     }
   })
+  // A Brevo key with nowhere to send from is not a working transport: Brevo
+  // rejects every message with 400 unless `sender.email` is a verified sender.
+  // Catching it at boot beats discovering it on a merchant's first signup.
+  .superRefine((e, ctx) => {
+    if (!e.BREVO_API_KEY) return;
+    if (!e.BREVO_SENDER_EMAIL && !e.SMTP_FROM) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['BREVO_SENDER_EMAIL'],
+        message:
+          'BREVO_API_KEY is set but no sender address was given. Set ' +
+          'BREVO_SENDER_EMAIL (or SMTP_FROM, which it falls back to) to an ' +
+          'address verified in your Brevo account — Brevo rejects sends from ' +
+          'anything else.',
+      });
+    }
+  })
   // Same fail-fast principle applied to signup: a production gateway that
   // accepts registrations but cannot send the verification email would collect
   // accounts that can never be activated, with no visible error anywhere.
+  // Either transport satisfies this — Brevo takes precedence when both are set.
   .superRefine((e, ctx) => {
     if (e.NODE_ENV !== 'production' || !e.SIGNUP_ENABLED) return;
+    if (e.BREVO_API_KEY) return; // the Brevo refine above already checked it
     if (!e.SMTP_HOST) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['SMTP_HOST'],
         message:
-          'SIGNUP_ENABLED=true in production requires SMTP_HOST — without it no ' +
-          'verification email can be sent and every new signup would be stranded. ' +
+          'SIGNUP_ENABLED=true in production requires an email transport — set ' +
+          'BREVO_API_KEY (preferred) or SMTP_HOST. Without one, no verification ' +
+          'email can be sent and every new signup would be stranded. ' +
           'Set SIGNUP_ENABLED=false to run operator-provisioned only.',
       });
     }
@@ -572,6 +614,22 @@ export const config = {
     verifyTtlHours: env.EMAIL_VERIFY_TTL_HOURS,
     resetTtlMinutes: env.PASSWORD_RESET_TTL_MINUTES,
     defaultCommissionPercent: env.SIGNUP_DEFAULT_COMMISSION_PERCENT,
+  },
+
+  // Brevo transactional API. `enabled` gates everything: with no key, no
+  // request is ever made and emailService falls through to SMTP.
+  //
+  // The sender falls back to SMTP_FROM so a deployment migrating off SMTP only
+  // has to add the key, and the display name falls back to BRAND_NAME so the
+  // From line matches the panels without a second place to update.
+  brevo: {
+    enabled: Boolean(env.BREVO_API_KEY),
+    apiKey: env.BREVO_API_KEY,
+    apiUrl: env.BREVO_API_URL,
+    senderEmail: env.BREVO_SENDER_EMAIL || env.SMTP_FROM,
+    senderName: env.BREVO_SENDER_NAME || env.BRAND_NAME,
+    replyTo: env.BREVO_REPLY_TO,
+    timeoutMs: env.BREVO_TIMEOUT_MS,
   },
 
   // `enabled` is what every caller checks: with no host configured, emailService

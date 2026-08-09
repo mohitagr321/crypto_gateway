@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, Copy, Loader2, ShieldCheck, Wallet } from 'lucide-react';
+import { BRAND_CHECKOUT_HOST } from '@/lib/brand';
 
 /**
  * The hero's centrepiece: a replica of the real hosted checkout, playing the
@@ -99,7 +100,7 @@ export default function LiveCheckoutDemo() {
           </span>
           <span className="mx-auto flex items-center gap-1.5 rounded-md bg-slate-100 px-2.5 py-1 text-[10px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
             <ShieldCheck size={11} className="text-emerald-500" />
-            pay.securipay.io
+            {BRAND_CHECKOUT_HOST}
           </span>
           <span className="rounded-md border border-slate-200 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-slate-400 dark:border-slate-700">
             Preview

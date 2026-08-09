@@ -2,9 +2,11 @@ import { KeyRound, Loader2, Lock, Mail, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { useLocation, useNavigate } from 'react-router-dom';
+import PayCrypoMark from '@/components/PayCrypoMark';
 import ThemeToggle from '@/components/ThemeToggle';
 import { useAuth } from '@/context/AuthContext';
 import { apiErrorMessage } from '@/lib/api';
+import { BRAND_NAME } from '@/lib/brand';
 
 interface FormValues {
   email: string;
@@ -57,9 +59,9 @@ export default function Login() {
               and a "USDT (BEP20)" subtitle long after the gateway grew to seven
               assets across four chains. */}
           <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-white">
-            <ShieldCheck size={24} strokeWidth={2.25} />
+            <PayCrypoMark size={24} />
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight">SecuriPay Admin</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{BRAND_NAME} Admin</h1>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
             Sign in to the admin console
           </p>

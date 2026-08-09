@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { ShieldCheck } from 'lucide-react';
+import PayCrypoMark from '@/components/PayCrypoMark';
 import { BRAND_NAME, BRAND_TAGLINE } from '@/lib/brand';
 
 interface BrandMarkProps {
@@ -14,9 +14,11 @@ interface BrandMarkProps {
  * emails' visual language. Previously this markup was copy-pasted into Login
  * and Sidebar, which is how the two drifted apart.
  *
- * The tile used to be a ₮ glyph. It is now asset-neutral: this gateway settles
- * seven assets across four chains, and a Tether logo on a Bitcoin checkout is
- * simply wrong. The name comes from lib/brand.ts, not from here.
+ * The tile used to be a ₮ glyph, then a stock lucide ShieldCheck. It is now the
+ * PayCrypo mark: asset-neutral, because this gateway settles seven assets across
+ * four chains and a Tether logo on a Bitcoin checkout is simply wrong, and
+ * actually ours, because the shield was a placeholder half of fintech ships.
+ * The name comes from lib/brand.ts, not from here.
  */
 export default function BrandMark({
   to,
@@ -32,7 +34,7 @@ export default function BrandMark({
         className={`flex ${tile} shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-brand-500 to-accent-600 text-white shadow-sm shadow-brand-600/30`}
         aria-hidden
       >
-        <ShieldCheck size={glyph} strokeWidth={2.25} />
+        <PayCrypoMark size={glyph} />
       </span>
       <span className="leading-tight">
         <span className="block text-[15px] font-semibold text-slate-900 dark:text-slate-50">

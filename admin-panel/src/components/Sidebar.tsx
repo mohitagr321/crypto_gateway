@@ -5,7 +5,6 @@ import {
   LayoutDashboard,
   Percent,
   Send,
-  ShieldCheck,
   Users,
   Wallet,
   Webhook,
@@ -13,8 +12,10 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
+import PayCrypoMark from '@/components/PayCrypoMark';
 import { useAuth } from '@/context/AuthContext';
 import type { Role } from '@/types';
+import { BRAND_CONSOLE_LABEL, BRAND_NAME } from '@/lib/brand';
 import { classNames } from '@/lib/format';
 
 interface NavItem {
@@ -65,13 +66,15 @@ export default function Sidebar({
             {/* Asset-neutral mark. The ₮ tile and the "USDT · BEP20" subtitle
                 both predate ERC20, Bitcoin and the native coins — an operator
                 reconciling a BTC payout should not be told this is a USDT
-                gateway. */}
+                gateway. Name and mark now come from lib/brand.ts and
+                PayCrypoMark, so this screen cannot drift from the merchant
+                panel the way the hardcoded string did. */}
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 text-white">
-              <ShieldCheck size={17} strokeWidth={2.25} />
+              <PayCrypoMark size={17} />
             </div>
             <div className="leading-tight">
-              <p className="text-sm font-semibold">SecuriPay</p>
-              <p className="text-[11px] text-gray-400">Admin Console</p>
+              <p className="text-sm font-semibold">{BRAND_NAME}</p>
+              <p className="text-[11px] text-gray-400">{BRAND_CONSOLE_LABEL}</p>
             </div>
           </div>
           <button onClick={onClose} className="btn-ghost h-8 w-8 !p-0 lg:hidden" aria-label="Close menu">

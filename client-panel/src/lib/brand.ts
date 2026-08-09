@@ -12,10 +12,24 @@
  * gets an email from one name about a checkout branded with another has every
  * reason to suspect a phish.
  */
-export const BRAND_NAME = import.meta.env.VITE_BRAND_NAME || 'SecuriPay';
+export const BRAND_NAME = import.meta.env.VITE_BRAND_NAME || 'PayCrypo';
 
 /**
  * One-line positioning, used under the wordmark and in the footer. Deliberately
  * asset-neutral — adding a chain must never require a copy change here.
  */
 export const BRAND_TAGLINE = 'Crypto Payments';
+
+/**
+ * Apex domain, for copy that shows a URL rather than links to one (the checkout
+ * preview's fake address bar, docs examples). Overridable so a white-label
+ * deployment does not advertise someone else's domain in its own screenshots.
+ *
+ * NOT used to build real links — those come from the API base URL and from
+ * PUBLIC_PANEL_URL on the backend, which are the values that actually have to
+ * resolve.
+ */
+export const BRAND_DOMAIN = import.meta.env.VITE_BRAND_DOMAIN || 'paycrypo.com';
+
+/** Host shown on the hosted-checkout preview. */
+export const BRAND_CHECKOUT_HOST = `pay.${BRAND_DOMAIN}`;

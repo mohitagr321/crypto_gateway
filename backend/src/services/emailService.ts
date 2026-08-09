@@ -1,27 +1,72 @@
 /**
  * Outbound transactional email (verification, password reset, welcome, key alerts).
  *
+ * =============================== TRANSPORTS ==================================
+ * Three, chosen in strict precedence order by `mailTransport()`:
+ *
+ *   1. BREVO  — BREVO_API_KEY set. Brevo's transactional HTTP API.
+ *   2. SMTP   — SMTP_HOST set. Any relay, via nodemailer.
+ *   3. LOG    — neither. Renders the message to the log and sends nothing.
+ *
+ * Brevo wins when both are configured, and SMTP is then not touched at all —
+ * no transporter is constructed and no connection is opened. That is a
+ * deliberate either/or rather than a fallback chain: silently retrying a
+ * rejected message down a second path would double-send whenever Brevo
+ * accepted it and merely returned slowly, and "which system sent this?" is a
+ * question an operator should never have to ask about a password reset.
+ *
+ * The HTTP API is preferred over Brevo's SMTP relay because it needs no
+ * outbound port 587 (routinely blocked by cloud providers), it returns a
+ * messageId that can be matched against Brevo's dashboard, and a rejection
+ * arrives as readable JSON instead of an SMTP status code.
+ *
  * ============================ DEV / PROD BEHAVIOUR ============================
- * With SMTP_HOST unset, NOTHING is sent: every message is rendered and written to
- * the log at `info`, including the full action link. That is the intended local
- * development mode — the entire signup flow is walkable without a mail server,
- * you just copy the link out of the console. Production is protected separately:
- * `config/env.ts` refuses to boot when SIGNUP_ENABLED=true in production without
- * SMTP_HOST/SMTP_FROM, so this fallback can never silently swallow a real
- * merchant's verification email.
+ * In LOG mode NOTHING is sent: every message is rendered and written to the log
+ * at `info`, including the full action link. That is the intended local
+ * development mode — the entire signup flow is walkable without a mail
+ * provider, you just copy the link out of the console. Production is protected
+ * separately: `config/env.ts` refuses to boot when SIGNUP_ENABLED=true in
+ * production with neither transport configured, so this fallback can never
+ * silently swallow a real merchant's verification email.
  *
  * ============================== FAILURE POLICY ===============================
  * Every send is best-effort and returns a boolean; none of them throw. A signup
- * must not 500 because an SMTP server was briefly unreachable — the account is
+ * must not 500 because a mail provider was briefly unreachable — the account is
  * already committed at that point, and the merchant can use "resend
  * verification". Callers log the false and carry on.
  *
- * The transport is a lazy module-level singleton (same shape as db/redis.ts) so
- * that a BEP20-only, signup-disabled deployment never constructs one.
+ * The SMTP transport is a lazy module-level singleton (same shape as
+ * db/redis.ts) so that a BEP20-only, signup-disabled deployment never
+ * constructs one.
  */
 import nodemailer, { Transporter } from 'nodemailer';
 import { config } from '../config/env';
 import { logger } from './../config/logger';
+
+export type MailTransport = 'brevo' | 'smtp' | 'log';
+
+/** The active transport. Pure — derived from config, safe to call anywhere. */
+export function mailTransport(): MailTransport {
+  if (config.brevo.enabled) return 'brevo';
+  if (config.smtp.enabled) return 'smtp';
+  return 'log';
+}
+
+/**
+ * One line for the boot log. Worth printing on every start: "why did no email
+ * arrive" is otherwise answered by reading config, and the answer is almost
+ * always that the process is in LOG mode without anyone realising.
+ */
+export function describeMailTransport(): string {
+  switch (mailTransport()) {
+    case 'brevo':
+      return `brevo api as <${config.brevo.senderEmail}>`;
+    case 'smtp':
+      return `smtp ${config.smtp.host}:${config.smtp.port} as <${config.smtp.from}>`;
+    default:
+      return 'none configured — messages are logged, not sent';
+  }
+}
 
 let transporter: Transporter | null = null;
 
@@ -40,7 +85,10 @@ function getTransport(): Transporter | null {
   return transporter;
 }
 
-/** Close the pooled SMTP connection on shutdown. Safe to call when unused. */
+/**
+ * Close the pooled SMTP connection on shutdown. Safe to call when unused, and a
+ * no-op under Brevo — the HTTP API holds nothing open between sends.
+ */
 export function closeMailer(): void {
   transporter?.close();
   transporter = null;
@@ -53,15 +101,74 @@ interface Mail {
   text: string;
 }
 
-async function send(mail: Mail, context: Record<string, unknown>): Promise<boolean> {
-  const tx = getTransport();
-  if (!tx) {
+/**
+ * Brevo transactional send.
+ *
+ * `sender.email` must be a verified sender or a verified domain in the Brevo
+ * account; anything else is a 400 on every message, which is why env.ts refuses
+ * to boot with a key and no sender. The event name is passed through as a Brevo
+ * tag so deliverability can be read per message type in their dashboard —
+ * verification mail failing while invoices land is a very different problem
+ * from everything failing.
+ */
+async function sendViaBrevo(
+  mail: Mail,
+  context: Record<string, unknown>,
+): Promise<boolean> {
+  const event = typeof context.event === 'string' ? context.event : undefined;
+  try {
+    const res = await fetch(config.brevo.apiUrl, {
+      method: 'POST',
+      headers: {
+        'api-key': config.brevo.apiKey,
+        'content-type': 'application/json',
+        accept: 'application/json',
+      },
+      body: JSON.stringify({
+        sender: { email: config.brevo.senderEmail, name: config.brevo.senderName },
+        to: [{ email: mail.to }],
+        subject: mail.subject,
+        htmlContent: mail.html,
+        textContent: mail.text,
+        ...(config.brevo.replyTo ? { replyTo: { email: config.brevo.replyTo } } : {}),
+        ...(event ? { tags: [event] } : {}),
+      }),
+      // Without this a stalled connection would hold the request handler open
+      // for the provider's timeout rather than ours.
+      signal: AbortSignal.timeout(config.brevo.timeoutMs),
+    });
+
+    if (!res.ok) {
+      // Brevo answers with {code, message}. Truncated because an HTML error page
+      // from a proxy in front of the API would otherwise flood the log.
+      const body = await res.text().catch(() => '');
+      logger.error(
+        { ...context, to: mail.to, status: res.status, body: body.slice(0, 500) },
+        'brevo rejected the message',
+      );
+      return false;
+    }
+
+    const payload = (await res.json().catch(() => ({}))) as { messageId?: string };
     logger.info(
-      { ...context, to: mail.to, subject: mail.subject, body: mail.text },
-      'SMTP not configured — email NOT sent, logged instead',
+      { ...context, to: mail.to, subject: mail.subject, messageId: payload.messageId },
+      'email sent via brevo',
     );
+    return true;
+  } catch (err) {
+    // Covers the timeout abort and any transport-level failure.
+    logger.error({ err, ...context, to: mail.to }, 'failed to send email via brevo');
     return false;
   }
+}
+
+/** SMTP send via the pooled nodemailer transport. */
+async function sendViaSmtp(
+  mail: Mail,
+  context: Record<string, unknown>,
+): Promise<boolean> {
+  const tx = getTransport();
+  if (!tx) return false;
   try {
     await tx.sendMail({
       from: config.smtp.from,
@@ -70,12 +177,27 @@ async function send(mail: Mail, context: Record<string, unknown>): Promise<boole
       text: mail.text,
       html: mail.html,
     });
-    logger.info({ ...context, to: mail.to, subject: mail.subject }, 'email sent');
+    logger.info({ ...context, to: mail.to, subject: mail.subject }, 'email sent via smtp');
     return true;
   } catch (err) {
     // Never propagate: the caller's transaction has already committed.
-    logger.error({ err, ...context, to: mail.to }, 'failed to send email');
+    logger.error({ err, ...context, to: mail.to }, 'failed to send email via smtp');
     return false;
+  }
+}
+
+async function send(mail: Mail, context: Record<string, unknown>): Promise<boolean> {
+  switch (mailTransport()) {
+    case 'brevo':
+      return sendViaBrevo(mail, context);
+    case 'smtp':
+      return sendViaSmtp(mail, context);
+    default:
+      logger.info(
+        { ...context, to: mail.to, subject: mail.subject, body: mail.text },
+        'no email transport configured — email NOT sent, logged instead',
+      );
+      return false;
   }
 }
 
@@ -84,9 +206,12 @@ async function send(mail: Mail, context: Record<string, unknown>): Promise<boole
 // ---------------------------------------------------------------------------
 
 const BRAND = config.brand.name;
-// Matches the panel's brand-600 (#158055) so mail and dashboard look like one
-// product. Inlined because mail clients strip <style> blocks.
-const ACCENT = '#158055';
+// The panels' brand-600. It used to be #158055 under a comment claiming that
+// WAS brand-600 — the panels moved off green (green means "funds arrived" on
+// every status badge, so it could not also mean "click here") and this constant
+// did not follow, leaving every button in the mail a different colour from
+// every button in the product. Inlined because mail clients strip <style>.
+const ACCENT = '#4f46e5';
 
 function escapeHtml(s: string): string {
   return s
@@ -137,8 +262,13 @@ function layout(opts: {
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
              style="max-width:520px;background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:32px">
         <tr><td style="padding:0 0 20px">
+          <!-- The PayCrypo tile, as a letter rather than the real hexagon mark:
+               Gmail strips inline SVG and a hosted PNG would make every email
+               depend on an image server being up and on the recipient clicking
+               "show images". A letterform in the brand colour degrades to
+               something correct in every client. -->
           <span style="display:inline-block;width:36px;height:36px;line-height:36px;text-align:center;
-                       background:${ACCENT};color:#fff;border-radius:9px;font-weight:700;font-size:19px">&#8366;</span>
+                       background:${ACCENT};color:#fff;border-radius:9px;font-weight:700;font-size:19px">P</span>
           <span style="font-weight:650;font-size:16px;color:#0f172a;margin-left:10px;vertical-align:middle">
             ${escapeHtml(BRAND)}
           </span>
