@@ -10,6 +10,9 @@ build/
 .env
 .env.*
 !.env.example
+# Infra-only overrides (service hostnames). Carries no secrets and
+# docker-compose.yml fails to parse without it, so it is tracked.
+!.env.docker
 *.local
 
 # Legacy provisioning scripts. Superseded by deploy-crypto-gateway.sh, which
