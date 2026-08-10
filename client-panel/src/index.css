@@ -184,6 +184,48 @@
   .card {
     @apply rounded-2xl border border-slate-200/90 bg-white shadow-soft
            dark:border-slate-800 dark:bg-slate-900/70;
+    /* A faint brand wash, so a raised surface is not a colourless hole punched
+       in a coloured page. Pure white on the plum ground read as an absence
+       rather than as a surface. Kept to 3.5% and top-weighted: it should be
+       felt as a slight lift, never seen as a tint — anything stronger and a
+       card starts competing with a status badge sitting on it. */
+    background-image: linear-gradient(
+      180deg,
+      rgb(99 102 241 / 0.035),
+      rgb(99 102 241 / 0.012)
+    );
+  }
+  :is(.dark) .card {
+    background-image: linear-gradient(
+      180deg,
+      rgb(129 140 248 / 0.06),
+      rgb(129 140 248 / 0.02)
+    );
+  }
+
+  /* THE SIGNATURE RAIL. The brand -> accent gradient from the PayCrypo mark,
+     brought into the product on the one element that marks where you are: the
+     active navigation item. Brand is correct here and is not a state — it is
+     navigation, a thing you can act on. Vertical, so it reads as the same
+     gradient as the tile in the masthead. */
+  .rail-brand {
+    @apply bg-gradient-to-b from-brand-500 to-accent-500;
+  }
+
+  /* The same gradient as INK, for the one enormous figure a page is built
+     around. Deliberately not offered as a general text treatment: on anything
+     smaller than display size a gradient fill costs legibility, and on anything
+     that is a status it would break the colour contract outright. */
+  /* `!text-transparent` is load-bearing, not laziness. This class is always
+     worn ALONGSIDE .figure-xl, which sets its own `text-slate-900` and is
+     defined later in this same @layer — so without the important flag the
+     figure's own ink wins the cascade, the clipped gradient is painted behind
+     an opaque glyph, and the whole thing silently renders as plain near-black.
+     Which is exactly what it did the first time. */
+  .figure-accent {
+    @apply bg-gradient-to-br from-brand-600 via-accent-600 to-brand-500
+           bg-clip-text !text-transparent
+           dark:from-brand-300 dark:via-accent-400 dark:to-brand-400;
   }
   .input {
     @apply w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-soft outline-none transition placeholder:text-slate-400 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-100;

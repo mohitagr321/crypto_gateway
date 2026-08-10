@@ -309,7 +309,7 @@ function NavItemLink({
       {({ isActive }) => (
         <>
           <span
-            className={`absolute inset-y-0 left-0 w-0.5 origin-center bg-brand-600 transition-transform duration-[var(--dur-press)] ease-[var(--ease-out)] dark:bg-brand-400 ${
+            className={`absolute inset-y-0 left-0 w-0.5 origin-center rail-brand transition-transform duration-[var(--dur-press)] ease-[var(--ease-out)] ${
               isActive ? 'scale-y-100' : 'scale-y-0'
             }`}
             aria-hidden

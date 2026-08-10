@@ -110,7 +110,12 @@ export default function Pricing() {
             </dl>
             {/* The total rule of a ledger: heavier than the rows above it. */}
             <div className="rule-strong pt-5">
-              <span className="figure-xl">495.00</span>
+              {/* The one figure on the site that carries the brand gradient.
+                  Reserved for exactly this: the number the whole page argues
+                  towards. It is not a status and not a control, so the gradient
+                  is decoration on ink rather than the interactive colour
+                  meaning something it should not. */}
+              <span className="figure-xl figure-accent">495.00</span>
               <span className="figure-label">
                 USDT settled to your own wallet. Illustrative only — rates are set
                 per account and versioned, and your own is on your Commission page.

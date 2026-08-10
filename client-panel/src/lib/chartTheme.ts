@@ -134,3 +134,57 @@ export const STATUS_GROUP_OF: Record<PaymentStatus, StatusGroupId> = {
 export function statusGroupOf(status: string): StatusGroupId {
   return (STATUS_GROUP_OF as Record<string, StatusGroupId | undefined>)[status] ?? 'other';
 }
+
+/**
+ * CATEGORICAL SERIES INK — for dimensions that carry NO status meaning.
+ *
+ * The status charts above stay semantic and must: emerald IS "funds arrived",
+ * amber IS "waiting", red IS "failed". Recolouring those to something prettier
+ * would break the one contract the whole palette exists to enforce, so this
+ * palette is deliberately NOT for them.
+ *
+ * It is for the dimensions where a hue means nothing at all and is only there
+ * to tell one line apart from another — per asset, per network, per client,
+ * per payment method. Those were previously drawn in ramp greys or reused a
+ * semantic hue, which is how a chart ends up implying that USDC is "settled"
+ * and BNB is "failed".
+ *
+ * ORDERED FOR DISTINGUISHABILITY, not by hue wheel: adjacent entries are far
+ * apart in both hue and lightness, so a two-series chart is separable at a
+ * glance and an eight-series chart is still separable at the legend. The first
+ * four are also distinguishable in the common forms of colour-vision
+ * deficiency, which is why blue and orange lead rather than red and green.
+ *
+ * NONE of these is emerald, amber or red at the steps those use for status —
+ * checked deliberately, so a categorical series can never be mistaken for a
+ * state readout sitting next to it.
+ */
+export interface SeriesInk {
+  /** Tailwind fill-* class pair, for recharts <Cell> and bars. */
+  fillClass: string;
+  /** Tailwind stroke-* class pair, for lines and areas. */
+  strokeClass: string;
+  /** Human label for the key. Colour is never the sole carrier. */
+  label: string;
+}
+
+export const SERIES_PALETTE: readonly SeriesInk[] = [
+  { fillClass: 'fill-brand-600 dark:fill-brand-400', strokeClass: 'stroke-brand-600 dark:stroke-brand-400', label: 'Series 1' },
+  { fillClass: 'fill-cyan-600 dark:fill-cyan-400', strokeClass: 'stroke-cyan-600 dark:stroke-cyan-400', label: 'Series 2' },
+  { fillClass: 'fill-accent-600 dark:fill-accent-400', strokeClass: 'stroke-accent-600 dark:stroke-accent-400', label: 'Series 3' },
+  { fillClass: 'fill-teal-600 dark:fill-teal-400', strokeClass: 'stroke-teal-600 dark:stroke-teal-400', label: 'Series 4' },
+  { fillClass: 'fill-fuchsia-600 dark:fill-fuchsia-400', strokeClass: 'stroke-fuchsia-600 dark:stroke-fuchsia-400', label: 'Series 5' },
+  { fillClass: 'fill-sky-700 dark:fill-sky-300', strokeClass: 'stroke-sky-700 dark:stroke-sky-300', label: 'Series 6' },
+];
+
+/**
+ * Pick the ink for series `i`, wrapping past the end of the palette.
+ *
+ * Wrapping rather than throwing on purpose: the number of assets a deployment
+ * settles is operator configuration, not a constant, and a chart must not blow
+ * up because someone enabled a seventh coin. Past six the labels are doing the
+ * work anyway.
+ */
+export function seriesInk(i: number): SeriesInk {
+  return SERIES_PALETTE[i % SERIES_PALETTE.length];
+}

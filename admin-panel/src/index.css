@@ -128,6 +128,27 @@
   .card {
     @apply rounded-2xl border border-slate-200/90 bg-white shadow-soft
            dark:border-slate-800 dark:bg-slate-900/70;
+    /* A faint brand wash, matching the merchant panel exactly. Pure white on
+       the plum ground read as an absence rather than as a surface. Felt as a
+       lift, never seen as a tint. */
+    background-image: linear-gradient(
+      180deg,
+      rgb(99 102 241 / 0.035),
+      rgb(99 102 241 / 0.012)
+    );
+  }
+  :is(.dark) .card {
+    background-image: linear-gradient(
+      180deg,
+      rgb(129 140 248 / 0.06),
+      rgb(129 140 248 / 0.02)
+    );
+  }
+
+  /* THE SIGNATURE RAIL — the brand -> accent gradient from the PayCrypo mark,
+     on the element that marks where you are. Navigation, not a state. */
+  .rail-brand {
+    @apply bg-gradient-to-b from-brand-500 to-brand-700;
   }
   .input {
     @apply w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-soft outline-none transition placeholder:text-slate-400 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-100 dark:placeholder:text-slate-500;
