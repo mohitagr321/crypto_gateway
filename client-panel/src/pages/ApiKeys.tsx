@@ -19,11 +19,11 @@ import {
 import { formatDate } from '@/lib/format';
 import type { ApiKeyAuthMode, ApiKeySummary, CreatedApiKey } from '@/types';
 import PageHeader from '@/components/PageHeader';
+import DataTable, { type Column } from '@/components/DataTable';
 import CopyButton from '@/components/CopyButton';
 import CodeBlock from '@/components/CodeBlock';
 import Modal from '@/components/Modal';
-import Spinner, { LoadingPanel } from '@/components/Spinner';
-import ErrorState from '@/components/ErrorState';
+import Spinner from '@/components/Spinner';
 
 /**
  * Multi-key management.
@@ -35,6 +35,29 @@ import ErrorState from '@/components/ErrorState';
  *  2. The mode picker states the payout consequence up front. Bearer keys are
  *     the easy choice, and someone picking one should know before they create it
  *     that it cannot move funds — not discover it from a 403 in production.
+ *
+ * ---------------------------------------------------------------------------
+ * SET AS A BROADSHEET, AT WORKING DENSITY
+ *
+ * The keys are a LEDGER — DataTable, on the page rather than in a card, so this
+ * list is the same object as every other list in the product. Everything that
+ * used to be a tinted rounded panel (the exposure warning, the danger zone, the
+ * bearer note in the create dialog) is now a running head in the semantic ink
+ * over body copy on a measure, which is the same gesture DataTable's own error
+ * and empty states use. Rules, not boxes.
+ *
+ * BRAND IS NOW ABSENT FROM STATE. The "Signed" mode marker used to be a
+ * brand-tinted pill, which made an attribute of a credential the same colour as
+ * the button you are meant to press. Brand is interactive-only: the CTAs, the
+ * radio, the focus ring. Mode is carried by an icon, a word and a neutral ink,
+ * with amber reserved for the weaker posture that wants attention.
+ *
+ * THE SECRET IS THE POINT OF THIS PAGE. It exists for exactly one render and
+ * never again, so in the one-time dialog it is the heaviest thing on screen:
+ * opened by the ink rule, set at reading size in mono, and copied by a
+ * full-width control rather than an icon tucked in a corner. That is the same
+ * treatment the hosted checkout gives a deposit address, for the same reason —
+ * it is the one string that must not be misread or missed.
  */
 export default function ApiKeys() {
   const queryClient = useQueryClient();
@@ -104,151 +127,214 @@ export default function ApiKeys() {
     },
   });
 
-  const hasBearerKey = keys.data?.some((k) => k.authMode === 'simple') ?? false;
+  const rows = keys.data ?? [];
+  const bearerCount = rows.filter((k) => k.authMode === 'simple').length;
+  const hasBearerKey = bearerCount > 0;
   const noIpAllowlist = (settings.data?.ipWhitelist ?? []).length === 0;
+
+  const columns: Column<ApiKeySummary>[] = [
+    {
+      key: 'key',
+      header: 'Key',
+      sortValue: (k) => k.label ?? k.apiKey,
+      render: (k) => (
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5">
+            <code className="whitespace-nowrap font-mono text-[13px] text-slate-900 dark:text-slate-100">
+              {k.apiKey}
+            </code>
+            {/* Bearer keys are shown as a masked prefix, so there is nothing
+                copyable there — only the HMAC public id is a real value. */}
+            {k.authMode === 'hmac' && <CopyButton value={k.apiKey} size={13} />}
+          </div>
+          {k.label && (
+            <span className="mt-0.5 block text-xs text-slate-500 dark:text-slate-400">
+              {k.label}
+            </span>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'mode',
+      header: 'Mode',
+      sortValue: (k) => k.authMode,
+      render: (k) => <AuthModeMark mode={k.authMode} />,
+    },
+    {
+      key: 'scopes',
+      header: 'Scopes',
+      hideOnMobile: true,
+      render: (k) => (
+        // Plain mono ranged down the column, not three grey chips per row: a
+        // scope is a literal you may need to type, and a box around each one
+        // just fights the hairlines.
+        <span className="whitespace-nowrap font-mono text-[11px] text-slate-500 dark:text-slate-400">
+          {k.scopes.length > 0 ? k.scopes.join('  ·  ') : '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'lastUsed',
+      header: 'Last used',
+      hideOnMobile: true,
+      // Never-used sorts to the bottom of a descending sort, which is where a
+      // key nobody has called belongs when you are looking for dead credentials.
+      sortValue: (k) => k.lastUsedAt ?? '',
+      render: (k) =>
+        k.lastUsedAt ? (
+          <span className="num whitespace-nowrap">{formatDate(k.lastUsedAt)}</span>
+        ) : (
+          <span className="text-slate-400 dark:text-slate-500">Never</span>
+        ),
+    },
+    {
+      key: 'created',
+      header: 'Created',
+      hideOnMobile: true,
+      sortValue: (k) => k.createdAt,
+      render: (k) => (
+        <span className="num whitespace-nowrap text-slate-500 dark:text-slate-400">
+          {formatDate(k.createdAt)}
+        </span>
+      ),
+    },
+    {
+      key: 'actions',
+      header: <span className="sr-only">Actions</span>,
+      align: 'right',
+      render: (k) => (
+        <button
+          type="button"
+          className="rounded-sm p-1.5 text-slate-400 outline-none transition-colors duration-[var(--dur-press)] hover:text-red-600 focus-visible:ring-2 focus-visible:ring-brand-500 dark:hover:text-red-400"
+          onClick={() => setRevoking(k)}
+          aria-label={`Revoke key ${k.apiKey}`}
+        >
+          <Trash2 size={16} aria-hidden />
+        </button>
+      ),
+    },
+  ];
 
   return (
     <>
       <PageHeader
+        eyebrow="Developers"
         title="API Keys"
-        description="Credentials your server uses to talk to the gateway. Give each integration its own key."
+        description="Credentials your server uses to talk to the gateway. Give each integration its own key, so you can revoke one without taking the rest down."
+        meta={
+          keys.data
+            ? `${rows.length} ${rows.length === 1 ? 'key' : 'keys'}${
+                bearerCount > 0 ? ` · ${bearerCount} bearer` : ''
+              }`
+            : undefined
+        }
         actions={
           <button className="btn-primary" onClick={() => setCreateOpen(true)}>
-            <Plus size={16} /> New key
+            <Plus size={16} aria-hidden /> New key
           </button>
         }
       />
 
+      {/* The exposure note. No rule of its own: it sits between the masthead's
+          ink stroke and the ledger's own header rule, which frame it already —
+          a third stroke 16px from the first would read as a mistake. */}
       {hasBearerKey && noIpAllowlist && (
-        <div className="mb-6 flex gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-200">
-          <ShieldAlert size={18} className="mt-0.5 shrink-0" />
-          <p>
-            You have a <strong>bearer-token key</strong> and no IP allowlist. That
-            token works from anywhere it leaks. Add your server's IP under{' '}
-            <a href="/settings" className="font-semibold underline">
-              Settings
-            </a>{' '}
-            to contain that.
-          </p>
-        </div>
-      )}
-
-      {keys.isLoading ? (
-        <LoadingPanel />
-      ) : keys.isError ? (
-        <ErrorState message={errorMessage(keys.error)} onRetry={() => keys.refetch()} />
-      ) : keys.data && keys.data.length === 0 ? (
-        <div className="card flex flex-col items-center px-6 py-16 text-center">
-          <KeyRound size={34} className="text-slate-300 dark:text-slate-700" />
-          <h3 className="mt-4 text-base font-semibold text-slate-900 dark:text-slate-100">
-            No API keys yet
-          </h3>
-          <p className="mt-1.5 max-w-sm text-sm text-slate-500">
-            Create one to start taking payments from your own server. The secret is
-            shown once, at creation.
-          </p>
-          <button className="btn-primary mt-6" onClick={() => setCreateOpen(true)}>
-            <Plus size={16} /> Create your first key
-          </button>
-        </div>
-      ) : (
-        <div className="card overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[46rem] text-left text-sm">
-              <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase tracking-wide text-slate-500 dark:border-slate-800 dark:bg-slate-800/50">
-                <tr>
-                  <th className="px-5 py-3 font-medium">Key</th>
-                  <th className="px-5 py-3 font-medium">Mode</th>
-                  <th className="px-5 py-3 font-medium">Scopes</th>
-                  <th className="px-5 py-3 font-medium">Last used</th>
-                  <th className="px-5 py-3 font-medium">Created</th>
-                  <th className="px-5 py-3" />
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
-                {keys.data?.map((k) => (
-                  <tr key={k.id}>
-                    <td className="px-5 py-4">
-                      <div className="flex items-center gap-2">
-                        <code className="font-mono text-[13px] text-slate-700 dark:text-slate-200">
-                          {k.apiKey}
-                        </code>
-                        {k.authMode === 'hmac' && <CopyButton value={k.apiKey} />}
-                      </div>
-                      {k.label && (
-                        <span className="mt-0.5 block text-xs text-slate-500">{k.label}</span>
-                      )}
-                    </td>
-                    <td className="px-5 py-4">
-                      {k.authMode === 'hmac' ? (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-50 px-2.5 py-1 text-xs font-medium text-brand-700 dark:bg-brand-900/25 dark:text-brand-300">
-                          <ShieldCheck size={12} /> Signed
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 dark:bg-amber-900/25 dark:text-amber-300">
-                          <KeyRound size={12} /> Bearer
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-5 py-4">
-                      <div className="flex flex-wrap gap-1">
-                        {k.scopes.map((s) => (
-                          <code
-                            key={s}
-                            className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-                          >
-                            {s}
-                          </code>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="px-5 py-4 text-slate-600 dark:text-slate-400">
-                      {k.lastUsedAt ? formatDate(k.lastUsedAt) : 'Never'}
-                    </td>
-                    <td className="px-5 py-4 text-slate-600 dark:text-slate-400">
-                      {formatDate(k.createdAt)}
-                    </td>
-                    <td className="px-5 py-4 text-right">
-                      <button
-                        className="rounded-lg p-2 text-slate-400 transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20"
-                        onClick={() => setRevoking(k)}
-                        aria-label={`Revoke key ${k.apiKey}`}
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        <div className="mb-6 flex gap-3">
+          <ShieldAlert
+            size={16}
+            className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400"
+            aria-hidden
+          />
+          <div className="min-w-0">
+            <span className="runhead text-amber-600 dark:text-amber-400">
+              Bearer key, no allowlist
+            </span>
+            <p className="measure mt-1.5 text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+              A bearer token works from anywhere it leaks. Add your server's IP
+              under{' '}
+              <a href="/settings" className="link-ink font-medium">
+                Settings
+              </a>{' '}
+              to contain that.
+            </p>
           </div>
         </div>
       )}
 
-      {/* Danger zone. Last on the page and visually separated, because the one
-          action in it revokes every credential the account has. It was
-          previously unreachable from the UI entirely — the endpoint existed and
-          nothing called it, so a merchant with a leaked key of unknown identity
-          had no way to shut the door. */}
-      <section className="mt-8 rounded-2xl border border-red-200 bg-red-50/50 p-5 dark:border-red-900/40 dark:bg-red-950/20">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex gap-3">
-            <ShieldAlert size={18} className="mt-0.5 shrink-0 text-red-600 dark:text-red-400" />
-            <div>
-              <h2 className="text-sm font-semibold text-red-900 dark:text-red-200">
-                Think a key has leaked?
-              </h2>
-              <p className="mt-1 max-w-xl text-sm leading-relaxed text-red-800/90 dark:text-red-300/90">
-                Revoke every active key at once and issue a single new
-                HMAC-signed key. Your integrations will fail with 401 until you
-                deploy the new credentials — that is the point.
-              </p>
+      <DataTable
+        columns={columns}
+        rows={rows}
+        rowKey={(k) => k.id}
+        loading={keys.isLoading}
+        error={keys.isError ? errorMessage(keys.error) : null}
+        onRetry={() => keys.refetch()}
+        label="API keys"
+        skeletonRows={3}
+        defaultSortKey="created"
+        // Column one is the credential's identity, which is the thing you scroll
+        // sideways to keep looking at.
+        stickyFirstColumn
+        emptyLabel="No API keys yet."
+        emptyHint="Create one to start taking payments from your own server. The secret is shown once, at creation, and never again."
+        emptyAction={
+          <button className="btn-primary" onClick={() => setCreateOpen(true)}>
+            <Plus size={16} aria-hidden /> Create your first key
+          </button>
+        }
+        renderMobile={(k) => (
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-baseline justify-between gap-3">
+              <code className="min-w-0 break-all font-mono text-[13px] text-slate-900 dark:text-slate-100">
+                {k.apiKey}
+              </code>
+              <AuthModeMark mode={k.authMode} />
+            </div>
+            {k.label && (
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                {k.label}
+              </span>
+            )}
+            <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
+              {k.scopes.length > 0 ? k.scopes.join('  ·  ') : '—'}
+            </span>
+            <div className="mt-1 flex items-baseline justify-between gap-3">
+              <span className="num text-xs text-slate-500 dark:text-slate-400">
+                {k.lastUsedAt ? `Last used ${formatDate(k.lastUsedAt)}` : 'Never used'}
+              </span>
+              <button
+                type="button"
+                className="shrink-0 text-xs font-medium text-red-600 outline-none focus-visible:ring-2 focus-visible:ring-brand-500 dark:text-red-400"
+                onClick={() => setRevoking(k)}
+                aria-label={`Revoke key ${k.apiKey}`}
+              >
+                Revoke
+              </button>
             </div>
           </div>
-          <button
-            className="btn-danger shrink-0"
-            onClick={() => setRegenOpen(true)}
-          >
+        )}
+      />
+
+      {/* Danger zone. Last on the page and separated by space and a red running
+          head rather than by a red-tinted box — the ink says which register this
+          block is in, and the button says what it does. It was previously
+          unreachable from the UI entirely: the endpoint existed and nothing
+          called it, so a merchant with a leaked key of unknown identity had no
+          way to shut the door. */}
+      <section className="rule mt-12 grid gap-x-10 gap-y-3 pt-6 md:grid-cols-12">
+        <div className="md:col-span-3">
+          <span className="runhead text-red-600 dark:text-red-400">Compromise</span>
+        </div>
+        <div className="md:col-span-9">
+          <h2 className="text-base font-semibold text-slate-900 dark:text-slate-50">
+            Think a key has leaked?
+          </h2>
+          <p className="measure mt-2 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+            Revoke every active key at once and issue a single new HMAC-signed key.
+            Your integrations will fail with 401 until you deploy the new
+            credentials — that is the point.
+          </p>
+          <button className="btn-danger mt-5" onClick={() => setRegenOpen(true)}>
             Revoke all keys
           </button>
         </div>
@@ -278,7 +364,7 @@ export default function ApiKeys() {
           </>
         }
       >
-        <div className="space-y-5">
+        <div className="space-y-6">
           <div>
             <label className="label" htmlFor="key-label">
               Label
@@ -291,14 +377,14 @@ export default function ApiKeys() {
               onChange={(e) => setLabel(e.target.value)}
               maxLength={60}
             />
-            <p className="mt-1 text-xs text-slate-500">
+            <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
               So you know which integration to revoke later.
             </p>
           </div>
 
           <fieldset>
-            <legend className="label">Authentication</legend>
-            <div className="space-y-2.5">
+            <legend className="runhead">Authentication</legend>
+            <div className="mt-3">
               <ModeOption
                 selected={authMode === 'hmac'}
                 onSelect={() => setAuthMode('hmac')}
@@ -319,27 +405,37 @@ export default function ApiKeys() {
           </fieldset>
 
           {authMode === 'simple' && (
-            <p className="flex gap-2.5 rounded-lg bg-amber-50 p-3.5 text-xs leading-relaxed text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
-              <ShieldAlert size={15} className="mt-0.5 shrink-0" />
-              <span>
-                This key will get <code className="font-mono">payments:read</code> and{' '}
-                <code className="font-mono">payments:write</code> only. Add an IP
-                allowlist in Settings so the token is useless from anywhere else.
-              </span>
-            </p>
+            <div className="rule flex gap-3 pt-4">
+              <ShieldAlert
+                size={15}
+                className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400"
+                aria-hidden
+              />
+              <p className="measure text-xs leading-relaxed text-slate-600 dark:text-slate-400">
+                This key will get <code className="code">payments:read</code> and{' '}
+                <code className="code">payments:write</code> only. Add an IP allowlist
+                in Settings so the token is useless from anywhere else.
+              </p>
+            </div>
           )}
 
           {create.isError && (
-            <p className="text-sm text-red-600">{errorMessage(create.error)}</p>
+            <p className="text-sm text-red-600 dark:text-red-400">
+              {errorMessage(create.error)}
+            </p>
           )}
         </div>
       </Modal>
 
-      {/* ---------------- One-time secret ---------------- */}
+      {/* ---------------- One-time secret ----------------
+          `lg` because this dialog carries the only render of a 64-character
+          secret; a narrow sheet would wrap it three times and bury the copy
+          control below the fold. */}
       <Modal
         open={Boolean(created)}
         onClose={() => setCreated(null)}
         dismissable={false}
+        size="lg"
         title="Save your API credentials"
         footer={
           <button className="btn-primary" onClick={() => setCreated(null)}>
@@ -347,43 +443,72 @@ export default function ApiKeys() {
           </button>
         }
       >
-        <div className="space-y-4">
-          <div className="flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2.5 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
-            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-            <span>
-              This is the only time the secret is shown. Copy it into your secret
-              manager now — if you lose it you will have to revoke this key and
-              create another.
-            </span>
+        <div>
+          <div className="flex gap-3">
+            <AlertTriangle
+              size={16}
+              className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400"
+              aria-hidden
+            />
+            <div className="min-w-0">
+              <span className="runhead text-amber-600 dark:text-amber-400">
+                Shown once
+              </span>
+              <p className="measure mt-1.5 text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                This is the only time the secret is shown. Copy it into your secret
+                manager now — if you lose it you will have to revoke this key and
+                create another.
+              </p>
+            </div>
           </div>
 
           {created?.authMode === 'hmac' ? (
             <>
-              <SecretRow label="API Key (public id)" value={created.apiKey} />
-              <SecretRow label="API Secret" value={created.apiSecret} highlight />
-              <CodeBlock
-                tabs={[
-                  {
-                    label: 'Headers',
-                    code: `X-Api-Key: ${created.apiKey}
+              <SecretRow label="API key · public id" value={created.apiKey} copyLabel="Copy key" />
+              <SecretRow
+                label="API secret"
+                value={created.apiSecret}
+                copyLabel="Copy secret"
+                emphasis
+              />
+              <div className="mt-8">
+                <span className="runhead">Request headers</span>
+                <div className="mt-2.5">
+                  <CodeBlock
+                    tabs={[
+                      {
+                        label: 'Headers',
+                        code: `X-Api-Key: ${created.apiKey}
 X-Timestamp: <unix seconds>
 X-Signature: hmac_sha256(apiSecret, timestamp + "." + rawBody)`,
-                  },
-                ]}
-              />
+                      },
+                    ]}
+                  />
+                </div>
+              </div>
             </>
           ) : (
             created && (
               <>
-                <SecretRow label="Bearer token" value={created.apiSecret} highlight />
-                <CodeBlock
-                  tabs={[
-                    {
-                      label: 'Headers',
-                      code: `X-Api-Key: ${created.apiSecret}`,
-                    },
-                  ]}
+                <SecretRow
+                  label="Bearer token"
+                  value={created.apiSecret}
+                  copyLabel="Copy token"
+                  emphasis
                 />
+                <div className="mt-8">
+                  <span className="runhead">Request headers</span>
+                  <div className="mt-2.5">
+                    <CodeBlock
+                      tabs={[
+                        {
+                          label: 'Headers',
+                          code: `X-Api-Key: ${created.apiSecret}`,
+                        },
+                      ]}
+                    />
+                  </div>
+                </div>
               </>
             )
           )}
@@ -422,37 +547,36 @@ X-Signature: hmac_sha256(apiSecret, timestamp + "." + rawBody)`,
           </>
         }
       >
-        <p className="text-sm text-slate-600 dark:text-slate-300">
+        <p className="measure text-sm leading-relaxed text-slate-600 dark:text-slate-300">
           Use this if you think a key has leaked and you are not sure which one.
         </p>
-        <ul className="mt-3 space-y-1.5 text-sm text-slate-600 dark:text-slate-300">
-          <li className="flex gap-2">
-            <span aria-hidden>•</span>
-            <span>
-              <strong>Every active key is revoked immediately</strong>, including
-              bearer keys. Every integration you run will start failing with 401
-              until you deploy the new credentials.
-            </span>
-          </li>
-          <li className="flex gap-2">
-            <span aria-hidden>•</span>
-            <span>
-              One new <strong>HMAC-signed</strong> key is issued. Its secret is
-              shown once and never again.
-            </span>
-          </li>
-          <li className="flex gap-2">
-            <span aria-hidden>•</span>
-            <span>This cannot be undone.</span>
-          </li>
+
+        {/* The consequences, numbered and ruled — the same ordered list the
+            public pages set their claims in. A merchant about to break every
+            integration they run should be able to count what happens. */}
+        <ul className="mt-5">
+          {CONSEQUENCES.map((c, i) => (
+            <li key={c.head} className="rule flex gap-4 py-3">
+              <span className="runhead num w-6 shrink-0 pt-0.5">
+                {String(i + 1).padStart(2, '0')}
+              </span>
+              <span className="measure text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                <strong className="font-semibold text-slate-900 dark:text-slate-100">
+                  {c.head}
+                </strong>{' '}
+                {c.body}
+              </span>
+            </li>
+          ))}
         </ul>
-        <p className="mt-4 text-sm text-slate-600 dark:text-slate-300">
-          For ordinary rotation, create a new key, move your integration across,
-          then revoke the old one — no downtime.
+
+        <p className="measure mt-5 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+          For ordinary rotation, create a new key, move your integration across, then
+          revoke the old one — no downtime.
         </p>
 
-        <label className="label mt-5" htmlFor="regen-confirm">
-          Type <code className="font-mono text-xs">REVOKE ALL</code> to confirm
+        <label className="label mt-6" htmlFor="regen-confirm">
+          Type <code className="code">REVOKE ALL</code> to confirm
         </label>
         <input
           id="regen-confirm"
@@ -464,7 +588,9 @@ X-Signature: hmac_sha256(apiSecret, timestamp + "." + rawBody)`,
         />
 
         {regenerate.isError && (
-          <p className="mt-3 text-sm text-red-600">{errorMessage(regenerate.error)}</p>
+          <p className="mt-3 text-sm text-red-600 dark:text-red-400">
+            {errorMessage(regenerate.error)}
+          </p>
         )}
       </Modal>
 
@@ -492,19 +618,75 @@ X-Signature: hmac_sha256(apiSecret, timestamp + "." + rawBody)`,
           </>
         }
       >
-        <p className="text-sm text-slate-600 dark:text-slate-300">
-          <code className="font-mono text-xs">{revoking?.apiKey}</code> stops working
-          immediately. Any integration still using it will start failing with 401.
-          This cannot be undone.
+        <div className="rule-strong pt-4">
+          <span className="runhead">Key</span>
+          <code className="mt-2 block break-all font-mono text-sm text-slate-900 dark:text-slate-50">
+            {revoking?.apiKey}
+          </code>
+        </div>
+        <p className="measure mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+          It stops working immediately. Any integration still using it will start
+          failing with 401. This cannot be undone.
         </p>
         {revoke.isError && (
-          <p className="mt-3 text-sm text-red-600">{errorMessage(revoke.error)}</p>
+          <p className="mt-3 text-sm text-red-600 dark:text-red-400">
+            {errorMessage(revoke.error)}
+          </p>
         )}
       </Modal>
     </>
   );
 }
 
+const CONSEQUENCES = [
+  {
+    head: 'Every active key is revoked immediately,',
+    body: 'including bearer keys. Every integration you run will start failing with 401 until you deploy the new credentials.',
+  },
+  {
+    head: 'One new HMAC-signed key is issued.',
+    body: 'Its secret is shown once and never again.',
+  },
+  { head: 'This cannot be undone.', body: '' },
+];
+
+/**
+ * The credential's auth mode, as an icon, a word and an ink — never a fill.
+ *
+ * `Signed` is neutral because it is the correct, unremarkable default; `Bearer`
+ * takes amber because it is the posture that wants attention (it cannot hold
+ * payout scope and it is only as safe as the network it travels on). Brand is
+ * deliberately absent: this is an attribute of a key, not something you click.
+ */
+function AuthModeMark({ mode }: { mode: ApiKeyAuthMode }) {
+  const signed = mode === 'hmac';
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap text-[11px] font-medium uppercase tracking-[0.1em] ${
+        signed
+          ? 'text-slate-600 dark:text-slate-400'
+          : 'text-amber-600 dark:text-amber-400'
+      }`}
+    >
+      {signed ? (
+        <ShieldCheck size={12} className="shrink-0" aria-hidden />
+      ) : (
+        <KeyRound size={12} className="shrink-0" aria-hidden />
+      )}
+      {signed ? 'Signed' : 'Bearer'}
+    </span>
+  );
+}
+
+/**
+ * A choice in the mode picker, set as a ruled row.
+ *
+ * The selected row is marked by INK WEIGHT — its opening rule goes from the
+ * hairline to slate-900 — rather than by a brand fill. Both rows carry a 2px
+ * border at all times and only the colour changes, so selecting one cannot
+ * shift the layout by a pixel. The radio itself is still the primary carrier,
+ * as it is in every radio group ever built.
+ */
 function ModeOption({
   selected,
   onSelect,
@@ -522,30 +704,34 @@ function ModeOption({
 }) {
   return (
     <label
-      className={`flex cursor-pointer gap-3 rounded-xl border p-4 transition ${
+      className={`flex cursor-pointer gap-3 border-t-2 py-4 transition-colors duration-[var(--dur-press)] ${
         selected
-          ? 'border-brand-500 bg-brand-50/60 ring-1 ring-brand-500/30 dark:bg-brand-900/15'
-          : 'border-slate-200 hover:border-slate-300 dark:border-slate-700 dark:hover:border-slate-600'
+          ? 'border-slate-900 dark:border-slate-100'
+          : 'border-slate-200 dark:border-slate-800'
       }`}
     >
       <input
         type="radio"
         name="authMode"
-        className="mt-1 h-4 w-4 shrink-0 border-slate-300 text-brand-600 focus:ring-brand-500"
+        className="mt-0.5 h-4 w-4 shrink-0 border-slate-300 text-brand-600 focus:ring-brand-500 dark:border-slate-600 dark:bg-slate-800"
         checked={selected}
         onChange={onSelect}
       />
       <span className="min-w-0">
-        <span className="flex items-center gap-2">
-          <Icon size={15} className="text-slate-500" />
-          <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+        <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+          <Icon size={14} className="shrink-0 text-slate-500 dark:text-slate-400" aria-hidden />
+          <span
+            className={`text-sm ${
+              selected
+                ? 'font-semibold text-slate-900 dark:text-slate-50'
+                : 'font-medium text-slate-700 dark:text-slate-300'
+            }`}
+          >
             {title}
           </span>
-          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-            {badge}
-          </span>
+          <span className="runhead">{badge}</span>
         </span>
-        <span className="mt-1 block text-xs leading-relaxed text-slate-600 dark:text-slate-400">
+        <span className="measure mt-1.5 block text-xs leading-relaxed text-slate-600 dark:text-slate-400">
           {body}
         </span>
       </span>
@@ -553,34 +739,57 @@ function ModeOption({
   );
 }
 
+/**
+ * One credential, in the dialog that shows it for the only time.
+ *
+ * `emphasis` is the secret itself: opened by the ink rule rather than a
+ * hairline, set at reading size, and copied by a full-width control.
+ *
+ * `!text-sm` and `!rounded-lg` carry the important modifier ON PURPOSE, and it
+ * is not belt-and-braces. CopyButton composes `${className}` onto a base that
+ * already sets `text-xs` and `rounded-md`, and appending a class to a string
+ * does not win a cascade — same specificity means the utility emitted LATER in
+ * the stylesheet wins, and Tailwind emits `.text-xs` after `.text-sm` and
+ * `.rounded-md` after `.rounded-lg`. I checked the compiled bundle rather than
+ * assuming: without the bang, the label on the one control that must not be
+ * missed renders at 12px, not 14px. The `!` escape hatch on this component is
+ * already the house pattern — CodeBlock uses it on its own CopyButton. The
+ * remaining overrides (colour, weight, padding, width) do win on source order,
+ * verified the same way.
+ */
 function SecretRow({
   label,
   value,
-  highlight = false,
+  copyLabel,
+  emphasis = false,
 }: {
   label: string;
   value: string;
-  highlight?: boolean;
+  copyLabel: string;
+  emphasis?: boolean;
 }) {
   return (
-    <div>
-      <p className="label">{label}</p>
-      <div
-        className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${
-          highlight
-            ? 'border-brand-300 bg-brand-50 dark:border-brand-700 dark:bg-brand-900/20'
-            : 'border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800/60'
+    <div className={`mt-7 ${emphasis ? 'rule-strong pt-4' : 'rule pt-4'}`}>
+      <span className="runhead">{label}</span>
+      <code
+        className={`mt-2 block break-all font-mono ${
+          emphasis
+            ? 'text-[15px] leading-relaxed text-slate-900 dark:text-slate-50'
+            : 'text-[13px] leading-relaxed text-slate-700 dark:text-slate-300'
         }`}
       >
-        <code
-          className={`min-w-0 flex-1 break-all font-mono text-sm ${
-            highlight ? 'text-brand-800 dark:text-brand-200' : ''
-          }`}
-        >
-          {value}
-        </code>
-        <CopyButton value={value} />
-      </div>
+        {value}
+      </code>
+      {emphasis ? (
+        <CopyButton
+          value={value}
+          label={copyLabel}
+          size={15}
+          className="mt-4 w-full justify-center !rounded-lg border border-slate-300 py-3 !text-sm font-semibold text-slate-900 hover:text-slate-900 dark:border-slate-700 dark:text-slate-100 dark:hover:text-slate-100"
+        />
+      ) : (
+        <CopyButton value={value} label={copyLabel} className="-ml-2 mt-1.5" />
+      )}
     </div>
   );
 }

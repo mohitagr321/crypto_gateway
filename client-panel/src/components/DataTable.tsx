@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ArrowDown, ArrowUp, ChevronsUpDown, Inbox } from 'lucide-react';
-import { LoadingPanel } from './Spinner';
+import { ArrowDown, ArrowUp, ChevronsUpDown } from 'lucide-react';
 
 export interface Column<T> {
   key: string;
@@ -16,6 +15,22 @@ export interface Column<T> {
    * an actions column or a rendered badge with no natural order.
    */
   sortValue?: (row: T) => string | number;
+  /**
+   * MONEY, AND ANYTHING ELSE READ AS A QUANTITY. Ranges the column right — so
+   * the decimal points stack and the eye can compare magnitudes down the
+   * column instead of reading every figure — and sets tabular lining numerals
+   * on the cell and its header together.
+   *
+   * A money column that is not marked `numeric` is a bug you can see from
+   * across the room: 1,240.00 and 9.50 start at the same left edge and look
+   * the same size.
+   */
+  numeric?: boolean;
+  /**
+   * Ranging override for columns that are not quantities — an actions column
+   * usually wants 'right'. `numeric` already implies 'right'.
+   */
+  align?: 'left' | 'right';
 }
 
 interface DataTableProps<T> {
@@ -27,15 +42,57 @@ interface DataTableProps<T> {
   emptyLabel?: string;
   /** Shown under the empty label — say what to do, not just that there is nothing. */
   emptyHint?: ReactNode;
+  /** A control that resolves the empty state: "Create a payment", "Clear filters". */
+  emptyAction?: ReactNode;
   onRetry?: () => void;
   onRowClick?: (row: T) => void;
   /** Column key to sort by on first render. */
   defaultSortKey?: string;
   defaultSortDir?: 'asc' | 'desc';
+  /** Ghost rows drawn while loading. Match the page size you actually render. */
+  skeletonRows?: number;
+  /**
+   * Stacked fallback for narrow screens. When supplied, the table is replaced
+   * below `md` by a ruled list of these, which beats making a merchant drag a
+   * six-column ledger sideways on a phone. Return the row's own layout; the
+   * rule and the hit area are drawn for you.
+   */
+  renderMobile?: (row: T) => ReactNode;
+  /**
+   * Freeze the first column while the rest scrolls sideways. Worth it when
+   * column one is the identity of the row (order id, payout id) and worthless
+   * otherwise, so it is opt-in.
+   */
+  stickyFirstColumn?: boolean;
+  /** Names the scroll region for screen readers and for the keyboard scroller. */
+  label?: string;
+  /**
+   * Cap the table's height (e.g. '70vh') and let it scroll inside that box.
+   *
+   * THIS IS THE ONLY WAY THE STICKY HEADER ACTUALLY STICKS, and it is worth
+   * knowing why before you copy a `sticky` class around. A box that scrolls
+   * sideways is a vertical scroll container too — the spec coerces overflow-y
+   * to `auto`/`hidden` the moment overflow-x is `auto` — so a sticky header
+   * inside it resolves against THAT box rather than the page. With no height
+   * limit the box never scrolls, and the header sticks to nothing. That is
+   * exactly what shipped before: the header was marked sticky and had never
+   * stuck once.
+   *
+   * Give it a height and the box becomes the scroller, the header pins to its
+   * top, and the merchant keeps the column meaning through a thousand rows.
+   * The cost is a nested scroll region, so it is opt-in per page: worth it on
+   * a long list (payments, payouts), pointless on a five-row summary.
+   */
+  maxHeight?: string;
 }
 
 /**
- * The table every list page renders.
+ * The table every list page renders — set as a LEDGER.
+ *
+ * Hairline rules between rows, a running head over an ink rule for the header,
+ * money ranged right on tabular figures, and no enclosure at all: the table is
+ * placed on the page rather than inside a card. See the LEDGER block in
+ * index.css for the ground/sticky mechanics.
  *
  * Sorting is CLIENT-SIDE and only ever reorders the rows it was handed. On a
  * paginated page that means it sorts the current page, not the whole result
@@ -51,10 +108,16 @@ export default function DataTable<T>({
   error = null,
   emptyLabel = 'No records found.',
   emptyHint,
+  emptyAction,
   onRetry,
   onRowClick,
   defaultSortKey,
   defaultSortDir = 'desc',
+  skeletonRows = 6,
+  renderMobile,
+  stickyFirstColumn = false,
+  label,
+  maxHeight,
 }: DataTableProps<T>) {
   const [sortKey, setSortKey] = useState<string | undefined>(defaultSortKey);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>(defaultSortDir);
@@ -73,39 +136,6 @@ export default function DataTable<T>({
     });
   }, [rows, columns, sortKey, sortDir]);
 
-  if (loading) return <LoadingPanel />;
-
-  if (error) {
-    return (
-      <div className="flex min-h-[220px] flex-col items-center justify-center gap-3 px-6 text-center">
-        <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
-        {onRetry && (
-          <button type="button" className="btn-secondary" onClick={onRetry}>
-            Retry
-          </button>
-        )}
-      </div>
-    );
-  }
-
-  if (rows.length === 0) {
-    return (
-      <div className="flex min-h-[220px] flex-col items-center justify-center gap-2 px-6 text-center">
-        <span className="mb-1 flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100 text-slate-400 dark:bg-slate-800">
-          <Inbox size={20} />
-        </span>
-        <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
-          {emptyLabel}
-        </p>
-        {emptyHint && (
-          <p className="max-w-sm text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-            {emptyHint}
-          </p>
-        )}
-      </div>
-    );
-  }
-
   const toggleSort = (key: string) => {
     if (sortKey === key) {
       setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -115,72 +145,197 @@ export default function DataTable<T>({
     }
   };
 
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-sm">
-        <thead>
-          {/* Sticky header: a merchant scrolling a long payment list loses the
-              column meaning immediately without it. */}
-          <tr className="sticky top-0 z-10 border-b border-slate-200 bg-white/95 text-left backdrop-blur dark:border-slate-800 dark:bg-slate-900/95">
-            {columns.map((col) => {
-              const sortable = Boolean(col.sortValue);
-              const activeSort = sortKey === col.key;
-              return (
-                <th
-                  key={col.key}
-                  aria-sort={
-                    activeSort ? (sortDir === 'asc' ? 'ascending' : 'descending') : undefined
-                  }
-                  className={`whitespace-nowrap px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 ${
-                    col.hideOnMobile ? 'hidden md:table-cell' : ''
-                  } ${col.className ?? ''}`}
+  // `numeric` implies right-ranged; an explicit `align` always wins.
+  const isRight = (col: Column<T>) => col.align === 'right' || (!!col.numeric && !col.align);
+
+  const cellClass = (col: Column<T>, index: number) => {
+    return [
+      isRight(col) ? 'text-right' : '',
+      col.numeric ? 'num lining-nums' : '',
+      col.hideOnMobile ? 'hidden md:table-cell' : '',
+      stickyFirstColumn && index === 0 ? 'ledger-freeze' : '',
+      col.className ?? '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+  };
+
+  const head = (
+    <thead>
+      <tr>
+        {columns.map((col, i) => {
+          const sortable = Boolean(col.sortValue);
+          const activeSort = sortKey === col.key;
+          const right = isRight(col);
+          return (
+            <th
+              key={col.key}
+              scope="col"
+              aria-sort={
+                activeSort ? (sortDir === 'asc' ? 'ascending' : 'descending') : undefined
+              }
+              className={cellClass(col, i)}
+            >
+              {sortable ? (
+                <button
+                  type="button"
+                  onClick={() => toggleSort(col.key)}
+                  className={`inline-flex items-center gap-1 rounded-sm outline-none transition-colors duration-100 hover:text-slate-900 focus-visible:ring-2 focus-visible:ring-brand-500 dark:hover:text-slate-100 ${
+                    right ? 'flex-row-reverse' : ''
+                  }`}
                 >
-                  {sortable ? (
-                    <button
-                      type="button"
-                      onClick={() => toggleSort(col.key)}
-                      className="group inline-flex items-center gap-1 transition hover:text-slate-800 dark:hover:text-slate-200"
-                    >
-                      {col.header}
-                      {activeSort ? (
-                        sortDir === 'asc' ? (
-                          <ArrowUp size={12} />
-                        ) : (
-                          <ArrowDown size={12} />
-                        )
-                      ) : (
-                        <ChevronsUpDown
-                          size={12}
-                          className="opacity-0 transition group-hover:opacity-60"
-                        />
-                      )}
-                    </button>
+                  {col.header}
+                  {/* The affordance is always present, not hover-revealed: a
+                      sortable column nobody knows is sortable is not sortable. */}
+                  {activeSort ? (
+                    sortDir === 'asc' ? (
+                      <ArrowUp size={12} className="shrink-0" />
+                    ) : (
+                      <ArrowDown size={12} className="shrink-0" />
+                    )
                   ) : (
-                    col.header
+                    <ChevronsUpDown size={12} className="shrink-0 text-slate-400" />
                   )}
-                </th>
-              );
-            })}
+                </button>
+              ) : (
+                col.header
+              )}
+            </th>
+          );
+        })}
+      </tr>
+    </thead>
+  );
+
+  /**
+   * Every non-row state keeps the ledger's frame — the running heads stay, and
+   * one cell spans the width. A page that swaps its whole table for a centred
+   * icon the moment a filter matches nothing makes the merchant re-find the
+   * columns each time; this way only the body changes.
+   */
+  const frame = (body: ReactNode) => (
+    <div className="ledger-scroll">
+      <table className="ledger">
+        {head}
+        <tbody>
+          <tr>
+            <td colSpan={columns.length} className="py-0">
+              {body}
+            </td>
           </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+        </tbody>
+      </table>
+    </div>
+  );
+
+  if (loading) {
+    return (
+      <>
+        <span className="sr-only" role="status">
+          Loading…
+        </span>
+        <div className="ledger-scroll" aria-busy="true">
+          <table className="ledger">
+            {head}
+            <tbody>
+              {Array.from({ length: skeletonRows }, (_, r) => (
+                <tr key={r} className="ledger-row">
+                  {columns.map((col, i) => (
+                    <td key={col.key} className={cellClass(col, i)}>
+                      {/* Static, and stepped down the page so the block reads
+                          as "not loaded yet" without a single frame of
+                          animation — the frequency boundary bans loops here. */}
+                      <span
+                        aria-hidden
+                        className="ghost h-3"
+                        style={{
+                          width: GHOST_WIDTHS[(r + i) % GHOST_WIDTHS.length],
+                          opacity: Math.max(0.25, 1 - r * 0.12),
+                          marginLeft: isRight(col) ? 'auto' : undefined,
+                        }}
+                      />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </>
+    );
+  }
+
+  if (error) {
+    return frame(
+      <div className="py-12">
+        <span className="runhead text-red-600 dark:text-red-400">Could not load</span>
+        <p className="measure mt-3 text-base leading-relaxed text-slate-700 dark:text-slate-300">
+          {error}
+        </p>
+        {onRetry && (
+          <button type="button" className="btn-secondary mt-5" onClick={onRetry}>
+            Retry
+          </button>
+        )}
+      </div>,
+    );
+  }
+
+  if (rows.length === 0) {
+    return frame(
+      <div className="py-12">
+        <span className="runhead">Nothing here</span>
+        <p className="measure mt-3 text-base leading-relaxed text-slate-700 dark:text-slate-300">
+          {emptyLabel}
+        </p>
+        {emptyHint && (
+          <p className="measure mt-2 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+            {emptyHint}
+          </p>
+        )}
+        {emptyAction && <div className="mt-5 flex flex-wrap gap-2">{emptyAction}</div>}
+      </div>,
+    );
+  }
+
+  const table = (
+    <div
+      className="ledger-scroll"
+      style={maxHeight ? { maxHeight } : undefined}
+      // A scroll container has to be reachable without a mouse, and a region
+      // has to be named to be announced.
+      role="region"
+      aria-label={label ?? 'Table'}
+      tabIndex={0}
+    >
+      <table className="ledger">
+        {head}
+        <tbody>
           {sorted.map((row) => (
             <tr
               key={rowKey(row)}
               onClick={onRowClick ? () => onRowClick(row) : undefined}
-              className={`transition-colors ${
+              // Focusable, and Enter opens it. The row keeps its `row` role —
+              // relabelling it as a button would break the table for a screen
+              // reader to buy a keyboard affordance we can add without that.
+              tabIndex={onRowClick ? 0 : undefined}
+              onKeyDown={
                 onRowClick
-                  ? 'cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                  ? (e) => {
+                      if (e.key === 'Enter' && e.target === e.currentTarget) {
+                        onRowClick(row);
+                      }
+                    }
+                  : undefined
+              }
+              className={`ledger-row outline-none ${
+                onRowClick
+                  ? 'ledger-row-click focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500'
                   : ''
               }`}
             >
-              {columns.map((col) => (
-                <td
-                  key={col.key}
-                  className={`px-4 py-3 align-middle text-slate-700 dark:text-slate-300 ${
-                    col.hideOnMobile ? 'hidden md:table-cell' : ''
-                  } ${col.className ?? ''}`}
-                >
+              {columns.map((col, i) => (
+                <td key={col.key} className={cellClass(col, i)}>
                   {col.render(row)}
                 </td>
               ))}
@@ -190,4 +345,49 @@ export default function DataTable<T>({
       </table>
     </div>
   );
+
+  if (!renderMobile) return table;
+
+  return (
+    <>
+      {/* The stacked ledger: the same ink rule opens it, the same hairlines
+          divide it. Only the row's own layout changes. */}
+      <ul className="border-t border-slate-900 md:hidden dark:border-slate-100">
+        {sorted.map((row) => (
+          <li
+            key={rowKey(row)}
+            className="border-t border-slate-200 first:border-t-0 dark:border-slate-800"
+          >
+            <div
+              onClick={onRowClick ? () => onRowClick(row) : undefined}
+              tabIndex={onRowClick ? 0 : undefined}
+              onKeyDown={
+                onRowClick
+                  ? (e) => {
+                      if (e.key === 'Enter' && e.target === e.currentTarget) {
+                        onRowClick(row);
+                      }
+                    }
+                  : undefined
+              }
+              className={`py-3.5 outline-none ${
+                onRowClick
+                  ? 'cursor-pointer focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500'
+                  : ''
+              }`}
+            >
+              {renderMobile(row)}
+            </div>
+          </li>
+        ))}
+      </ul>
+      <div className="hidden md:block">{table}</div>
+    </>
+  );
 }
+
+/**
+ * Ghost bar widths. Deliberately uneven and cycled by (row + column) so the
+ * placeholder reads as text of varying length rather than a barcode.
+ */
+const GHOST_WIDTHS = ['72%', '46%', '84%', '58%', '38%', '66%'];

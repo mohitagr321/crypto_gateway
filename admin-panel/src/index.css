@@ -1,8 +1,72 @@
+/* Inter Variable, self-hosted.
+
+   THE FONT BUG, in the shape it took in this app. tailwind.config.js has named
+   `Inter` as the head of the sans stack since the beginning, but nothing in the
+   admin panel ever loaded a font file and the package was not even a dependency
+   — so every operator screen has been rendering in system-ui, while the client
+   panel (which does self-host) rendered in Inter. Two panels of one product,
+   set in two different typefaces.
+
+   The name below is the one that matters: fontsource registers the family as
+   'Inter Variable'. Importing the package while asking for plain 'Inter' is the
+   near-miss that let the same bug survive its own fix in the client panel.
+
+   `/opsz.css` rather than the barrel: the barrel ships the wght axis only, so
+   `font-optical-sizing: auto` on .figure-xl would be a no-op. This build carries
+   wght 100-900 AND the optical-size axis, which is what makes the display sizes
+   tighten correctly instead of looking like scaled-up body text. */
+@import '@fontsource-variable/inter/opsz.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
+  /* ===================================================================
+   * MOTION
+   *
+   * THE FREQUENCY BOUNDARY. How often a person sees a surface decides how
+   * much it may move.
+   *   - MARKETING routes are seen once or twice. They earn reveals, parallax
+   *     and scrubbed scenes. THIS APP HAS NONE — the operator console is
+   *     dashboard end to end, which means it lives entirely inside the hard
+   *     budget below and the marketing primitives are deliberately not ported.
+   *   - DASHBOARD routes are opened dozens of times a day and get a hard
+   *     budget: nothing over 200ms, nothing travelling more than 8px, nothing
+   *     that loops, no page-level entrance, no count-up on mount. A command
+   *     palette opens INSTANTLY — a keyboard-initiated action is never
+   *     animated, because the user is already ahead of it.
+   *
+   * THE DATA-DRIVEN LAW. On the dashboard nothing animates on MOUNT; things
+   * animate only when a value actually CHANGES. That is what buys motion on a
+   * surface an operator lives in without taxing them for visiting it. An
+   * operator refreshes this panel all day; an entrance animation would be a
+   * tax charged once per visit, forever.
+   *
+   * CRAFT RULES. Never `ease-in` on UI. Never `scale(0)` — entry is
+   * scale(0.97) + opacity 0. Exit runs ~20% faster than entry. Popovers scale
+   * from their transform-origin; modals stay centred. Stagger 30-80ms and
+   * never block interaction. Animate compositor-only properties: transform and
+   * opacity. `transition-all`, and any transition or animation on
+   * width/height/top/left/margin/padding, is a layout animation and is BANNED —
+   * use transform: scaleX() with transform-origin: 0.
+   * =================================================================== */
+  :root {
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-set: cubic-bezier(0.16, 1, 0.3, 1); /* type settling into place */
+    --ease-inout: cubic-bezier(0.77, 0, 0.175, 1); /* on-screen movement only */
+
+    --dur-press: 120ms;
+    --dur-pop: 180ms;
+    --dur-menu: 220ms;
+    --dur-modal: 260ms;
+    --dur-morph: 320ms;
+    --dur-set: 520ms;
+    --dur-rule: 620ms;
+  }
+
+  /* The app shell is a full-height flex column; this is load-bearing layout,
+     not styling, and predates the restyle. */
   html,
   body,
   #root {
@@ -10,10 +74,13 @@
   }
 
   html {
+    font-family: 'Inter Variable', Inter, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
     /* Tell the BROWSER which theme is active, not just our own CSS. Without
        this, an operator whose OS is dark but who picks the light theme in-app
        gets UA-rendered controls (input fills, scrollbars, date pickers,
-       autofill) painted dark on our white cards. Mirrors the client panel. */
+       autofill) painted dark on our white cards. `color-scheme` is the only
+       thing that reaches those. */
     color-scheme: light;
   }
   html.dark {
@@ -21,98 +88,296 @@
   }
 
   body {
-    @apply bg-gray-50 text-gray-900 antialiased;
-    @apply dark:bg-gray-950 dark:text-gray-100;
-    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
   }
 
+  /* Preflight resolves a bare `border` / `border-t` to borderColor.DEFAULT,
+     which has no dark variant — 17 call sites in this app rely on this rule to
+     get a sane stroke in both themes. Remapped, not removed. */
   * {
-    @apply border-gray-200 dark:border-gray-800;
+    @apply border-slate-200 dark:border-slate-800;
   }
 
-  /* Thin, theme-aware scrollbars, matching the client panel. */
+  /* Thin, theme-aware scrollbars. Identical to the client panel, down to the
+     8px track — a chrome detail that differs between two windows of one product
+     is noticed even when nobody can say what changed. */
   * {
     scrollbar-width: thin;
-    scrollbar-color: rgb(148 163 184 / 0.5) transparent;
+    /* slate-400 as a literal, because scrollbar-color takes no utility. The
+       value that used to sit here was rgb(148 163 184), Tailwind's COOL
+       slate-400, which would have survived the remap and left a blue thumb
+       riding down every warm page. Kept in step with the ramp by hand. */
+    scrollbar-color: rgb(148 145 138 / 0.5) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-slate-300 dark:bg-slate-700;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
   }
 }
 
 @layer components {
-  /* Raised surface rather than an outlined rectangle — the border-only
-     treatment is why this panel read flat next to the client panel. */
+  /* The console's primary surface. Warm border and a soft shadow so cards read
+     as raised rather than as outlined rectangles — the border-only treatment is
+     why this panel looked flat in dark mode. */
   .card {
-    @apply rounded-xl border border-gray-200 bg-white shadow-soft dark:border-gray-800 dark:bg-gray-900;
+    @apply rounded-2xl border border-slate-200/90 bg-white shadow-soft
+           dark:border-slate-800 dark:bg-slate-900/70;
+  }
+  /* Interactive card (a link, a tile you can click). Within the 8px / 200ms
+     dashboard budget, and keyed to hover rather than to render. */
+  .card-hover {
+    @apply card transition duration-200 hover:-translate-y-0.5 hover:shadow-lift
+           hover:border-slate-300 dark:hover:border-slate-700;
   }
 
   .input {
-    @apply w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm outline-none
-      transition placeholder:text-gray-400
-      focus:border-brand-500 focus:ring-2 focus:ring-brand-500/30
-      dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder:text-gray-500;
+    @apply w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-soft outline-none transition placeholder:text-slate-400 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-100 dark:placeholder:text-slate-500;
   }
-
   .label {
-    @apply mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300;
+    @apply mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300;
   }
 
-  /* All six states, and a `focus-visible` ring so a mouse click does not leave
-     one behind while a Tab always shows one. */
+  /* Every control ships all six states: default, hover, focus, active,
+     disabled, loading. The ring is `focus-visible`, not `focus` — a mouse
+     click should not leave a ring behind, but a Tab must always show one. */
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium
-      outline-none transition active:scale-[0.98]
-      focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-white
-      disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100
-      dark:focus-visible:ring-offset-gray-900;
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition duration-150 outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 active:scale-[0.98] dark:focus-visible:ring-offset-slate-900;
   }
-
   .btn-primary {
     @apply btn bg-brand-600 text-white shadow-soft hover:bg-brand-700 hover:shadow-lift focus-visible:ring-brand-500;
   }
-
   .btn-secondary {
-    @apply btn border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 focus-visible:ring-brand-500
-      dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700;
+    @apply btn border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 focus-visible:ring-brand-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700;
   }
-
+  .btn-ghost {
+    @apply btn text-slate-600 hover:bg-slate-100 focus-visible:ring-brand-500 dark:text-slate-300 dark:hover:bg-slate-800;
+  }
+  /* Destructive. Red here is a WARNING about the action, which is the same
+     meaning red carries on a failed payment — consistent, not a collision. */
   .btn-danger {
     @apply btn bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-500;
   }
 
-  .btn-ghost {
-    @apply btn text-gray-600 hover:bg-gray-100 focus-visible:ring-brand-500 dark:text-gray-300 dark:hover:bg-gray-800;
-  }
-
   /* Money and any figure read down a column. Tabular numerals hold digits at a
-     fixed width so amounts line up instead of jittering row to row. */
+     fixed width so amounts line up vertically instead of jittering row to row.
+     Money is always set with this — never a bare float. */
   .num {
     @apply tabular-nums;
   }
 
-  /* Loading placeholder with a sweep rather than a static grey block. */
+  /* Inline code inside prose — an identifier, header, address or literal the
+     reader may need to type or match exactly. Slate rather than brand: it is a
+     noun, not something you can click. */
+  .code {
+    @apply rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11.5px] text-slate-800
+           dark:bg-slate-800 dark:text-slate-200;
+  }
+
+  /* Section label above a group of cards. */
+  .section-label {
+    @apply text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500;
+  }
+
+  /* Bento tile. Spans are applied per instance so importance drives size —
+     the grid itself stays dumb. */
+  .tile {
+    @apply card flex flex-col p-5 sm:p-6;
+  }
+
+  /* Loading placeholder with a sweep, rather than a static grey block. */
   .skeleton {
-    @apply relative overflow-hidden rounded-lg bg-gray-100 dark:bg-gray-800/70;
+    @apply relative overflow-hidden rounded-xl bg-slate-100 dark:bg-slate-800/70;
   }
   .skeleton::after {
     @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r
            from-transparent via-white/50 to-transparent dark:via-white/5;
     content: '';
   }
+
+  /* ===================================================================
+   * BROADSHEET LAYER
+   * The editorial primitives, ported from the client panel so the operator
+   * console is set in the same idiom as the rest of the product.
+   *
+   *   RULES, NOT BOXES         a hairline divides content; a card is the
+   *                            exception, not the default
+   *   A MEASURE, NOT PADDING   body copy sits on a real reading measure,
+   *                            ranged left, rather than centred in a box
+   *   RUNNING HEADS            every band is labelled like a newspaper section
+   *   ASYMMETRY                a narrow margin column against a wide main one
+   *   ONE ENORMOUS FIGURE      the one number worth stating anchors the section
+   *
+   * BUT THIS IS NOT THE MARKETING SITE. It is a working surface an operator
+   * opens dozens of times a day. Editorial STRUCTURE yes — rules, running
+   * heads, real figures, restraint. Editorial THEATRE no: no giant heroes, no
+   * scroll choreography, no decorative whitespace that costs a row of data.
+   * Density and scanability win every tie on these routes. That is why the
+   * marketing primitives (.reveal, .parallax-slow, .aurora, the marquee and the
+   * mesh) are NOT ported — an orphaned .reveal renders content INVISIBLE where
+   * scroll-driven animation is unsupported, and nothing on this surface earns
+   * that risk.
+   * =================================================================== */
+
+  /* The workhorse. A hairline is how a newspaper separates two ideas — it costs
+     one pixel and no enclosure, where a card costs a border, a radius, a shadow
+     and 24px of padding on all four sides to say the same thing. On a dense
+     console that padding is a row of data. Works on a bare <div> and on an
+     <hr>: preflight has already zeroed the other three edges. */
+  .rule {
+    @apply border-t border-slate-200 dark:border-slate-800;
+  }
+  /* The heavier stroke that OPENS a section, not one that divides within it.
+     Ink rather than the hairline grey, because this is a masthead gesture: it
+     should read at a glance from across the page. Use it once per section. */
+  .rule-strong {
+    @apply border-t-2 border-slate-900 dark:border-slate-100;
+  }
+
+  /* THE READING MEASURE. Line length, not font size, is what decides whether a
+     paragraph gets read: past roughly 75 characters the eye loses the return
+     sweep and starts re-reading lines. 62ch is the comfortable centre of that
+     range. Ranged left and explicitly so — centred body copy ragged on both
+     sides is the single loudest tell of a template. */
+  .measure {
+    max-width: 62ch;
+    text-align: left;
+    text-wrap: pretty;
+  }
+  /* Wider measure for an intro or a standfirst, read in one gulp rather than
+     paragraph by paragraph, which can carry the longer line. */
+  .measure-wide {
+    max-width: 78ch;
+    text-align: left;
+    text-wrap: pretty;
+  }
+
+  /* THE RUNNING HEAD. Small, quiet, letter-spaced — it tells you which section
+     of the paper you are in without competing with the heading for the eye.
+     Usually sat above a .rule or alone in the .col-aside margin.
+     Deliberately slate, not brand: brand is reserved for things you can
+     actually click. */
+  .runhead {
+    @apply block text-xs font-medium uppercase tracking-[0.18em]
+           text-slate-500 dark:text-slate-400;
+  }
+
+  /* ONE ENORMOUS FIGURE PER SECTION — and on this surface, read that as a hard
+     ceiling rather than an invitation. Platform volume, an unreconciled
+     balance, a queue depth: set the ONE number a screen exists to answer at
+     display size and let it carry the composition, rather than filing it into a
+     row of identical stat cards where every number is the same size and
+     therefore none of them is the point. A second .figure-xl on the same screen
+     is theatre and costs a row of data.
+     Tabular, lining figures: these are read as quantities, and proportional
+     digits make a big number look hand-set at the wrong widths. */
+  .figure-xl {
+    font-size: clamp(3.25rem, 1.75rem + 6vw, 7.5rem);
+    line-height: 0.88;
+    letter-spacing: -0.045em;
+    font-weight: 640;
+    font-optical-sizing: auto;
+    @apply block tabular-nums lining-nums text-slate-900 dark:text-slate-50;
+  }
+  /* The caption that says what the figure counts. It has to be small: the
+     figure is the statement, this is the footnote that keeps it honest. On a
+     money figure it is also where the asset and network go — neither is ever
+     displayed independently of the other. */
+  .figure-label {
+    @apply mt-3 block text-sm leading-snug text-slate-500 dark:text-slate-400;
+  }
+
+  /* A BAND: full-width, opened by a rule, with its own vertical rhythm. The
+     editorial replacement for a card grid — stack bands down a page and it is
+     divided by strokes and space instead of by a dozen rounded boxes.
+
+     Rule on TOP only, so consecutive bands never double up and the last one
+     doesn't leave a stroke hanging under the page. IT DRAWS ITS OWN RULE:
+     pairing .band with a sibling .rule gives you two strokes.
+
+     The padding is the marketing rhythm and is generous for a console; on a
+     dense route override it with a py-* utility rather than reaching for a
+     second band class. */
+  .band {
+    @apply w-full border-t border-slate-200 py-12 sm:py-16 dark:border-slate-800;
+  }
+
+  /* The narrow margin column of the asymmetric grid — running head, timestamp,
+     a one-line gloss on what the main column is doing. Assumes a 12-column
+     grid; the span is a default and a utility on the element overrides it,
+     since utilities win over components. Quiet by design: this column annotates
+     the main one, it does not compete with it. */
+  .col-aside {
+    @apply text-sm leading-relaxed text-slate-500 md:col-span-3 dark:text-slate-400;
+  }
+
+  /* A link inside body copy. Ink text with a 1px brand underline sat 3px off
+     the baseline, so descenders stay legible and the link reads as part of the
+     sentence rather than as a coloured interruption of it.
+     THIS is the sanctioned decorative use of brand: an underline, drawn on
+     something you can genuinely click. Never a fill, never a heading, and never
+     to indicate state. */
+  .link-ink {
+    @apply text-slate-900 underline decoration-brand-600 decoration-1 underline-offset-[3px]
+           outline-none hover:decoration-brand-700 focus-visible:rounded-sm
+           focus-visible:ring-2 focus-visible:ring-brand-500
+           dark:text-slate-100 dark:decoration-brand-400 dark:hover:decoration-brand-300;
+  }
+
+  /* ===================================================================
+   * SEMANTIC COLOUR — meaning, never decoration.
+   *
+   *   brand (indigo)  the action you can take
+   *   emerald         money arrived / verified / healthy
+   *   amber           waiting on someone or something
+   *   red             money failed, or you are about to lose something
+   *   slate           everything else
+   *
+   * Colour is never the ONLY carrier of meaning — every status also ships a
+   * word, and a badge adds a dot for shape. Do not add a per-card accent hue.
+   * =================================================================== */
+
+  /* Money that came in, money that went out, money that failed. Each pairs with
+     `.num` so columns of figures stay aligned. */
+  .amount-in {
+    @apply num font-medium text-emerald-700 dark:text-emerald-400;
+  }
+  .amount-out {
+    @apply num font-medium text-slate-700 dark:text-slate-300;
+  }
+  .amount-fail {
+    @apply num font-medium text-red-700 dark:text-red-400;
+  }
 }
 
-/* Custom scrollbar for a tidy look */
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-::-webkit-scrollbar-thumb {
-  @apply rounded-full bg-gray-300 dark:bg-gray-700;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
+/* Accessibility: honour the OS setting. */
 @media (prefers-reduced-motion: reduce) {
-  .skeleton::after {
+  /* Hand-tuned entries first, because they encode judgement a blanket rule
+     cannot. These are the named animations this app actually runs. */
+  .animate-pulse,
+  .animate-shimmer,
+  .animate-fade-up {
     animation: none;
+  }
+
+  /* DEFENCE IN DEPTH. The catch-all sits underneath and closes the ~60
+     utilities nobody has enumerated, including any added tomorrow.
+
+     `.motion-keep` is the single opt-out, worn by the things that are genuinely
+     INFORMATION rather than decoration — above all the spinner, because a
+     frozen spinner reads as a hung request, and on this panel a hung request
+     means an operator is staring at a payout they cannot tell has been sent. */
+  *:not(.motion-keep),
+  *:not(.motion-keep)::before,
+  *:not(.motion-keep)::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

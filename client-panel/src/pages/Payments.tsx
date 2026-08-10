@@ -6,13 +6,38 @@ import { explorerTx, listPayments } from '@/lib/api';
 import { ALL_STATUSES, formatAmount, formatDate, shortHash } from '@/lib/format';
 import type { Payment, PaymentStatus } from '@/types';
 import PageHeader from '@/components/PageHeader';
-import { AssetBadge } from '@/components/AssetPicker';
 import DataTable, { type Column } from '@/components/DataTable';
 import { PaymentStatusBadge } from '@/components/Badge';
 import CopyButton from '@/components/CopyButton';
 
 const PAGE_SIZE = 25;
 
+/**
+ * THE LIST — a merchant's money-in ledger.
+ *
+ * Set as a ledger on the page rather than a table inside a card: the running
+ * heads sit over an ink rule, hairlines divide the rows, and the amount column
+ * is ranged right on tabular figures so magnitudes can be compared down the
+ * column instead of read one at a time. See the LEDGER block in index.css.
+ *
+ * ASSET AND NETWORK ARE ONE COLUMN, never two and never one without the other:
+ * USDT on BEP20 and USDT on TRC20 are different assets with different addresses,
+ * and a row that names only the symbol is a row that can be misread into a
+ * cross-network mistake. The amount is split off into its own numeric column so
+ * the decimal points stack — the pair travels with it as a label, not as a
+ * pill, because a column of tinted rectangles fights the hairlines.
+ *
+ * WHAT IS SERVER-SIDE AND WHAT IS NOT is stated on the page. The status filter
+ * and the pagination are requests; the search box and the column sorts only
+ * touch the rows already on screen. A merchant who searches an order id from
+ * three weeks ago and gets "no matches" deserves to know they searched one page
+ * of twenty-five, so the footnote under the ledger says so rather than leaving
+ * them to infer it.
+ *
+ * MOTION: none added. Rows tint on hover (120ms, colour only, from the
+ * primitive) and nothing else moves — this is a screen that gets opened dozens
+ * of times a day.
+ */
 export default function Payments() {
   const navigate = useNavigate();
   const [status, setStatus] = useState<PaymentStatus | ''>('');
@@ -24,6 +49,8 @@ export default function Payments() {
     queryFn: () => listPayments({ status, page, limit: PAGE_SIZE }),
     placeholderData: keepPreviousData,
   });
+
+  const pageRows = query.data?.data ?? [];
 
   const rows = useMemo(() => {
     const data = query.data?.data ?? [];
@@ -39,45 +66,63 @@ export default function Payments() {
 
   const total = query.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const searching = search.trim().length > 0;
+  const filtered = searching || status !== '';
+
+  const clearFilters = () => {
+    setSearch('');
+    setStatus('');
+    setPage(1);
+  };
 
   const columns: Column<Payment>[] = [
     {
       key: 'orderId',
       header: 'Order',
+      // The merchant's own reference, and the identity of the row — which is
+      // why it is the column worth freezing when the ledger scrolls sideways.
+      // Ink with a brand underline rather than brand text: brand marks the
+      // thing you can click, it does not colour a whole column of them.
+      sortValue: (p) => p.orderId,
       render: (p) => (
-        <Link
-          to={`/payments/${p.paymentId}`}
-          className="font-medium text-brand-600 hover:underline dark:text-brand-400"
-        >
+        <Link to={`/payments/${p.paymentId}`} className="link-ink font-medium">
           {p.orderId}
         </Link>
       ),
     },
     {
-      key: 'paymentId',
-      header: 'Payment ID',
-      hideOnMobile: true,
+      key: 'amount',
+      header: 'Amount',
+      // Ranged right on tabular figures by the primitive. A money column that
+      // is not `numeric` is a bug you can see from across the room.
+      numeric: true,
+      sortValue: (p) => Number(p.amount),
       render: (p) => (
-        <span className="flex items-center gap-1 font-mono text-xs">
-          {shortHash(p.paymentId, 8, 4)}
-          <CopyButton value={p.paymentId} size={12} />
+        <span className="font-medium text-slate-900 dark:text-slate-100">
+          {formatAmount(p.amount)}
         </span>
       ),
     },
     {
-      key: 'amount',
-      header: 'Amount',
-      render: (p) => (
-        <span className="flex items-center gap-2">
-          <span className="font-medium tabular-nums">{formatAmount(p.amount)}</span>
-          <AssetBadge asset={p.asset ?? p.currency} network={p.network} />
-        </span>
-      ),
+      key: 'asset',
+      header: 'Asset',
+      render: (p) => <AssetOnNetwork asset={p.asset ?? p.currency} network={p.network} />,
     },
     {
       key: 'status',
       header: 'Status',
       render: (p) => <PaymentStatusBadge status={p.status} />,
+    },
+    {
+      key: 'createdAt',
+      header: 'Created',
+      hideOnMobile: true,
+      sortValue: (p) => Date.parse(p.createdAt) || 0,
+      render: (p) => (
+        <span className="whitespace-nowrap text-slate-500 dark:text-slate-400">
+          {formatDate(p.createdAt)}
+        </span>
+      ),
     },
     {
       key: 'txHash',
@@ -89,23 +134,31 @@ export default function Payments() {
             href={explorerTx(p.txHash, p.network)}
             target="_blank"
             rel="noreferrer"
+            // The row navigates; this link leaves the app. Without this the
+            // merchant gets both.
             onClick={(e) => e.stopPropagation()}
-            className="inline-flex items-center gap-1 font-mono text-xs text-brand-600 hover:underline dark:text-brand-400"
+            className="link-ink inline-flex items-center gap-1 font-mono text-xs"
           >
             {shortHash(p.txHash)}
-            <ExternalLink size={11} />
+            <ExternalLink size={11} aria-hidden />
           </a>
         ) : (
-          <span className="text-slate-400">—</span>
+          // Never a bare dash: say which nothing this is.
+          <span className="text-slate-500 dark:text-slate-400">not seen yet</span>
         ),
     },
     {
-      key: 'createdAt',
-      header: 'Created',
+      key: 'paymentId',
+      header: 'Payment ID',
       hideOnMobile: true,
       render: (p) => (
-        <span className="whitespace-nowrap text-xs text-slate-500">
-          {formatDate(p.createdAt)}
+        <span className="flex items-center gap-1 whitespace-nowrap font-mono text-xs text-slate-500 dark:text-slate-400">
+          {shortHash(p.paymentId, 8, 4)}
+          {/* Copying used to navigate as well: the click bubbled to the row
+              handler, so "copy this id" opened the record every time. */}
+          <span onClick={(e) => e.stopPropagation()}>
+            <CopyButton value={p.paymentId} size={12} />
+          </span>
         </span>
       ),
     },
@@ -114,64 +167,153 @@ export default function Payments() {
   return (
     <>
       <PageHeader
+        eyebrow="Money in"
         title="Payments"
-        description="Full transaction history with filters."
+        description="Every payment your account has been asked for, settled or not."
         actions={
           <Link to="/payments/new" className="btn-primary">
-            <PlusCircle size={16} /> Create
+            <PlusCircle size={16} aria-hidden /> Create
           </Link>
+        }
+        meta={
+          query.isLoading ? undefined : (
+            <>
+              {total.toLocaleString()} payment{total === 1 ? '' : 's'}
+              {status && ` · ${status}`}
+              {query.isFetching && ' · updating'}
+            </>
+          )
         }
       />
 
-      <div className="card mb-4 flex flex-col gap-3 p-4 sm:flex-row sm:items-center">
-        <div className="relative flex-1">
-          <Search
-            size={16}
-            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
-          />
-          <input
-            className="input pl-9"
-            placeholder="Search order / payment ID / tx hash…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+      {/* The controls. No card: a row of fields on the page, closed by the
+          ledger's own ink rule a few lines below. */}
+      <div className="mb-5">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="relative flex-1">
+            <Search
+              size={16}
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+              aria-hidden
+            />
+            <input
+              className="input pl-9"
+              placeholder="Search order / payment ID / tx hash…"
+              aria-label="Search this page of payments"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+          <select
+            className="input sm:w-56"
+            aria-label="Filter by status"
+            value={status}
+            onChange={(e) => {
+              setStatus(e.target.value as PaymentStatus | '');
+              setPage(1);
+            }}
+          >
+            <option value="">All statuses</option>
+            {ALL_STATUSES.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+          {filtered && (
+            <button type="button" className="btn-secondary shrink-0" onClick={clearFilters}>
+              Clear
+            </button>
+          )}
         </div>
-        <select
-          className="input sm:w-56"
-          value={status}
-          onChange={(e) => {
-            setStatus(e.target.value as PaymentStatus | '');
-            setPage(1);
-          }}
-        >
-          <option value="">All statuses</option>
-          {ALL_STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
       </div>
 
-      <div className="card">
-        <DataTable
-          columns={columns}
-          rows={rows}
-          rowKey={(p) => p.paymentId}
-          loading={query.isLoading}
-          error={query.isError ? (query.error as { message?: string })?.message : null}
-          onRetry={() => query.refetch()}
-          onRowClick={(p) => navigate(`/payments/${p.paymentId}`)}
-          emptyLabel="No payments match your filters."
-        />
-
-        {total > PAGE_SIZE && (
-          <div className="flex items-center justify-between border-t border-slate-100 px-4 py-3 text-sm dark:border-slate-800">
-            <span className="text-slate-500">
-              Page {page} of {totalPages} · {total} total
+      <DataTable
+        columns={columns}
+        rows={rows}
+        rowKey={(p) => p.paymentId}
+        loading={query.isLoading}
+        error={query.isError ? (query.error as { message?: string })?.message : null}
+        onRetry={() => query.refetch()}
+        onRowClick={(p) => navigate(`/payments/${p.paymentId}`)}
+        label="Payments"
+        // Column one is the row's identity, so it is worth freezing when the
+        // seven columns run wider than the viewport.
+        stickyFirstColumn
+        // The only thing that makes the header actually stick: without a height
+        // the scroll box never scrolls and the header pins to nothing.
+        maxHeight="70vh"
+        // Enough ghost rows to fill the box, so nothing jumps when data lands.
+        skeletonRows={10}
+        renderMobile={(p) => (
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="min-w-0">
+              <span className="block truncate font-medium text-slate-900 dark:text-slate-50">
+                {p.orderId}
+              </span>
+              <span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">
+                {formatDate(p.createdAt)}
+              </span>
             </span>
-            <div className="flex gap-2">
+            <span className="shrink-0 text-right">
+              <span className="num lining-nums block font-medium text-slate-900 dark:text-slate-50">
+                {formatAmount(p.amount)}
+              </span>
+              <span className="mt-0.5 block text-xs">
+                <AssetOnNetwork asset={p.asset ?? p.currency} network={p.network} />
+              </span>
+              <span className="mt-1.5 block">
+                <PaymentStatusBadge status={p.status} />
+              </span>
+            </span>
+          </div>
+        )}
+        emptyLabel={
+          filtered
+            ? 'No payments on this page match these filters.'
+            : 'No payments yet.'
+        }
+        emptyHint={
+          filtered
+            ? `The status filter asks the server; the search box only looks at the ${PAGE_SIZE} rows on this page.`
+            : 'A payment appears here as soon as one is created — from the API, a payment link, or the Create button above.'
+        }
+        emptyAction={
+          filtered ? (
+            <button type="button" className="btn-secondary" onClick={clearFilters}>
+              Clear filters
+            </button>
+          ) : (
+            <Link to="/payments/new" className="btn-secondary">
+              Create a payment
+            </Link>
+          )
+        }
+      />
+
+      {/* The footer rule closes the ledger — the last row deliberately has
+          none, so this is the stroke that ends it. Suppressed on an error,
+          where the ledger's own frame is already saying what happened. */}
+      {!query.isError && (
+        <div className="rule mt-4 flex flex-col-reverse gap-3 pt-3 sm:flex-row sm:items-baseline sm:justify-between">
+          <p className="measure text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+            {searching && !query.isLoading && (
+              <>
+                <span className="num">{rows.length}</span> of{' '}
+                <span className="num">{pageRows.length}</span> rows on this page match.{' '}
+              </>
+            )}
+            Search and column sorting apply to this page only; the status filter and
+            paging are asked of the server.
+          </p>
+
+          {total > PAGE_SIZE && (
+            <nav className="flex shrink-0 items-center gap-3" aria-label="Pagination">
+              <span className="num text-xs text-slate-500 dark:text-slate-400">
+                Page {page} of {totalPages}
+              </span>
               <button
+                type="button"
                 className="btn-secondary"
                 disabled={page <= 1 || query.isFetching}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
@@ -179,16 +321,31 @@ export default function Payments() {
                 Previous
               </button>
               <button
+                type="button"
                 className="btn-secondary"
                 disabled={page >= totalPages || query.isFetching}
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
               >
                 Next
               </button>
-            </div>
-          </div>
-        )}
-      </div>
+            </nav>
+          )}
+        </div>
+      )}
     </>
+  );
+}
+
+/**
+ * The pair, never one half of it. Set as one label rather than a symbol plus a
+ * tinted network pill: the pill was a box in a page made of rules, and it read
+ * as a second status colour down the column.
+ */
+function AssetOnNetwork({ asset, network }: { asset: string; network: string }) {
+  return (
+    <span className="whitespace-nowrap">
+      <span className="font-medium text-slate-800 dark:text-slate-200">{asset}</span>
+      <span className="text-slate-500 dark:text-slate-400"> · {network}</span>
+    </span>
   );
 }

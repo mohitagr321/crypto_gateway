@@ -1,15 +1,19 @@
 import { useQuery } from '@tanstack/react-query';
-import { Wallet } from 'lucide-react';
 import { getAllBalances } from '@/lib/api';
 import { formatAmount } from '@/lib/format';
 
 /**
- * Per-asset balance cards, one per (network, asset) the merchant actually holds.
+ * Per-asset balances, one ruled column per (network, asset) the merchant holds.
  *
- * Deliberately NOT a single total. Balances are not fungible across assets or
- * chains — a USDC balance cannot fund a USDT payout, and BEP20 funds cannot
- * settle to a Tron wallet — so a combined figure would be a number the merchant
- * can never withdraw as one payout.
+ * DELIBERATELY NOT A SINGLE TOTAL, and this is the invariant to protect if
+ * anyone ever asks for one. Balances are not fungible across assets or chains —
+ * a USDC balance cannot fund a USDT payout, and BEP20 funds cannot settle to a
+ * Tron wallet — so a combined figure would be a number the merchant can never
+ * withdraw as one payout. The footnote under the strip says so on the screen,
+ * rather than only here.
+ *
+ * The pair is always named TOGETHER. "1,204.50 USDT" is not an answer to "what
+ * can I pay out"; "1,204.50 USDT on BEP20" is.
  */
 export default function BalanceStrip() {
   const { data, isLoading } = useQuery({
@@ -20,9 +24,14 @@ export default function BalanceStrip() {
 
   if (isLoading) {
     return (
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-x-8 gap-y-6 lg:grid-cols-4">
         {[0, 1, 2].map((i) => (
-          <div key={i} className="card h-24 animate-pulse bg-slate-100 dark:bg-slate-800/60" />
+          <div key={i} className="rule pt-3" aria-busy="true">
+            <span className="ghost h-3 w-24" aria-hidden />
+            <span className="ghost mt-3 h-7 w-2/3" aria-hidden />
+            <span className="ghost mt-2.5 h-2.5 w-16" aria-hidden />
+            <span className="sr-only">Loading balances…</span>
+          </div>
         ))}
       </div>
     );
@@ -30,37 +39,54 @@ export default function BalanceStrip() {
 
   if (!data || data.length === 0) {
     return (
-      <div className="card flex items-center gap-3 p-5 text-sm text-slate-500">
-        <Wallet size={18} className="text-slate-400" />
-        No balances yet — they appear here once a payment confirms.
+      <div className="rule pt-3">
+        <span className="runhead">Balances</span>
+        <p className="measure mt-3 text-base leading-relaxed text-slate-700 dark:text-slate-300">
+          Nothing settled yet.
+        </p>
+        <p className="measure mt-1.5 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+          A balance appears here for each network and asset pair as soon as a
+          payment confirms.
+        </p>
       </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-      {data.map((b) => (
-        <div key={`${b.network}:${b.asset}`} className="card p-5">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              {b.asset}
-            </span>
-            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-              {b.network}
-            </span>
-          </div>
-          {/* Tabular numerals so columns of money line up digit-for-digit. */}
-          <p className="mt-2 text-2xl font-bold tabular-nums text-slate-900 dark:text-slate-50">
-            {formatAmount(b.available)}
-          </p>
-          <p className="mt-1 text-xs text-slate-500">
-            available
-            {Number(b.pending) > 0 && (
-              <> · {formatAmount(b.pending)} pending</>
-            )}
-          </p>
-        </div>
-      ))}
+    <div>
+      <div className="grid grid-cols-2 gap-x-8 gap-y-6 lg:grid-cols-4">
+        {data.map((b) => {
+          const pending = Number(b.pending) > 0;
+          return (
+            <div key={`${b.network}:${b.asset}`} className="rule min-w-0 pt-3">
+              {/* Asset and network are one label, never two facts. */}
+              <span className="runhead truncate">
+                {b.asset} · {b.network}
+              </span>
+              <p className="figure-lg mt-2 truncate">{formatAmount(b.available)}</p>
+              <p className="mt-1.5 text-xs leading-snug text-slate-500 dark:text-slate-400">
+                available
+                {pending && (
+                  <>
+                    {' · '}
+                    {/* amber = waiting on something, and the word carries it too. */}
+                    <span className="num text-amber-600 dark:text-amber-400">
+                      {formatAmount(b.pending)} pending
+                    </span>
+                  </>
+                )}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+
+      {data.length > 1 && (
+        <p className="measure-wide mt-5 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+          Shown per network and asset, never summed — funds are not fungible across
+          chains, and each pair settles from its own wallet.
+        </p>
+      )}
     </div>
   );
 }

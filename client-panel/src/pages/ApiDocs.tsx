@@ -1,3 +1,4 @@
+import { useEffect, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   AlertTriangle,
@@ -26,6 +27,31 @@ import CodeBlock from '@/components/CodeBlock';
  *
  * Anything added here must be checked against the route it documents. A docs
  * page that is confidently wrong costs more than no docs page.
+ *
+ * ---------------------------------------------------------------------------
+ * SET AS A REFERENCE WORK. The prose is unchanged; the STRUCTURE around it is
+ * what was rebuilt, because at 900 lines this page's real failure was that
+ * everything looked equally important:
+ *
+ *   - The contents column is now a numbered index with a live position rail.
+ *     Brand on the rail is the sanctioned "active nav" use — it marks the one
+ *     entry you can see rather than decorating all eight.
+ *   - Sections are numbered and opened by a hairline, so the reader always
+ *     knows how far in they are. The masthead's heavy rule is the only strong
+ *     stroke on the page and is not doubled by the first section.
+ *   - The four reference tables are LEDGERS (`.ledger`), the same primitive
+ *     DataTable renders through, instead of four cards with tinted header bars.
+ *     Column headers sit over an ink rule; rows are separated by hairlines.
+ *   - Callouts are ruled notes with a word, not tinted rounded boxes. Amber and
+ *     red still mean what they mean everywhere else in the product, and each
+ *     one now ships a label so the meaning survives in greyscale.
+ *   - Every code specimen is introduced by a running head naming what it is,
+ *     and the two long ones carry the route in the block's own chrome.
+ *
+ * MOTION: none. The one moving part is the position rail, which is driven by an
+ * IntersectionObserver and changes a colour — no transform, no entrance, no
+ * loop. The loading placeholder is `.ghost`, not `.skeleton`: this is a
+ * dashboard route and `.skeleton` shimmers forever.
  */
 
 const BASE = API_BASE_URL;
@@ -438,7 +464,59 @@ const SECTIONS = [
   ['errors', 'Errors & limits'],
 ] as const;
 
+/** Stable array identity, so the observer below is not torn down every render. */
+const SECTION_IDS: string[] = SECTIONS.map(([id]) => id);
+
+const ENDPOINT_COUNT = ENDPOINTS.reduce((n, g) => n + g.rows.length, 0);
+
+/** Two-digit index, tabular, so the numerals line up down the contents column. */
+const ord = (i: number) => String(i + 1).padStart(2, '0');
+
+/**
+ * Which section the reader is actually looking at.
+ *
+ * The band is the top third of the viewport rather than the whole of it: with a
+ * full-height root, a short section and the long one under it are both
+ * "visible" and the rail flickers between them. `-66%` from the bottom means
+ * only what is under the reader's eye counts.
+ *
+ * Guarded on IntersectionObserver, and the rail simply stays unlit without it —
+ * the anchors work regardless, so this is an enhancement and never a
+ * dependency.
+ */
+function useActiveSection(ids: string[]): string | null {
+  const [active, setActive] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof IntersectionObserver === 'undefined') return;
+
+    const visible = new Set<string>();
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) visible.add(e.target.id);
+          else visible.delete(e.target.id);
+        }
+        // Document order, not observation order: entries arrive in whatever
+        // order the browser reports them.
+        const first = ids.find((id) => visible.has(id));
+        if (first) setActive(first);
+      },
+      { rootMargin: '-80px 0px -66% 0px' },
+    );
+
+    for (const id of ids) {
+      const el = document.getElementById(id);
+      if (el) io.observe(el);
+    }
+    return () => io.disconnect();
+  }, [ids]);
+
+  return active;
+}
+
 // ---------------------------------------------------------------------------
+
 
 export default function ApiDocs() {
   // The asset matrix is READ FROM THE GATEWAY, not hardcoded. A static table
@@ -457,55 +535,87 @@ export default function ApiDocs() {
     {},
   );
 
+  const pairCount = assets?.length ?? 0;
+  const active = useActiveSection(SECTION_IDS);
+
   return (
     <>
       <PageHeader
+        eyebrow="Developer"
         title="API Documentation"
         description="Everything needed for a working integration, checked against the running gateway."
+        meta={
+          <>
+            {ENDPOINT_COUNT} endpoints · {WEBHOOK_EVENTS.length} webhook events
+          </>
+        }
       />
 
-      <div className="lg:flex lg:gap-10">
-        {/* On-page nav. Sticky so the reader never loses their place in a long
-            reference — the single biggest usability win on a docs page. */}
+      <div className="lg:flex lg:gap-12">
+        {/* THE INDEX. Sticky, so the reader never loses their place in a long
+            reference — the single biggest usability win on a docs page — and
+            numbered, so "how much of this is left" is answerable at a glance.
+            The lit rail is brand because an active nav marker is one of the
+            four sanctioned uses of the interactive colour; the seven unlit
+            rails are the hairline, not a dimmed brand. */}
         <nav
           aria-label="On this page"
-          className="mb-8 hidden shrink-0 lg:sticky lg:top-6 lg:mb-0 lg:block lg:h-fit lg:w-52"
+          className="hidden shrink-0 lg:sticky lg:top-6 lg:block lg:h-fit lg:w-56"
         >
-          <p className="section-label mb-3">On this page</p>
-          <ul className="space-y-1">
-            {SECTIONS.map(([id, label]) => (
-              <li key={id}>
-                <a
-                  href={`#${id}`}
-                  className="block rounded-lg px-3 py-1.5 text-sm text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
-                >
-                  {label}
-                </a>
-              </li>
-            ))}
-          </ul>
+          <span className="runhead">Contents</span>
+          <ol className="mt-3">
+            {SECTIONS.map(([id, label], i) => {
+              const on = active === id;
+              return (
+                <li key={id}>
+                  <a
+                    href={`#${id}`}
+                    aria-current={on ? 'true' : undefined}
+                    className={`flex items-baseline gap-3 border-l-2 py-1.5 pl-3 text-sm outline-none transition-colors duration-[var(--dur-press)] focus-visible:ring-2 focus-visible:ring-brand-500 ${
+                      on
+                        ? 'border-brand-600 font-medium text-slate-900 dark:border-brand-400 dark:text-slate-50'
+                        : 'border-slate-200 text-slate-600 hover:text-slate-900 dark:border-slate-800 dark:text-slate-400 dark:hover:text-slate-100'
+                    }`}
+                  >
+                    <span className="num shrink-0 text-[10px] tracking-[0.14em] text-slate-400 dark:text-slate-500">
+                      {ord(i)}
+                    </span>
+                    {label}
+                  </a>
+                </li>
+              );
+            })}
+          </ol>
         </nav>
 
-        <div className="min-w-0 flex-1 space-y-10">
+        <div className="min-w-0 flex-1 space-y-12">
           {/* ---------------- AUTH ---------------- */}
           <section id="auth" className="scroll-mt-6">
-            <SectionHeading>Authentication</SectionHeading>
-            <p className="mb-5 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+            <SectionHeading n="01" first>
+              Authentication
+            </SectionHeading>
+            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               Base URL <code className="code">{BASE}</code>. Keys come in two
               modes and the mode is fixed when the key is created — a signed
               request with a bearer key, or an unsigned request with an HMAC key,
               is rejected rather than downgraded.
             </p>
 
-            <div className="grid gap-5 lg:grid-cols-2">
-              <div className="card p-6">
-                <div className="mb-3 flex items-center gap-2.5">
-                  <ShieldCheck size={17} className="text-brand-600 dark:text-brand-400" />
-                  <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                    HMAC-signed <span className="font-mono text-xs font-normal text-slate-500">pk_live_…</span>
-                  </h3>
-                </div>
-                <dl className="space-y-2 text-sm">
+            {/* The two key modes as two ruled columns rather than two cards.
+                Icons are slate-400, the documented step for a decorative mark —
+                a shield that is not a button has no business wearing brand. */}
+            <div className="mt-8 grid gap-x-12 gap-y-10 lg:grid-cols-2">
+              <div className="min-w-0">
+                <h3 className="rule-b flex items-baseline gap-2.5 pb-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  <ShieldCheck size={15} className="shrink-0 translate-y-0.5 text-slate-400" aria-hidden />
+                  <span>
+                    HMAC-signed{' '}
+                    <span className="font-mono text-xs font-normal text-slate-500 dark:text-slate-400">
+                      pk_live_…
+                    </span>
+                  </span>
+                </h3>
+                <dl className="text-sm">
                   <Header name="X-Api-Key">your public key id</Header>
                   <Header name="X-Timestamp">
                     unix <strong>seconds</strong>
@@ -516,7 +626,7 @@ export default function ApiDocs() {
                     </code>
                   </Header>
                 </dl>
-                <p className="mt-4 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                <p className="measure mt-4 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
                   Required for <code className="code">POST /payouts</code>. GET
                   requests have an empty raw body, so you sign{' '}
                   <code className="code">"&#123;ts&#125;."</code>. Requests more
@@ -525,22 +635,28 @@ export default function ApiDocs() {
                 </p>
               </div>
 
-              <div className="card p-6">
-                <div className="mb-3 flex items-center gap-2.5">
-                  <KeyRound size={17} className="text-slate-500" />
-                  <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                    Bearer <span className="font-mono text-xs font-normal text-slate-500">ak_live_…</span>
-                  </h3>
-                </div>
-                <p className="text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+              <div className="min-w-0">
+                <h3 className="rule-b flex items-baseline gap-2.5 pb-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  <KeyRound size={15} className="shrink-0 translate-y-0.5 text-slate-400" aria-hidden />
+                  <span>
+                    Bearer{' '}
+                    <span className="font-mono text-xs font-normal text-slate-500 dark:text-slate-400">
+                      ak_live_…
+                    </span>
+                  </span>
+                </h3>
+                <p className="measure mt-3 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
                   One token in <code className="code">X-Api-Key</code>, nothing
                   to sign. Simpler, and strictly weaker: the credential is on the
                   wire every request.
                 </p>
                 <div className="mt-4">
-                  <CodeBlock tabs={[{ label: 'curl', code: bearerSnippet }]} />
+                  <CodeBlock
+                    tabs={[{ label: 'curl', code: bearerSnippet }]}
+                    title="POST /payments"
+                  />
                 </div>
-                <p className="mt-4 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                <p className="measure mt-4 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
                   Bearer keys cannot hold <code className="code">payouts:write</code>,
                   so a leaked one can read data and create payments but cannot
                   move funds. Pair it with an IP allowlist.
@@ -548,7 +664,7 @@ export default function ApiDocs() {
               </div>
             </div>
 
-            <Callout tone="warn" className="mt-5">
+            <Callout tone="warn" className="mt-8">
               <strong>If you integrated before August 2026, re-check your
               signing.</strong> An earlier version of this page documented{' '}
               <code className="code">timestamp + body</code> with a{' '}
@@ -558,7 +674,7 @@ export default function ApiDocs() {
               every request.
             </Callout>
 
-            <p className="mt-5 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+            <p className="measure-wide mt-6 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               No API key of either mode can change your payout wallet, your
               password or your set of keys — those need a signed-in dashboard
               session. That is what stops a stolen key from redirecting your
@@ -568,8 +684,8 @@ export default function ApiDocs() {
 
           {/* ---------------- ASSETS ---------------- */}
           <section id="assets" className="scroll-mt-6">
-            <SectionHeading>Networks &amp; assets</SectionHeading>
-            <p className="mb-5 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+            <SectionHeading n="02">Networks &amp; assets</SectionHeading>
+            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               A payment is a <strong>(network, asset)</strong> pair, fixed at
               creation. Omit <code className="code">network</code> for BEP20 and{' '}
               <code className="code">asset</code> for USDT, so existing
@@ -578,49 +694,75 @@ export default function ApiDocs() {
             </p>
 
             {assetsLoading ? (
-              <div className="skeleton h-32 w-full" />
-            ) : Object.keys(byNetwork).length === 0 ? (
-              <p className="text-sm text-slate-500">
-                Could not read the asset catalogue from the gateway.
-              </p>
-            ) : (
-              <div className="grid gap-4 sm:grid-cols-2">
-                {Object.entries(byNetwork).map(([network, list]) => (
-                  <div key={network} className="card p-5">
-                    <div className="mb-3 flex items-center justify-between">
-                      <h3 className="font-mono text-sm font-semibold text-brand-700 dark:text-brand-300">
-                        {network}
-                      </h3>
-                      <span className="text-xs text-slate-400">
-                        {list?.length} asset{list?.length === 1 ? '' : 's'}
-                      </span>
-                    </div>
-                    <ul className="space-y-1.5">
-                      {list?.map((a) => (
-                        <li
-                          key={a.symbol}
-                          className="flex items-baseline justify-between gap-3 text-sm"
-                        >
-                          <span className="font-mono text-xs text-slate-700 dark:text-slate-200">
-                            {a.symbol}
-                            {a.isNative && (
-                              <span className="ml-1.5 text-[10px] uppercase tracking-wide text-slate-400">
-                                native
-                              </span>
-                            )}
-                          </span>
-                          <span className="truncate text-xs text-slate-500 dark:text-slate-400">
-                            {a.name}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
+              // `.ghost`, not `.skeleton`: static by design. See the motion note
+              // at the top of this file.
+              <div className="mt-8 grid gap-x-12 gap-y-8 sm:grid-cols-2">
+                {[0, 1].map((i) => (
+                  <div key={i}>
+                    <div className="ghost h-4 w-20" />
+                    <div className="ghost mt-4 h-3 w-full" />
+                    <div className="ghost mt-3 h-3 w-4/5" />
+                    <div className="ghost mt-3 h-3 w-3/5" />
                   </div>
                 ))}
               </div>
+            ) : Object.keys(byNetwork).length === 0 ? (
+              <p className="measure mt-6 text-sm text-slate-500 dark:text-slate-400">
+                Could not read the asset catalogue from the gateway.
+              </p>
+            ) : (
+              <div className="mt-8 grid gap-x-12 gap-y-8 md:grid-cols-12">
+                {/* THE FIGURE. The live pair count, and deliberately absent
+                    until /assets answers — a placeholder zero on a page about
+                    what you can charge is a claim, and the wrong one. */}
+                <div className="md:col-span-3">
+                  <span className="runhead">Settleable now</span>
+                  <span className="figure-lg mt-2">{pairCount}</span>
+                  <span className="figure-label measure">
+                    (network, asset) pairs, read from{' '}
+                    <code className="code">/assets</code> on this gateway rather
+                    than written into this page.
+                  </span>
+                </div>
+
+                <div className="grid gap-x-12 gap-y-8 sm:grid-cols-2 md:col-span-9">
+                  {Object.entries(byNetwork).map(([network, list]) => (
+                    <div key={network} className="min-w-0">
+                      <div className="flex items-baseline justify-between gap-3">
+                        <h3 className="font-mono text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {network}
+                        </h3>
+                        <span className="num text-xs text-slate-500 dark:text-slate-400">
+                          {list?.length} asset{list?.length === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                      <ul className="mt-2 border-b border-slate-200 dark:border-slate-800">
+                        {list?.map((a) => (
+                          <li
+                            key={a.symbol}
+                            className="rule flex items-baseline justify-between gap-3 py-2"
+                          >
+                            <span className="font-mono text-xs text-slate-800 dark:text-slate-200">
+                              {a.symbol}
+                              {a.isNative && (
+                                <span className="ml-1.5 text-[10px] uppercase tracking-[0.14em] text-slate-400 dark:text-slate-500">
+                                  native
+                                </span>
+                              )}
+                            </span>
+                            <span className="truncate text-xs text-slate-500 dark:text-slate-400">
+                              {a.name}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
 
-            <Callout tone="danger" className="mt-5">
+            <Callout tone="danger" className="mt-8">
               A deposit address is valid <strong>only</strong> for the network it
               was issued on. Sending TRC20 funds to a BEP20 address — or any
               other cross-network mix-up — is unrecoverable. Never reuse an
@@ -633,32 +775,33 @@ export default function ApiDocs() {
 
           {/* ---------------- CREATE ---------------- */}
           <section id="create" className="scroll-mt-6">
-            <SectionHeading>Create a payment</SectionHeading>
-            <p className="mb-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+            <SectionHeading n="03">Create a payment</SectionHeading>
+            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               <code className="code">POST /payments</code> returns a fresh
               deposit address and QR for the chosen pair. Always send an{' '}
               <code className="code">Idempotency-Key</code> — retrying without
               one creates a second payment and a second address for the same
               order.
             </p>
-            <CodeBlock tabs={createPaymentTabs} />
 
-            <h3 className="mb-2 mt-6 text-sm font-semibold text-slate-700 dark:text-slate-200">
-              Response{' '}
-              <span className="font-normal text-slate-400">201 Created</span>
-            </h3>
-            <CodeBlock
-              tabs={[
-                { label: 'Crypto-priced', code: responseCrypto },
-                { label: 'Fiat-priced', code: responseFiat },
-              ]}
-            />
+            <Specimen runhead="Request · four languages, one signature">
+              <CodeBlock tabs={createPaymentTabs} title="POST /payments" />
+            </Specimen>
+
+            <Specimen runhead="Response · 201 Created">
+              <CodeBlock
+                tabs={[
+                  { label: 'Crypto-priced', code: responseCrypto },
+                  { label: 'Fiat-priced', code: responseFiat },
+                ]}
+              />
+            </Specimen>
           </section>
 
           {/* ---------------- FIAT ---------------- */}
           <section id="fiat" className="scroll-mt-6">
-            <SectionHeading>Pricing in fiat</SectionHeading>
-            <p className="mb-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+            <SectionHeading n="04">Pricing in fiat</SectionHeading>
+            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               Send <code className="code">fiatAmount</code> and{' '}
               <code className="code">fiatCurrency</code> <em>instead of</em>{' '}
               <code className="code">amount</code> — supplying both, or neither,
@@ -666,8 +809,12 @@ export default function ApiDocs() {
               the payment, and never revisits it, so the figure you quoted is the
               figure you reconcile.
             </p>
-            <CodeBlock tabs={[{ label: 'Request body', code: fiatRequest }]} />
-            <p className="mt-4 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+
+            <Specimen runhead="Request body">
+              <CodeBlock tabs={[{ label: 'Request body', code: fiatRequest }]} />
+            </Specimen>
+
+            <p className="measure-wide mt-5 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
               <code className="code">GET /rates</code> lists the currencies this
               gateway can price in, plus the rate source and its age in seconds.
               Check the age before showing a converted price — a stale quote is
@@ -677,36 +824,49 @@ export default function ApiDocs() {
 
           {/* ---------------- ENDPOINTS ---------------- */}
           <section id="endpoints" className="scroll-mt-6">
-            <SectionHeading>Endpoint reference</SectionHeading>
-            <p className="mb-5 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+            <SectionHeading n="05">Endpoint reference</SectionHeading>
+            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               Every endpoint a merchant can reach. List endpoints accept{' '}
               <code className="code">?page</code> and{' '}
               <code className="code">?limit</code> and return{' '}
               <code className="code">&#123; data, page, total &#125;</code>.
             </p>
-            <div className="space-y-5">
+
+            {/* Seven ledgers rather than seven cards. The group name is the
+                running head and it sits over the ink rule the ledger's own
+                header would otherwise draw, so the column headers are not
+                repeated seven times down the page. */}
+            <div className="mt-8 space-y-8">
               {ENDPOINTS.map((g) => (
-                <div key={g.group} className="card overflow-hidden">
-                  <p className="border-b border-slate-200 bg-slate-50 px-5 py-2.5 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-400">
-                    {g.group}
-                  </p>
-                  <table className="w-full text-sm">
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {g.rows.map(([method, path, desc]) => (
-                        <tr key={method + path}>
-                          <td className="whitespace-nowrap py-2.5 pl-5 pr-3 align-top">
-                            <MethodBadge method={method} />
-                          </td>
-                          <td className="whitespace-nowrap py-2.5 pr-4 align-top font-mono text-xs text-slate-800 dark:text-slate-200">
-                            {path}
-                          </td>
-                          <td className="py-2.5 pr-5 align-top text-xs text-slate-600 dark:text-slate-400">
-                            {desc}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                <div key={g.group}>
+                  <div className="flex items-baseline justify-between gap-4 border-b border-slate-900 pb-1.5 dark:border-slate-100">
+                    <h3 className="runhead text-slate-900 dark:text-slate-100">
+                      {g.group}
+                    </h3>
+                    <span className="num text-xs text-slate-500 dark:text-slate-400">
+                      {g.rows.length}
+                    </span>
+                  </div>
+                  <div className="ledger-scroll">
+                    <table className="ledger">
+                      <caption className="sr-only">{g.group} endpoints</caption>
+                      <tbody>
+                        {g.rows.map(([method, path, desc]) => (
+                          <tr key={method + path}>
+                            <td className="w-0 whitespace-nowrap py-2.5 align-top">
+                              <MethodBadge method={method} />
+                            </td>
+                            <td className="whitespace-nowrap py-2.5 align-top font-mono text-xs text-slate-900 dark:text-slate-100">
+                              {path}
+                            </td>
+                            <td className="py-2.5 align-top text-xs leading-relaxed text-slate-600 dark:text-slate-400">
+                              {desc}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               ))}
             </div>
@@ -714,8 +874,8 @@ export default function ApiDocs() {
 
           {/* ---------------- WEBHOOKS ---------------- */}
           <section id="webhooks" className="scroll-mt-6">
-            <SectionHeading>Webhooks</SectionHeading>
-            <p className="mb-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+            <SectionHeading n="06">Webhooks</SectionHeading>
+            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               We POST to your configured URL as a payment moves. The hex
               signature arrives twice — in the{' '}
               <code className="code">signature</code> field of the body and in
@@ -724,7 +884,7 @@ export default function ApiDocs() {
               <code className="code">X-Gateway-Event</code>.
             </p>
 
-            <Callout tone="warn" className="mb-5">
+            <Callout tone="warn" className="mt-6">
               <strong>The signature does not cover the raw bytes.</strong> It is
               computed over the body with{' '}
               <code className="code">signature</code> set to{' '}
@@ -733,20 +893,25 @@ export default function ApiDocs() {
               compare in constant time. Hashing the raw body will never match.
             </Callout>
 
-            <CodeBlock tabs={webhookVerifyTabs} />
+            <Specimen runhead="Verifying a delivery">
+              <CodeBlock tabs={webhookVerifyTabs} title="your endpoint" />
+            </Specimen>
 
-            <h3 className="mb-3 mt-6 text-sm font-semibold text-slate-700 dark:text-slate-200">
-              Events
-            </h3>
-            <div className="card overflow-hidden">
-              <table className="w-full text-sm">
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+            <div className="ledger-scroll mt-8">
+              <table className="ledger">
+                <thead>
+                  <tr>
+                    <th scope="col">Event</th>
+                    <th scope="col">Meaning</th>
+                  </tr>
+                </thead>
+                <tbody>
                   {WEBHOOK_EVENTS.map(([name, desc]) => (
                     <tr key={name}>
-                      <td className="whitespace-nowrap py-2.5 pl-5 pr-4 align-top font-mono text-xs text-brand-700 dark:text-brand-300">
+                      <td className="whitespace-nowrap py-2.5 align-top font-mono text-xs text-slate-900 dark:text-slate-100">
                         {name}
                       </td>
-                      <td className="py-2.5 pr-5 text-xs text-slate-600 dark:text-slate-400">
+                      <td className="py-2.5 align-top text-xs leading-relaxed text-slate-600 dark:text-slate-400">
                         {desc}
                       </td>
                     </tr>
@@ -755,7 +920,7 @@ export default function ApiDocs() {
               </table>
             </div>
 
-            <p className="mt-4 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+            <p className="measure-wide mt-5 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
               Deliveries retry with exponential backoff until they get a 2xx.
               Return 2xx immediately and do the work asynchronously; every
               attempt, status code and response body is recorded under{' '}
@@ -766,20 +931,26 @@ export default function ApiDocs() {
 
           {/* ---------------- STATUSES ---------------- */}
           <section id="statuses" className="scroll-mt-6">
-            <SectionHeading>Payment statuses</SectionHeading>
-            <p className="mb-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+            <SectionHeading n="07">Payment statuses</SectionHeading>
+            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               Fulfil on <code className="code">confirmed</code>, never earlier.
               Everything before it can still change.
             </p>
-            <div className="card overflow-hidden">
-              <table className="w-full text-sm">
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+            <div className="ledger-scroll mt-6">
+              <table className="ledger">
+                <thead>
+                  <tr>
+                    <th scope="col">Status</th>
+                    <th scope="col">Meaning</th>
+                  </tr>
+                </thead>
+                <tbody>
                   {STATUSES.map(([status, desc]) => (
                     <tr key={status}>
-                      <td className="whitespace-nowrap py-2.5 pl-5 pr-4 align-top font-mono text-xs text-brand-700 dark:text-brand-300">
+                      <td className="whitespace-nowrap py-2.5 align-top font-mono text-xs text-slate-900 dark:text-slate-100">
                         {status}
                       </td>
-                      <td className="py-2.5 pr-5 text-xs text-slate-600 dark:text-slate-400">
+                      <td className="py-2.5 align-top text-xs leading-relaxed text-slate-600 dark:text-slate-400">
                         {desc}
                       </td>
                     </tr>
@@ -791,8 +962,8 @@ export default function ApiDocs() {
 
           {/* ---------------- ERRORS ---------------- */}
           <section id="errors" className="scroll-mt-6">
-            <SectionHeading>Errors &amp; limits</SectionHeading>
-            <p className="mb-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+            <SectionHeading n="08">Errors &amp; limits</SectionHeading>
+            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               Every failure returns{' '}
               <code className="code">
                 &#123; "error": "code", "message": "…" &#125;
@@ -800,18 +971,27 @@ export default function ApiDocs() {
               with a matching HTTP status. Branch on{' '}
               <code className="code">error</code>, not on the message text.
             </p>
-            <div className="card overflow-hidden">
-              <table className="w-full text-sm">
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+            <div className="ledger-scroll mt-6">
+              <table className="ledger">
+                <thead>
+                  <tr>
+                    <th scope="col" className="num">
+                      HTTP
+                    </th>
+                    <th scope="col">Code</th>
+                    <th scope="col">Meaning</th>
+                  </tr>
+                </thead>
+                <tbody>
                   {ERRORS.map(([status, code, desc]) => (
                     <tr key={code}>
-                      <td className="whitespace-nowrap py-2.5 pl-5 pr-3 align-top font-mono text-xs text-slate-500">
+                      <td className="num w-0 whitespace-nowrap py-2.5 align-top font-mono text-xs text-slate-500 dark:text-slate-400">
                         {status}
                       </td>
-                      <td className="whitespace-nowrap py-2.5 pr-4 align-top font-mono text-xs text-slate-800 dark:text-slate-200">
+                      <td className="whitespace-nowrap py-2.5 align-top font-mono text-xs text-slate-900 dark:text-slate-100">
                         {code}
                       </td>
-                      <td className="py-2.5 pr-5 text-xs text-slate-600 dark:text-slate-400">
+                      <td className="py-2.5 align-top text-xs leading-relaxed text-slate-600 dark:text-slate-400">
                         {desc}
                       </td>
                     </tr>
@@ -819,7 +999,7 @@ export default function ApiDocs() {
                 </tbody>
               </table>
             </div>
-            <p className="mt-4 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+            <p className="measure-wide mt-5 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
               Authenticated calls are throttled per API key (120 requests per
               minute by default) and responses carry the standard{' '}
               <code className="code">RateLimit-*</code> headers. On a{' '}
@@ -840,21 +1020,56 @@ export default function ApiDocs() {
 // Small presentational helpers
 // ---------------------------------------------------------------------------
 
-function SectionHeading({ children }: { children: React.ReactNode }) {
+/**
+ * A section opener: the numeral as a running head, the title under it, and a
+ * hairline above the whole block.
+ *
+ * `first` drops the hairline on section 01, which otherwise sits a few
+ * millimetres under PageHeader's heavy masthead rule and reads as a stutter.
+ * That masthead stroke is the only strong rule the page gets.
+ */
+function SectionHeading({
+  n,
+  first = false,
+  children,
+}: {
+  n: string;
+  first?: boolean;
+  children: ReactNode;
+}) {
   return (
-    <h2 className="mb-3 text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-50">
-      {children}
-    </h2>
+    <div className={first ? '' : 'rule pt-8'}>
+      <span className="runhead num">{n}</span>
+      <h2 className="mt-1.5 text-xl font-semibold tracking-[-0.02em] text-slate-900 dark:text-slate-50">
+        {children}
+      </h2>
+    </div>
   );
 }
 
-function Header({ name, children }: { name: string; children: React.ReactNode }) {
+/**
+ * A code specimen with a running head naming what it is. The block itself is
+ * CodeBlock — dark chrome, language tabs, one copy control — and this only
+ * gives it a caption, because an unlabelled snippet in a long reference is a
+ * puzzle.
+ */
+function Specimen({ runhead, children }: { runhead: string; children: ReactNode }) {
   return (
-    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-      <dt>
+    <div className="mt-6">
+      <span className="runhead mb-2">{runhead}</span>
+      {children}
+    </div>
+  );
+}
+
+/** One request header, as a ruled label/value row. */
+function Header({ name, children }: { name: string; children: ReactNode }) {
+  return (
+    <div className="rule flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2">
+      <dt className="w-[7.25rem] shrink-0">
         <code className="code">{name}</code>
       </dt>
-      <dd className="text-slate-600 dark:text-slate-300">{children}</dd>
+      <dd className="min-w-0 flex-1 text-slate-600 dark:text-slate-300">{children}</dd>
     </div>
   );
 }
@@ -862,22 +1077,33 @@ function Header({ name, children }: { name: string; children: React.ReactNode })
 function MethodBadge({ method }: { method: string }) {
   // Method colour is structural, not semantic-financial: it says "this reads"
   // vs "this writes". Green stays out of it — on this product green means money
-  // arrived, and a GET badge is not a settled payment.
+  // arrived, and a GET badge is not a settled payment. Brand is out of it too,
+  // now: an indigo fill on a label nobody can click spends the interactive
+  // colour on decoration. The word is the carrier, weight is the emphasis, and
+  // the mark survives in greyscale.
   const tone =
     method === 'GET'
-      ? 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
+      ? 'text-slate-500 dark:text-slate-400'
       : method === 'DELETE'
-        ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
-        : 'bg-brand-100 text-brand-700 dark:bg-brand-900/40 dark:text-brand-300';
+        ? 'text-red-600 dark:text-red-400'
+        : 'text-slate-900 dark:text-slate-100';
   return (
-    <span
-      className={`inline-block rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${tone}`}
-    >
+    <span className={`font-mono text-[10px] font-semibold uppercase tracking-[0.12em] ${tone}`}>
       {method}
     </span>
   );
 }
 
+/**
+ * A ruled note, not a tinted box.
+ *
+ * The hue still means what it means everywhere else in the product — amber is
+ * "wait, there is something you have to do", red is "you can lose money here" —
+ * but it is spent on a 2px rule and a label rather than on a fill, and the
+ * label is a WORD, so the distinction survives in greyscale and for a
+ * red/green-blind reader. The body stays in ink on a measure, because it is the
+ * part that has to be read.
+ */
 function Callout({
   tone,
   className = '',
@@ -885,18 +1111,24 @@ function Callout({
 }: {
   tone: 'warn' | 'danger';
   className?: string;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
-  const styles =
-    tone === 'danger'
-      ? 'border-red-200 bg-red-50 text-red-900 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-200'
-      : 'border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200';
+  const danger = tone === 'danger';
+  const stroke = danger
+    ? 'border-red-600 dark:border-red-400'
+    : 'border-amber-600 dark:border-amber-400';
+  const ink = danger
+    ? 'text-red-600 dark:text-red-400'
+    : 'text-amber-600 dark:text-amber-400';
   return (
-    <div
-      className={`flex gap-3 rounded-xl border p-4 text-xs leading-relaxed ${styles} ${className}`}
-    >
-      <AlertTriangle size={15} className="mt-0.5 shrink-0" />
-      <div>{children}</div>
+    <div className={`border-t-2 pt-3 ${stroke} ${className}`}>
+      <p className={`runhead flex items-center gap-2 ${ink}`}>
+        <AlertTriangle size={13} className="shrink-0" aria-hidden />
+        {danger ? 'Unrecoverable' : 'Important'}
+      </p>
+      <div className="measure-wide mt-2 text-xs leading-relaxed text-slate-700 dark:text-slate-300">
+        {children}
+      </div>
     </div>
   );
 }

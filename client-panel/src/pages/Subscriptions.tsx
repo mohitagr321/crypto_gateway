@@ -1,13 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  AlertTriangle,
-  Ban,
-  Pause,
-  Play,
-  Plus,
-  Repeat,
-} from 'lucide-react';
+import { AlertTriangle, Ban, Pause, Play, Plus } from 'lucide-react';
 import {
   checkoutUrl,
   createSubscription,
@@ -17,13 +11,13 @@ import {
   listSubscriptions,
   setSubscriptionStatus,
 } from '@/lib/api';
-import { formatDate } from '@/lib/format';
+import { formatAmount, formatDate, formatDateShort } from '@/lib/format';
 import type { IntervalUnit, Subscription } from '@/types';
 import PageHeader from '@/components/PageHeader';
 import Modal from '@/components/Modal';
-import Spinner, { LoadingPanel } from '@/components/Spinner';
-import ErrorState from '@/components/ErrorState';
+import Spinner from '@/components/Spinner';
 import Badge from '@/components/Badge';
+import DataTable, { type Column } from '@/components/DataTable';
 
 /**
  * Recurring billing.
@@ -32,6 +26,14 @@ import Badge from '@/components/Badge';
  * invoice the customer chooses to pay. There is no stored mandate to pull funds
  * from — crypto has no direct-debit — and the page says so plainly rather than
  * implying a card-style subscription that does not exist.
+ *
+ * Set as a ledger rather than a grid of cards. A card grid gave every
+ * subscription its own bordered box and repeated eight labels inside each one,
+ * so four subscriptions cost four screens and nothing could be compared down a
+ * column. The schedule IS a table: what, who, how much, how often, when next.
+ * The long-form facts — description, payment terms, auto-send, and the reason a
+ * subscription stopped — live one click away in the detail view, which is also
+ * where the billing history was already kept.
  */
 export default function Subscriptions() {
   const qc = useQueryClient();
@@ -57,6 +59,15 @@ export default function Subscriptions() {
     queryFn: () => getSubscriptionInvoices(historyFor!.id),
     enabled: Boolean(historyFor),
   });
+
+  const summary = useMemo(() => {
+    const list = subs.data ?? [];
+    return {
+      count: list.length,
+      active: list.filter((s) => s.status === 'active').length,
+      stalled: list.filter((s) => s.status === 'needs_attention'),
+    };
+  }, [subs.data]);
 
   const reset = () => {
     setTitle('');
@@ -98,9 +109,163 @@ export default function Subscriptions() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['subscriptions'] }),
   });
 
+  /**
+   * Pause / resume / cancel. A plain function rather than a component so it
+   * closes over the mutation, and wrapped so a click on a control never also
+   * opens the row. Every button carries a title AND an aria-label: an icon on
+   * its own is not a word, and these three change what a customer gets billed.
+   */
+  const rowActions = (s: Subscription, justify: 'justify-start' | 'justify-end') => (
+    <div
+      className={`flex items-center gap-0.5 ${justify}`}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {s.status === 'active' && (
+        <button
+          type="button"
+          className="rounded p-1.5 text-slate-400 transition-colors duration-100 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+          onClick={() => change.mutate({ id: s.id, action: 'pause' })}
+          disabled={change.isPending}
+          title="Pause billing"
+          aria-label={`Pause ${s.title}`}
+        >
+          <Pause size={14} />
+        </button>
+      )}
+      {(s.status === 'paused' || s.status === 'needs_attention') && (
+        <button
+          type="button"
+          className="rounded p-1.5 text-slate-400 transition-colors duration-100 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+          onClick={() => change.mutate({ id: s.id, action: 'resume' })}
+          disabled={change.isPending}
+          title="Resume billing"
+          aria-label={`Resume ${s.title}`}
+        >
+          <Play size={14} />
+        </button>
+      )}
+      {s.status !== 'canceled' && (
+        <button
+          type="button"
+          className="rounded p-1.5 text-slate-400 transition-colors duration-100 hover:bg-red-50 hover:text-red-600 disabled:opacity-40 dark:hover:bg-red-900/30 dark:hover:text-red-400"
+          onClick={() => change.mutate({ id: s.id, action: 'cancel' })}
+          disabled={change.isPending}
+          title="Cancel this subscription"
+          aria-label={`Cancel ${s.title}`}
+        >
+          <Ban size={14} />
+        </button>
+      )}
+    </div>
+  );
+
+  const columns: Column<Subscription>[] = [
+    {
+      key: 'title',
+      header: 'Billing for',
+      sortValue: (s) => s.title,
+      render: (s) => (
+        <span className="font-medium text-slate-900 dark:text-slate-100">{s.title}</span>
+      ),
+    },
+    {
+      key: 'customer',
+      header: 'Customer',
+      sortValue: (s) => s.customerName ?? s.customerEmail ?? '',
+      render: (s) =>
+        s.customerName ??
+        s.customerEmail ?? <span className="text-slate-400 dark:text-slate-500">—</span>,
+      className: 'text-slate-600 dark:text-slate-400',
+    },
+    {
+      key: 'amount',
+      header: 'Per cycle',
+      numeric: true,
+      sortValue: (s) => Number(s.amount) || 0,
+      render: (s) => (
+        <span className="whitespace-nowrap font-medium text-slate-900 dark:text-slate-100">
+          <span className="font-normal text-slate-500 dark:text-slate-400">{s.currency}</span>{' '}
+          {formatAmount(s.amount)}
+        </span>
+      ),
+    },
+    {
+      key: 'cadence',
+      header: 'Cadence',
+      // Sorted by the length of one cycle, not by the word: "every 2 weeks"
+      // belongs between "every week" and "every month", where an alphabetical
+      // sort would put it after "every year".
+      sortValue: (s) => s.intervalCount * UNIT_DAYS[s.intervalUnit],
+      render: (s) => (
+        <span className="whitespace-nowrap text-slate-600 dark:text-slate-400">
+          every {cadence(s.intervalCount, s.intervalUnit)}
+        </span>
+      ),
+    },
+    {
+      key: 'next',
+      header: 'Next invoice',
+      sortValue: (s) => (s.status === 'canceled' ? '' : s.nextRunAt),
+      render: (s) =>
+        s.status === 'canceled' ? (
+          <span className="text-slate-400 dark:text-slate-500">ended</span>
+        ) : (
+          <span className="num whitespace-nowrap">{formatDateShort(s.nextRunAt)}</span>
+        ),
+    },
+    {
+      key: 'cycles',
+      header: 'Billed',
+      hideOnMobile: true,
+      sortValue: (s) => s.cyclesBilled,
+      render: (s) => (
+        <span className="num whitespace-nowrap text-slate-600 dark:text-slate-400">
+          {s.cyclesBilled}
+          {s.totalCycles !== null && ` of ${s.totalCycles}`}
+        </span>
+      ),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortValue: (s) => STATUS_RANK[s.status],
+      render: (s) => <StatusBadge status={s.status} />,
+    },
+    {
+      key: 'actions',
+      header: <span className="sr-only">Actions</span>,
+      align: 'right',
+      render: (s) => rowActions(s, 'justify-end'),
+    },
+  ];
+
+  /** Eight columns is a phone's worst nightmare; below `md` each one stacks. */
+  const renderMobile = (s: Subscription) => (
+    <div>
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="truncate font-medium text-slate-900 dark:text-slate-100">
+          {s.title}
+        </span>
+        <span className="num shrink-0 font-medium text-slate-900 dark:text-slate-100">
+          <span className="font-normal text-slate-500 dark:text-slate-400">{s.currency}</span>{' '}
+          {formatAmount(s.amount)}
+        </span>
+      </div>
+      <div className="mt-1.5 flex items-center justify-between gap-3">
+        <span className="truncate text-sm text-slate-500 dark:text-slate-400">
+          every {cadence(s.intervalCount, s.intervalUnit)}
+          {s.status !== 'canceled' && <> · next {formatDateShort(s.nextRunAt)}</>}
+        </span>
+        <StatusBadge status={s.status} />
+      </div>
+      <div className="mt-2 -ml-1.5">{rowActions(s, 'justify-start')}</div>
+    </div>
+  );
+
   return (
     <>
       <PageHeader
+        eyebrow="Billing"
         title="Subscriptions"
         description="Bill a customer on a schedule. Each cycle issues an invoice they can pay in any coin you accept."
         actions={
@@ -108,130 +273,52 @@ export default function Subscriptions() {
             <Plus size={16} /> New subscription
           </button>
         }
+        meta={
+          subs.data
+            ? `${summary.count} ${
+                summary.count === 1 ? 'subscription' : 'subscriptions'
+              } · ${summary.active} active`
+            : undefined
+        }
       />
 
-      {subs.isLoading ? (
-        <LoadingPanel />
-      ) : subs.isError ? (
-        <ErrorState message={errorMessage(subs.error)} onRetry={() => subs.refetch()} />
-      ) : subs.data && subs.data.length === 0 ? (
-        <div className="card flex flex-col items-center px-6 py-16 text-center">
-          <Repeat size={34} className="text-slate-300 dark:text-slate-700" />
-          <h3 className="mt-4 text-base font-semibold text-slate-900 dark:text-slate-100">
-            No subscriptions yet
-          </h3>
-          <p className="mt-1.5 max-w-sm text-sm text-slate-500">
-            Set an amount and an interval. Each cycle we create an invoice and, if
-            you like, email it to your customer automatically.
-          </p>
-          <button className="btn-primary mt-6" onClick={() => setCreateOpen(true)}>
-            <Plus size={16} /> Create your first subscription
-          </button>
-        </div>
-      ) : (
-        <div className="grid gap-4 lg:grid-cols-2">
-          {subs.data?.map((s) => (
-            <div key={s.id} className="card p-5">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <h3 className="truncate text-base font-semibold text-slate-900 dark:text-slate-100">
-                    {s.title}
-                  </h3>
-                  <p className="mt-0.5 text-sm text-slate-500">
-                    <span className="num font-medium text-slate-700 dark:text-slate-300">
-                      {s.currency} {trim(s.amount)}
-                    </span>{' '}
-                    · every {cadence(s.intervalCount, s.intervalUnit)}
-                  </p>
-                </div>
-                <StatusBadge status={s.status} />
-              </div>
-
-              {s.status === 'needs_attention' && (
-                <div className="mt-3 flex gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-300">
-                  <AlertTriangle size={15} className="mt-0.5 shrink-0" />
-                  <span>
-                    This fell too far behind schedule to catch up on its own, so
-                    billing stopped rather than sending a burst of back-dated
-                    invoices. Resume it to restart on a clean schedule — the
-                    missed cycles are not billed.
-                  </span>
-                </div>
-              )}
-
-              <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                <div>
-                  <dt className="text-xs text-slate-500">Customer</dt>
-                  <dd className="truncate text-slate-700 dark:text-slate-300">
-                    {s.customerName ?? s.customerEmail ?? '—'}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">
-                    {s.status === 'canceled' ? 'Ended' : 'Next invoice'}
-                  </dt>
-                  <dd className="text-slate-700 dark:text-slate-300">
-                    {s.status === 'canceled' ? '—' : formatDate(s.nextRunAt)}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Billed</dt>
-                  <dd className="text-slate-700 dark:text-slate-300">
-                    {s.cyclesBilled}
-                    {s.totalCycles !== null && ` of ${s.totalCycles}`} cycle
-                    {s.cyclesBilled === 1 ? '' : 's'}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Auto-send</dt>
-                  <dd className="text-slate-700 dark:text-slate-300">
-                    {s.autoSend ? 'On' : 'Off'}
-                  </dd>
-                </div>
-              </dl>
-
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button
-                  className="btn-secondary text-xs"
-                  onClick={() => setHistoryFor(s)}
-                >
-                  Billing history
-                </button>
-                {s.status === 'active' && (
-                  <button
-                    className="btn-secondary text-xs"
-                    onClick={() => change.mutate({ id: s.id, action: 'pause' })}
-                    disabled={change.isPending}
-                  >
-                    <Pause size={14} /> Pause
-                  </button>
-                )}
-                {(s.status === 'paused' || s.status === 'needs_attention') && (
-                  <button
-                    className="btn-secondary text-xs"
-                    onClick={() => change.mutate({ id: s.id, action: 'resume' })}
-                    disabled={change.isPending}
-                  >
-                    <Play size={14} /> Resume
-                  </button>
-                )}
-                {s.status !== 'canceled' && (
-                  <button
-                    className="btn-secondary text-xs text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30"
-                    onClick={() => change.mutate({ id: s.id, action: 'cancel' })}
-                    disabled={change.isPending}
-                  >
-                    <Ban size={14} /> Cancel
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
+      {/* Stated ONCE, above the ledger, rather than repeated inside every card
+          that happens to be stalled. The status column says which rows; this
+          says what it means and what to do. */}
+      {summary.stalled.length > 0 && (
+        <div className="mb-6">
+          <AttentionNote names={summary.stalled.map((s) => s.title)} />
         </div>
       )}
 
+      <DataTable
+        columns={columns}
+        rows={subs.data ?? []}
+        rowKey={(s) => s.id}
+        loading={subs.isLoading}
+        error={subs.isError ? errorMessage(subs.error) : null}
+        onRetry={() => subs.refetch()}
+        // The row opens the subscription: its terms, and every invoice it has
+        // ever issued.
+        onRowClick={(s) => setHistoryFor(s)}
+        renderMobile={renderMobile}
+        label="Subscriptions"
+        skeletonRows={5}
+        emptyLabel="No subscriptions yet."
+        emptyHint="Set an amount and an interval. Each cycle we create an invoice and, if you like, email it to your customer automatically."
+        emptyAction={
+          <button className="btn-primary" onClick={() => setCreateOpen(true)}>
+            <Plus size={16} /> Create your first subscription
+          </button>
+        }
+      />
+
       {change.isError && (
-        <p className="mt-3 text-sm text-red-600">{errorMessage(change.error)}</p>
+        <div className="rule mt-4 pt-3" role="status" aria-live="polite">
+          <p className="measure-wide text-sm leading-relaxed text-red-600 dark:text-red-400">
+            {errorMessage(change.error)}
+          </p>
+        </div>
       )}
 
       {/* ---------------- Create ---------------- */}
@@ -239,6 +326,7 @@ export default function Subscriptions() {
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         title="New subscription"
+        size="lg"
         footer={
           <>
             <button
@@ -258,10 +346,13 @@ export default function Subscriptions() {
           </>
         }
       >
-        <div className="space-y-4">
-          <div>
+        {/* RULED FIELD GROUPS: what, how much, how often, who. Each group is
+            opened by a hairline and named by a running head, so the form reads
+            as four decisions rather than eleven inputs. */}
+        <div className="space-y-5">
+          <FieldGroup label="What you are billing for">
             <label className="label" htmlFor="sub-title">
-              What are you billing for?
+              Title
             </label>
             <input
               id="sub-title"
@@ -271,224 +362,393 @@ export default function Subscriptions() {
               onChange={(e) => setTitle(e.target.value)}
               maxLength={200}
             />
-          </div>
 
-          <div className="grid gap-4 sm:grid-cols-3">
-            <div>
-              <label className="label" htmlFor="sub-currency">
-                Currency
-              </label>
-              <select
-                id="sub-currency"
-                className="input"
-                value={currency}
-                onChange={(e) => setCurrency(e.target.value)}
-              >
-                {(rates.data?.currencies ?? ['USD']).map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="sm:col-span-2">
-              <label className="label" htmlFor="sub-amount">
-                Amount per cycle
+            <div className="mt-4">
+              <label className="label" htmlFor="sub-desc">
+                Description{' '}
+                <span className="font-normal text-slate-400 dark:text-slate-500">
+                  (optional)
+                </span>
               </label>
               <input
-                id="sub-amount"
-                className="input num"
-                inputMode="decimal"
-                placeholder="1499"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
+                id="sub-desc"
+                className="input"
+                placeholder="Monthly SaaS subscription"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                maxLength={1000}
               />
             </div>
-          </div>
+          </FieldGroup>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label className="label" htmlFor="sub-count">
-                Bill every
-              </label>
-              <div className="flex gap-2">
-                <input
-                  id="sub-count"
-                  className="input num w-20"
-                  inputMode="numeric"
-                  value={intervalCount}
-                  onChange={(e) => setIntervalCount(e.target.value)}
-                />
+          <FieldGroup label="Amount">
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div>
+                <label className="label" htmlFor="sub-currency">
+                  Currency
+                </label>
                 <select
-                  className="input flex-1"
-                  value={intervalUnit}
-                  onChange={(e) => setIntervalUnit(e.target.value as IntervalUnit)}
-                  aria-label="Interval unit"
+                  id="sub-currency"
+                  className="input"
+                  value={currency}
+                  onChange={(e) => setCurrency(e.target.value)}
                 >
-                  <option value="day">day(s)</option>
-                  <option value="week">week(s)</option>
-                  <option value="month">month(s)</option>
-                  <option value="year">year(s)</option>
+                  {(rates.data?.currencies ?? ['USD']).map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
                 </select>
               </div>
-              <p className="mt-1 text-xs text-slate-500">
-                The first invoice is issued straight away.
-              </p>
-            </div>
-            <div>
-              <label className="label" htmlFor="sub-due">
-                Payment terms
-              </label>
-              <div className="flex items-center gap-2">
+              <div className="sm:col-span-2">
+                <label className="label" htmlFor="sub-amount">
+                  Amount per cycle
+                </label>
                 <input
-                  id="sub-due"
-                  className="input num w-20"
-                  inputMode="numeric"
-                  value={dueDays}
-                  onChange={(e) => setDueDays(e.target.value)}
+                  id="sub-amount"
+                  className="input num"
+                  inputMode="decimal"
+                  placeholder="1499"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
                 />
-                <span className="text-sm text-slate-500">days to pay</span>
               </div>
             </div>
-          </div>
+          </FieldGroup>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label className="label" htmlFor="sub-cust">
-                Customer name
-              </label>
-              <input
-                id="sub-cust"
-                className="input"
-                placeholder="Priya Raman"
-                value={customerName}
-                onChange={(e) => setCustomerName(e.target.value)}
-                maxLength={200}
-              />
+          <FieldGroup label="Schedule">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="label" htmlFor="sub-count">
+                  Bill every
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    id="sub-count"
+                    className="input num w-20"
+                    inputMode="numeric"
+                    value={intervalCount}
+                    onChange={(e) => setIntervalCount(e.target.value)}
+                  />
+                  <select
+                    className="input flex-1"
+                    value={intervalUnit}
+                    onChange={(e) => setIntervalUnit(e.target.value as IntervalUnit)}
+                    aria-label="Interval unit"
+                  >
+                    <option value="day">day(s)</option>
+                    <option value="week">week(s)</option>
+                    <option value="month">month(s)</option>
+                    <option value="year">year(s)</option>
+                  </select>
+                </div>
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  The first invoice is issued straight away.
+                </p>
+              </div>
+              <div>
+                <label className="label" htmlFor="sub-due">
+                  Payment terms
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="sub-due"
+                    className="input num w-20"
+                    inputMode="numeric"
+                    value={dueDays}
+                    onChange={(e) => setDueDays(e.target.value)}
+                  />
+                  <span className="text-sm text-slate-500 dark:text-slate-400">
+                    days to pay
+                  </span>
+                </div>
+              </div>
             </div>
-            <div>
-              <label className="label" htmlFor="sub-email">
-                Customer email
-              </label>
-              <input
-                id="sub-email"
-                type="email"
-                className="input"
-                placeholder="priya@example.com"
-                value={customerEmail}
-                onChange={(e) => setCustomerEmail(e.target.value)}
-              />
-            </div>
-          </div>
+          </FieldGroup>
 
-          <label className="flex items-start gap-2.5 text-sm text-slate-600 dark:text-slate-400">
-            <input
-              type="checkbox"
-              className="mt-0.5 h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500 dark:border-slate-600 dark:bg-slate-800"
-              checked={autoSend}
-              onChange={(e) => setAutoSend(e.target.checked)}
-              disabled={!customerEmail.trim()}
-            />
-            <span>
-              Email each invoice automatically
-              <span className="mt-0.5 block text-xs text-slate-500">
-                {customerEmail.trim()
-                  ? 'Sent to the customer as soon as each cycle is issued.'
-                  : 'Add a customer email address to enable this.'}
+          <FieldGroup label="Customer">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="label" htmlFor="sub-cust">
+                  Customer name
+                </label>
+                <input
+                  id="sub-cust"
+                  className="input"
+                  placeholder="Priya Raman"
+                  value={customerName}
+                  onChange={(e) => setCustomerName(e.target.value)}
+                  maxLength={200}
+                />
+              </div>
+              <div>
+                <label className="label" htmlFor="sub-email">
+                  Customer email
+                </label>
+                <input
+                  id="sub-email"
+                  type="email"
+                  className="input"
+                  placeholder="priya@example.com"
+                  value={customerEmail}
+                  onChange={(e) => setCustomerEmail(e.target.value)}
+                />
+              </div>
+            </div>
+
+            <label className="rule mt-4 flex items-start gap-2.5 pt-3 text-sm text-slate-600 dark:text-slate-400">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500 dark:border-slate-600 dark:bg-slate-800"
+                checked={autoSend}
+                onChange={(e) => setAutoSend(e.target.checked)}
+                disabled={!customerEmail.trim()}
+              />
+              <span>
+                Email each invoice automatically
+                <span className="mt-0.5 block text-xs text-slate-500 dark:text-slate-400">
+                  {customerEmail.trim()
+                    ? 'Sent to the customer as soon as each cycle is issued.'
+                    : 'Add a customer email address to enable this.'}
+                </span>
               </span>
-            </span>
-          </label>
-
-          <div>
-            <label className="label" htmlFor="sub-desc">
-              Description <span className="font-normal text-slate-400">(optional)</span>
             </label>
-            <input
-              id="sub-desc"
-              className="input"
-              placeholder="Monthly SaaS subscription"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              maxLength={1000}
-            />
-          </div>
+          </FieldGroup>
 
           {create.isError && (
-            <p className="text-sm text-red-600">{errorMessage(create.error)}</p>
+            <p
+              role="alert"
+              className="measure-wide border-t border-red-600 pt-3 text-sm leading-relaxed text-red-600 dark:border-red-400 dark:text-red-400"
+            >
+              {errorMessage(create.error)}
+            </p>
           )}
         </div>
       </Modal>
 
-      {/* ---------------- Billing history ---------------- */}
+      {/* ---------------- Detail and billing history ---------------- */}
       <Modal
         open={Boolean(historyFor)}
         onClose={() => setHistoryFor(null)}
-        title={historyFor ? `${historyFor.title} — billing history` : ''}
+        title={historyFor?.title ?? ''}
+        size="lg"
       >
-        {history.isLoading ? (
-          <LoadingPanel />
-        ) : history.data && history.data.length === 0 ? (
-          <p className="py-6 text-center text-sm text-slate-500">
-            Nothing billed yet. The first invoice appears here once the next cycle
-            runs.
-          </p>
-        ) : (
-          <table className="w-full text-sm">
-            <thead className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500 dark:border-slate-700">
-              <tr>
-                <th className="py-2 font-medium">Cycle</th>
-                <th className="py-2 font-medium">Invoice</th>
-                <th className="py-2 text-right font-medium">Amount</th>
-                <th className="py-2 font-medium">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {history.data?.map((row) => (
-                <tr key={row.id}>
-                  <td className="py-2 text-slate-500">{row.cycle_number}</td>
-                  <td className="py-2">
-                    {row.token ? (
-                      <a
-                        href={checkoutUrl(row.token)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="font-medium text-brand-600 hover:underline"
-                      >
-                        {row.number}
-                      </a>
-                    ) : (
-                      <span className="font-medium text-slate-700 dark:text-slate-300">
-                        {row.number}
-                      </span>
-                    )}
-                  </td>
-                  <td className="num py-2 text-right text-slate-700 dark:text-slate-300">
-                    {row.currency} {trim(row.total)}
-                  </td>
-                  <td className="py-2">
-                    <Badge tone={row.status === 'paid' ? 'green' : 'blue'} dot>
-                      {row.status}
-                    </Badge>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        {historyFor && (
+          <div>
+            {historyFor.description && (
+              <p className="measure text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+                {historyFor.description}
+              </p>
+            )}
+
+            {historyFor.status === 'needs_attention' && (
+              <div className="mt-4">
+                <AttentionNote />
+              </div>
+            )}
+
+            {/* THE SPINE. The terms of the schedule, ranged label against
+                value — this is where the facts a card grid used to repeat
+                eight times per screen now live, once, for the one
+                subscription being read. */}
+            <dl className="mt-5">
+              <SpineRow label="Status">
+                <StatusBadge status={historyFor.status} />
+              </SpineRow>
+              <SpineRow label="Amount per cycle">
+                <span className="num">
+                  {historyFor.currency} {formatAmount(historyFor.amount)}
+                </span>
+              </SpineRow>
+              <SpineRow label="Cadence">
+                every {cadence(historyFor.intervalCount, historyFor.intervalUnit)}
+              </SpineRow>
+              <SpineRow label="Customer">
+                {historyFor.customerName ?? historyFor.customerEmail ?? '—'}
+              </SpineRow>
+              <SpineRow label={historyFor.status === 'canceled' ? 'Ended' : 'Next invoice'}>
+                <span className="num">
+                  {historyFor.status === 'canceled' ? '—' : formatDate(historyFor.nextRunAt)}
+                </span>
+              </SpineRow>
+              <SpineRow label="Billed">
+                <span className="num">
+                  {historyFor.cyclesBilled}
+                  {historyFor.totalCycles !== null && ` of ${historyFor.totalCycles}`} cycle
+                  {historyFor.cyclesBilled === 1 ? '' : 's'}
+                </span>
+              </SpineRow>
+              <SpineRow label="Payment terms">
+                <span className="num">{historyFor.dueDays}</span> days to pay
+              </SpineRow>
+              <SpineRow label="Auto-send">
+                {historyFor.autoSend ? 'On' : 'Off'}
+              </SpineRow>
+            </dl>
+
+            <div className="mt-7">
+              <span className="runhead">Billing history</span>
+
+              {history.isLoading ? (
+                <div className="mt-3 space-y-3" aria-busy="true">
+                  <span className="sr-only" role="status">
+                    Loading…
+                  </span>
+                  {/* Static, per the frequency boundary — a shimmer here would
+                      loop every time a merchant opened a subscription. */}
+                  <span className="ghost h-4 w-2/3" aria-hidden />
+                  <span className="ghost h-4 w-1/2" aria-hidden />
+                  <span className="ghost h-4 w-3/5" aria-hidden />
+                </div>
+              ) : history.isError ? (
+                <div className="rule mt-3 pt-4">
+                  <p className="measure text-sm leading-relaxed text-red-600 dark:text-red-400">
+                    {errorMessage(history.error)}
+                  </p>
+                  <button
+                    type="button"
+                    className="btn-secondary mt-4"
+                    onClick={() => history.refetch()}
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : history.data && history.data.length === 0 ? (
+                <div className="rule mt-3 pt-4">
+                  <p className="measure text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+                    Nothing billed yet. The first invoice appears here once the next
+                    cycle runs.
+                  </p>
+                </div>
+              ) : (
+                <table className="mt-3 w-full text-sm">
+                  <thead>
+                    <tr>
+                      <th className={HEAD}>Cycle</th>
+                      <th className={HEAD}>Invoice</th>
+                      <th className={`${HEAD} text-right`}>Amount</th>
+                      <th className={HEAD}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {history.data?.map((row) => (
+                      <tr key={row.id} className="align-baseline">
+                        <td className="rule num py-2.5 pr-3 text-slate-500 dark:text-slate-400">
+                          {row.cycle_number}
+                        </td>
+                        <td className="rule py-2.5 pr-3">
+                          {row.token ? (
+                            <a
+                              href={checkoutUrl(row.token)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="link-ink font-medium"
+                            >
+                              {row.number}
+                            </a>
+                          ) : (
+                            <span className="font-medium text-slate-700 dark:text-slate-300">
+                              {row.number}
+                            </span>
+                          )}
+                        </td>
+                        <td className="rule num py-2.5 pr-3 text-right whitespace-nowrap text-slate-700 dark:text-slate-300">
+                          {row.currency} {formatAmount(row.total)}
+                        </td>
+                        <td className="rule py-2.5">
+                          <Badge tone={row.status === 'paid' ? 'settled' : 'waiting'} dot>
+                            {row.status}
+                          </Badge>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
         )}
       </Modal>
     </>
   );
 }
 
+/** The header of a small in-modal ledger: a running head over an ink rule. */
+const HEAD =
+  'border-b border-slate-900 pb-1.5 pr-3 text-left text-xs font-medium uppercase tracking-[0.18em] text-slate-500 dark:border-slate-100 dark:text-slate-400';
+
+/**
+ * Why billing stopped, and what resuming does.
+ *
+ * Amber because something is waiting on the merchant — but the word "needs
+ * attention" is what carries the meaning, exactly as it does in the status
+ * column. Set as a ruled block rather than a tinted panel: the stroke is the
+ * emphasis, and the paragraph keeps a real measure so it is read rather than
+ * skipped.
+ */
+function AttentionNote({ names }: { names?: string[] }) {
+  const n = names?.length ?? 1;
+  return (
+    <div className="border-t-2 border-amber-600 pt-3 dark:border-amber-400">
+      <div className="flex items-start gap-2.5">
+        <AlertTriangle
+          size={15}
+          className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400"
+          aria-hidden
+        />
+        <div className="min-w-0">
+          <span className="runhead text-amber-600 dark:text-amber-400">
+            Needs attention
+          </span>
+          <p className="measure-wide mt-1.5 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+            {n === 1 ? 'This fell' : `These ${n} fell`} too far behind schedule to catch up
+            on {n === 1 ? 'its' : 'their'} own, so billing stopped rather than sending a
+            burst of back-dated invoices. Resume {n === 1 ? 'it' : 'them'} to restart on a
+            clean schedule — the missed cycles are not billed.
+          </p>
+          {names && names.length > 0 && (
+            <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
+              {names.join(' · ')}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** A named group of fields, opened by a hairline. */
+function FieldGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <section className="rule pt-4">
+      <span className="runhead">{label}</span>
+      <div className="mt-3">{children}</div>
+    </section>
+  );
+}
+
+/** One row of the spine: a narrow label against a wide value, on a hairline. */
+function SpineRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="spine-row">
+      <dt className="spine-label">{label}</dt>
+      <dd className="spine-value">{children}</dd>
+    </div>
+  );
+}
+
 function StatusBadge({ status }: { status: Subscription['status'] }) {
+  // Semantic tone names rather than hues, and the same four inks the rest of
+  // the product uses: billing is healthy, billing is waiting on you, billing
+  // failed, or it is over.
   const tone =
     status === 'active'
-      ? 'green'
+      ? 'settled'
       : status === 'paused'
-        ? 'yellow'
+        ? 'waiting'
         : status === 'needs_attention'
-          ? 'red'
-          : 'gray';
+          ? 'failed'
+          : 'neutral';
   return (
     <Badge tone={tone} dot>
       {status === 'needs_attention' ? 'needs attention' : status}
@@ -496,12 +756,27 @@ function StatusBadge({ status }: { status: Subscription['status'] }) {
   );
 }
 
+/** Sort order for the status column: most actionable first. */
+const STATUS_RANK: Record<Subscription['status'], number> = {
+  needs_attention: 0,
+  active: 1,
+  paused: 2,
+  canceled: 3,
+};
+
+/**
+ * Approximate days in one interval unit — used ONLY to order the cadence
+ * column, never to compute a date. A month is not 30 days and this arithmetic
+ * would be wrong if it were billing anyone; sorting is the one job where "a
+ * year is longer than a month" is all the precision needed.
+ */
+const UNIT_DAYS: Record<IntervalUnit, number> = {
+  day: 1,
+  week: 7,
+  month: 30,
+  year: 365,
+};
+
 function cadence(count: number, unit: string): string {
   return count === 1 ? unit : `${count} ${unit}s`;
-}
-
-function trim(v: string): string {
-  if (!v.includes('.')) return v;
-  const t = v.replace(/0+$/, '').replace(/\.$/, '');
-  return t || '0';
 }

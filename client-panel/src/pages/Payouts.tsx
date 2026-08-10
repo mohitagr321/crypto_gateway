@@ -1,26 +1,36 @@
 import { useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ExternalLink, Send } from 'lucide-react';
+import { ExternalLink, Send, Wallet } from 'lucide-react';
 import {
-  explorerTx,
   createPayout,
+  errorMessage,
+  explorerTx,
   getAllBalances,
   getAssets,
   getNetworks,
   getSettings,
   listPayouts,
 } from '@/lib/api';
-import { errorMessage } from '@/lib/api';
 import { formatAmount, formatDate, shortHash } from '@/lib/format';
 import type { CreatePayoutInput, Payout } from '@/types';
 import PageHeader from '@/components/PageHeader';
-import AssetPicker, { AssetBadge } from '@/components/AssetPicker';
+import AssetPicker from '@/components/AssetPicker';
 import DataTable, { type Column } from '@/components/DataTable';
 import { PayoutStatusBadge } from '@/components/Badge';
 import StatCard from '@/components/StatCard';
 import Spinner from '@/components/Spinner';
-import { Wallet } from 'lucide-react';
+
+/**
+ * Asset and network as ONE label, never two independent facts.
+ *
+ * "1,204.50 USDT" is not an answer to "where did this settle" — the same symbol
+ * on two chains is two different assets. `network` is optional on older records
+ * that predate the column and are BEP20 by definition, which is the same default
+ * `explorerTx` resolves the link with.
+ */
+const pairLabel = (p: Payout) => `${p.asset ?? p.currency} · ${p.network ?? 'BEP20'}`;
 
 export default function Payouts() {
   const queryClient = useQueryClient();
@@ -87,42 +97,80 @@ export default function Payouts() {
     },
   });
 
-  const wallet = settingsQuery.data?.payoutWallet;
+  /**
+   * THE DESTINATION IS PER-NETWORK, and it used to be read as though it weren't.
+   *
+   * The page previously showed `payoutWallet` under a hardcoded "(BEP20)" label
+   * and gated the submit button on it whatever network was selected. Two ways
+   * that went wrong once TRC20 was enabled: a merchant with only a Tron wallet
+   * configured found the button permanently disabled, and a merchant with only
+   * an EVM wallet could submit a TRC20 payout that the server had to reject —
+   * while the page displayed the 0x… address it was NOT going to.
+   *
+   * AccountSettings models exactly two wallets because there are exactly two
+   * address formats here: a Tron address, and the one 0x… address every EVM
+   * chain settles to.
+   */
+  const wallet =
+    selectedNetwork === 'TRC20'
+      ? (settingsQuery.data?.payoutWalletTrc20 ?? null)
+      : (settingsQuery.data?.payoutWallet ?? null);
+
+  const payouts = payoutsQuery.data;
 
   const columns: Column<Payout>[] = [
     {
       key: 'payoutId',
-      header: 'Payout ID',
+      header: 'Payout',
+      sortValue: (p) => p.payoutId,
       render: (p) => (
-        <span className="font-mono text-xs">{shortHash(p.payoutId, 10, 4)}</span>
+        <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
+          {shortHash(p.payoutId, 10, 4)}
+        </span>
       ),
     },
     {
+      // Money: right-ranged on tabular figures, so decimal points stack down the
+      // column and magnitudes can be compared without reading every row.
       key: 'amount',
       header: 'Amount',
+      numeric: true,
+      sortValue: (p) => Number(p.amount),
       render: (p) => (
-        <span className="flex items-center gap-2">
-          <span className="font-medium tabular-nums">{formatAmount(p.amount)}</span>
-          <AssetBadge asset={p.asset ?? p.currency} network={p.network} />
+        <span className="font-medium text-slate-900 dark:text-slate-50">
+          {formatAmount(p.amount)}
+        </span>
+      ),
+    },
+    {
+      key: 'asset',
+      header: 'Asset',
+      sortValue: (p) => pairLabel(p),
+      render: (p) => (
+        <span className="whitespace-nowrap text-xs text-slate-500 dark:text-slate-400">
+          {pairLabel(p)}
         </span>
       ),
     },
     {
       key: 'status',
       header: 'Status',
+      sortValue: (p) => p.status,
       render: (p) => <PayoutStatusBadge status={p.status} />,
     },
     {
       key: 'wallet',
-      header: 'Wallet',
+      header: 'Destination',
       hideOnMobile: true,
       render: (p) => (
-        <span className="font-mono text-xs">{shortHash(p.wallet)}</span>
+        <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
+          {shortHash(p.wallet)}
+        </span>
       ),
     },
     {
       key: 'txHash',
-      header: 'Tx',
+      header: 'Transaction',
       hideOnMobile: true,
       render: (p) =>
         p.txHash ? (
@@ -133,18 +181,25 @@ export default function Payouts() {
             className="inline-flex items-center gap-1 font-mono text-xs text-brand-600 hover:underline dark:text-brand-400"
           >
             {shortHash(p.txHash)}
-            <ExternalLink size={11} />
+            <ExternalLink size={11} aria-hidden />
           </a>
         ) : (
-          <span className="text-slate-400">—</span>
+          // The secondary-text pair, NOT slate-400: at 3.01:1 on the light
+          // ground that step is documented as borders-and-icons-only, and
+          // dark:slate-500 measures 3.58:1 on the dark ground. A dash that
+          // says "no transaction yet" is text and has to be legible.
+          <span className="text-slate-500 dark:text-slate-400">—</span>
         ),
     },
     {
       key: 'createdAt',
-      header: 'Created',
+      header: 'Requested',
       hideOnMobile: true,
+      align: 'right',
+      className: 'num',
+      sortValue: (p) => new Date(p.createdAt).getTime(),
       render: (p) => (
-        <span className="whitespace-nowrap text-xs text-slate-500">
+        <span className="whitespace-nowrap text-xs text-slate-500 dark:text-slate-400">
           {formatDate(p.createdAt)}
         </span>
       ),
@@ -156,133 +211,185 @@ export default function Payouts() {
   return (
     <>
       <PageHeader
+        eyebrow="Money out"
         title="Payouts"
         description="Withdraw a balance to your configured payout wallet. Each asset settles separately."
+        meta={
+          payouts
+            ? `${payouts.length} payout${payouts.length === 1 ? '' : 's'}`
+            : undefined
+        }
       />
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        <div className="space-y-4 lg:col-span-1">
-          {/* Scoped to the SELECTED asset. The combined figure the legacy
+      {/* Asymmetric spread: the instrument in the narrow margin column, the
+          ledger it writes into across the wide one. */}
+      <div className="grid grid-cols-1 gap-x-10 gap-y-10 lg:grid-cols-12">
+        <div className="min-w-0 lg:col-span-4">
+          {/* Scoped to the SELECTED pair. The combined figure the legacy
               /balance returns sums every asset and labels the total USDT, which
               is a number the merchant could never withdraw in one payout. */}
           <StatCard
-            label={`Available ${selectedAsset}`}
-            value={`${formatAmount(availableHere ?? '0')} ${selectedAsset}`}
+            label={`${selectedAsset} · ${selectedNetwork}`}
+            value={formatAmount(availableHere ?? '0')}
             icon={Wallet}
             tone="emerald"
             loading={balancesQuery.isLoading}
-            sub={`on ${selectedNetwork} · settles separately from other assets`}
+            sub="available to withdraw — settles separately from every other asset"
           />
 
-          <form onSubmit={onSubmit} className="card space-y-4 p-5">
-            <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-              Request payout
-            </h3>
+          <form onSubmit={onSubmit} className="rule mt-9 pt-3">
+            <span className="runhead">Request payout</span>
 
             {mutation.isError && (
-              <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-900/30 dark:text-red-300">
-                {errorMessage(mutation.error)}
+              <div className="mt-4" role="alert">
+                <span className="runhead text-red-600 dark:text-red-400">
+                  Not created
+                </span>
+                <p className="measure mt-1.5 text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                  {errorMessage(mutation.error)}
+                </p>
               </div>
             )}
             {mutation.isSuccess && (
-              <div className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
-                Payout queued. It will appear below shortly.
-              </div>
-            )}
-
-            {networks.length > 1 && (
-              <div>
-                <label className="label" htmlFor="payout-network">
-                  Network
-                </label>
-                <select id="payout-network" className="input" {...register('network')}>
-                  {networks.map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            <AssetPicker
-              id="payout-asset"
-              network={selectedNetwork}
-              value={selectedAsset}
-              onChange={(sym) => setValue('asset', sym, { shouldDirty: true })}
-              context="payout"
-            />
-
-            <div>
-              <label className="label" htmlFor="amount">
-                Amount ({selectedAsset})
-              </label>
-              <input
-                id="amount"
-                className="input"
-                inputMode="decimal"
-                placeholder="100.00"
-                {...register('amount', {
-                  required: 'Amount is required',
-                  pattern: {
-                    value: /^\d+(\.\d{1,6})?$/,
-                    message: 'Enter a valid amount',
-                  },
-                  validate: (v) =>
-                    Number(v) > 0 || 'Amount must be greater than zero',
-                })}
-              />
-              {errors.amount && (
-                <p className="mt-1 text-xs text-red-600">
-                  {errors.amount.message}
-                </p>
-              )}
-              {availableHere !== undefined && (
-                <p className="mt-1 text-xs text-slate-500">
-                  Available: {formatAmount(availableHere)} {selectedAsset} on{' '}
-                  {selectedNetwork}
-                </p>
-              )}
-            </div>
-
-            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-800/60">
-              <p className="text-slate-500">Payout wallet (BEP20)</p>
-              {wallet ? (
-                <code className="font-mono text-slate-700 dark:text-slate-200">
-                  {shortHash(wallet, 10, 8)}
-                </code>
-              ) : (
-                <span className="text-amber-600 dark:text-amber-400">
-                  Not configured — set it in Settings first.
+              <div className="mt-4" role="status">
+                <span className="runhead text-emerald-600 dark:text-emerald-400">
+                  Queued
                 </span>
+                <p className="measure mt-1.5 text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                  The payout appears in the history as soon as the gateway picks
+                  it up.
+                </p>
+              </div>
+            )}
+
+            <div className="mt-5 space-y-4">
+              {networks.length > 1 && (
+                <div>
+                  <label className="label" htmlFor="payout-network">
+                    Network
+                  </label>
+                  <select
+                    id="payout-network"
+                    className="input"
+                    {...register('network')}
+                  >
+                    {networks.map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               )}
+
+              <AssetPicker
+                id="payout-asset"
+                network={selectedNetwork}
+                value={selectedAsset}
+                onChange={(sym) => setValue('asset', sym, { shouldDirty: true })}
+                context="payout"
+              />
+
+              <div>
+                <label className="label" htmlFor="amount">
+                  Amount ({selectedAsset})
+                </label>
+                <input
+                  id="amount"
+                  className="input num"
+                  inputMode="decimal"
+                  placeholder="100.00"
+                  {...register('amount', {
+                    required: 'Amount is required',
+                    pattern: {
+                      value: /^\d+(\.\d{1,6})?$/,
+                      message: 'Enter a valid amount',
+                    },
+                    validate: (v) =>
+                      Number(v) > 0 || 'Amount must be greater than zero',
+                  })}
+                />
+                {errors.amount && (
+                  <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">
+                    {errors.amount.message}
+                  </p>
+                )}
+                {availableHere !== undefined && (
+                  <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
+                    <span className="num">{formatAmount(availableHere)}</span>{' '}
+                    {selectedAsset} available on {selectedNetwork}
+                  </p>
+                )}
+              </div>
             </div>
+
+            {/* The destination, as ruled key/value rows rather than a tinted
+                panel. The network is named because the wallet is per-network. */}
+            <dl className="mt-6">
+              <div className="spine-row">
+                <dt className="spine-label">Destination</dt>
+                <dd className="spine-value">
+                  {wallet ? (
+                    <code className="font-mono text-xs">
+                      {shortHash(wallet, 10, 8)}
+                    </code>
+                  ) : (
+                    <span className="text-amber-600 dark:text-amber-400">
+                      Not configured
+                    </span>
+                  )}
+                </dd>
+              </div>
+              <div className="spine-row">
+                <dt className="spine-label">Settles on</dt>
+                <dd className="spine-value">
+                  {selectedAsset} · {selectedNetwork}
+                </dd>
+              </div>
+            </dl>
+
+            {!wallet && !settingsQuery.isLoading && (
+              <p className="measure mt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                No {selectedNetwork} payout wallet is set, so there is nowhere to
+                send the funds.{' '}
+                <Link to="/settings" className="link-ink">
+                  Set one in Settings
+                </Link>
+                .
+              </p>
+            )}
 
             <button
               type="submit"
-              className="btn-primary w-full"
+              className="btn-primary mt-6 w-full"
               disabled={mutation.isPending || !wallet}
             >
               {mutation.isPending ? (
                 <Spinner size={16} />
               ) : (
                 <>
-                  <Send size={16} /> Request payout
+                  <Send size={16} aria-hidden /> Request payout
                 </>
               )}
             </button>
           </form>
         </div>
 
-        <div className="card lg:col-span-2">
-          <div className="border-b border-slate-100 px-5 py-4 dark:border-slate-800">
-            <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-              Payout history
-            </h3>
+        <div className="min-w-0 lg:col-span-8">
+          {/* Running head over the ledger. The table draws its own ink rule
+              under the column heads, so nothing is added below this line. */}
+          <div className="rule flex items-baseline justify-between gap-4 pb-3 pt-3">
+            <span className="runhead">Payout history</span>
+            {payouts && payouts.length > 0 && (
+              <span className="num text-xs text-slate-500 dark:text-slate-400">
+                {payouts.length} record{payouts.length === 1 ? '' : 's'}
+              </span>
+            )}
           </div>
+
           <DataTable
             columns={columns}
-            rows={payoutsQuery.data ?? []}
+            rows={payouts ?? []}
             rowKey={(p) => p.payoutId}
             loading={payoutsQuery.isLoading}
             error={
@@ -292,6 +399,37 @@ export default function Payouts() {
             }
             onRetry={() => payoutsQuery.refetch()}
             emptyLabel="No payouts yet."
+            emptyHint="Request one with the form on this page. It appears here as soon as it is queued, and the transaction hash lands when the gateway broadcasts it."
+            label="Payout history"
+            // Seven columns, so the phone gets a stacked ledger rather than a
+            // sideways drag.
+            renderMobile={(p) => (
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate font-mono text-xs text-slate-500 dark:text-slate-400">
+                    {shortHash(p.payoutId, 10, 4)}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    {pairLabel(p)}
+                  </p>
+                  <p className="num mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    {formatDate(p.createdAt)}
+                  </p>
+                </div>
+                <div className="shrink-0 text-right">
+                  <p className="num lining-nums text-base font-semibold text-slate-900 dark:text-slate-50">
+                    {formatAmount(p.amount)}
+                  </p>
+                  <div className="mt-1.5 flex justify-end">
+                    <PayoutStatusBadge status={p.status} />
+                  </div>
+                </div>
+              </div>
+            )}
+            // The identifier stays put while the rest of the row scrolls, and
+            // the box gets a height so its header genuinely pins.
+            stickyFirstColumn
+            maxHeight="65vh"
           />
         </div>
       </div>
