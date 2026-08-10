@@ -25,17 +25,17 @@
 // defaults and the ramp ends up half warm, half blue.
 // ---------------------------------------------------------------------------
 const ground = {
-  50: '#FAFAF8', //  page
-  100: '#F3F2EE', //  inset
-  200: '#E5E3DD', //  hairline rules
-  300: '#CFCCC4', //  dividers
-  400: '#94918A', //  3.01:1 — input borders + decorative icons ONLY, never text
-  500: '#6F6C66', //  5.01:1 — secondary text
-  600: '#565350', //  7.31:1 — body text
-  700: '#413F3C', // 10.04:1
-  800: '#292826', //  dark raised
-  900: '#1B1A19', //  dark card
-  950: '#121211', //  dark ground
+  50: '#FBFAFC', //  page
+  100: '#F4F1F7', //  inset
+  200: '#E7E2EC', //  hairline rules
+  300: '#D0C8D9', //  dividers
+  400: '#948CA1', //  3.01:1 — input borders + decorative icons ONLY, never text
+  500: '#6E667D', //  5.01:1 — secondary text
+  600: '#554D61', //  7.31:1 — body text
+  700: '#403A4A', // 10.04:1
+  800: '#292431', //  dark raised
+  900: '#1C1823', //  dark card
+  950: '#131017', //  dark ground
 };
 
 export default {
@@ -128,7 +128,7 @@ export default {
           settled: '#047857',
           pending: '#B45309',
           failed: '#DC2626',
-          neutral: '#6F6C66',
+          neutral: '#6E667D',
         },
       },
       fontFamily: {

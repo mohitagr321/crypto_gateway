@@ -107,7 +107,7 @@
        value that used to sit here was rgb(148 163 184), Tailwind's COOL
        slate-400, which would have survived the remap and left a blue thumb
        riding down every warm page. Kept in step with the ramp by hand. */
-    scrollbar-color: rgb(148 145 138 / 0.5) transparent;
+    scrollbar-color: rgb(148 140 161 / 0.5) transparent;
   }
   *::-webkit-scrollbar {
     width: 8px;

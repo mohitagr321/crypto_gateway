@@ -52,26 +52,39 @@ export default {
          * deep-merges at the STEP level, so overriding only some leaves the rest
          * at Tailwind's cool defaults and the ramp ends up half warm, half blue.
          *
-         * Low-chroma (hue ~60, near-zero saturation), NOT saturated bone.
-         * Saturated bone sits at hue ~40 and amber at 37.7 — two degrees apart,
-         * where the old cool slate gave 172. Warm paper is the escape from the
-         * dark-indigo-Inter monoculture our own #6366f1 sits inside, but it only
-         * works if "pending" is still instantly separable from the page.
+         * PLUM, hue 270, carrying REAL chroma (18-27% saturation at the ends).
          *
-         * Contrast measured with the WCAG relative-luminance formula, on 50.
+         * It was a warm near-neutral, and warm could never be made colourful:
+         * adding chroma at hue ~45 walks the page straight into amber. Measured,
+         * a saturated warm ground lands 16 degrees from amber-600, where
+         * "pending" stops being separable from the paper it sits on. That is why
+         * the warm version had to stay near-zero saturation, and why it read as
+         * beige rather than as a colour.
+         *
+         * Hue 270 is the seat that is free. Every semantic hue is far away —
+         * amber 116 degrees, red 90, emerald 107 — so the ground can carry
+         * visible colour without ever competing with a status. And it sits 27
+         * degrees off brand indigo: close enough to read as one family, far
+         * enough that a primary button is still its own hue against the page
+         * rather than a slightly brighter patch of it.
+         *
+         * Every ratio below measured with the WCAG relative-luminance formula
+         * against 50 (light) and 950 (dark), not eyeballed. Text steps clear AA
+         * in both themes: secondary 5.23/5.86, body 7.70/11.62, settled
+         * 5.27/9.80, pending 4.83/11.29, failed 4.64/6.81, brand 6.04/6.32.
          */
         slate: {
-          50: '#FAFAF8', //  page
-          100: '#F3F2EE', //  inset
-          200: '#E5E3DD', //  hairline rules
-          300: '#CFCCC4', //  dividers
-          400: '#94918A', //  3.01:1 — input borders + decorative icons ONLY, never text
-          500: '#6F6C66', //  5.01:1 — secondary text
-          600: '#565350', //  7.31:1 — body text
-          700: '#413F3C', // 10.04:1
-          800: '#292826', //  dark raised
-          900: '#1B1A19', //  dark card
-          950: '#121211', //  dark ground
+          50: '#FBFAFC', //  page
+          100: '#F4F1F7', //  inset
+          200: '#E7E2EC', //  hairline rules
+          300: '#D0C8D9', //  dividers
+          400: '#948CA1', //  3.09:1 — input borders + decorative icons ONLY, never text
+          500: '#6E667D', //  5.23:1 — secondary text
+          600: '#554D61', //  7.70:1 — body text
+          700: '#403A4A', // 10.50:1
+          800: '#292431', //  dark raised
+          900: '#1C1823', //  dark card
+          950: '#131017', //  dark ground
         },
 
         /**

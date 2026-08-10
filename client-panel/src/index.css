@@ -166,7 +166,7 @@
     scrollbar-width: thin;
     /* slate-400 as a literal, because scrollbar-color takes no utility.
        Kept in step with the ramp in tailwind.config.js by hand. */
-    scrollbar-color: rgb(148 145 138 / 0.5) transparent;
+    scrollbar-color: rgb(148 140 161 / 0.5) transparent;
   }
   *::-webkit-scrollbar {
     width: 8px;
