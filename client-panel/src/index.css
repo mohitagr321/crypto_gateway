@@ -18,6 +18,46 @@
 @tailwind utilities;
 
 @layer base {
+  /* ===================================================================
+   * MOTION
+   *
+   * THE FREQUENCY BOUNDARY. How often a person sees a surface decides how
+   * much it may move.
+   *   - MARKETING routes (/, /pricing, /developers, the signup funnel) are
+   *     seen once or twice. They earn reveals, parallax and scrubbed scenes.
+   *   - DASHBOARD routes are opened dozens of times a day and get a hard
+   *     budget: nothing over 200ms, nothing travelling more than 8px, nothing
+   *     that loops, no page-level entrance, no count-up on mount. The
+   *     CommandPalette opens INSTANTLY — a keyboard-initiated action is never
+   *     animated, because the user is already ahead of it.
+   *   - CHECKOUT gets exactly two animations. It is a stranger's money.
+   *
+   * THE DATA-DRIVEN LAW. On the dashboard nothing animates on MOUNT; things
+   * animate only when a value actually CHANGES. That is what buys motion on a
+   * surface a merchant lives in without taxing them for visiting it.
+   *
+   * CRAFT RULES. Never `ease-in` on UI. Never `scale(0)` — entry is
+   * scale(0.97) + opacity 0. Exit runs ~20% faster than entry. Popovers scale
+   * from their transform-origin; modals stay centred. Stagger 30-80ms and
+   * never block interaction. Animate compositor-only properties: transform and
+   * opacity. A width or height transition is a layout animation and is banned —
+   * use transform: scaleX() with transform-origin: 0.
+   * =================================================================== */
+  :root {
+    /* The good curve was a literal in three places and a token in none. */
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-set: cubic-bezier(0.16, 1, 0.3, 1); /* type settling into place */
+    --ease-inout: cubic-bezier(0.77, 0, 0.175, 1); /* on-screen movement only */
+
+    --dur-press: 120ms;
+    --dur-pop: 180ms;
+    --dur-menu: 220ms;
+    --dur-modal: 260ms;
+    --dur-morph: 320ms;
+    --dur-set: 520ms;
+    --dur-rule: 620ms;
+  }
+
   html {
     font-family: 'Inter Variable', Inter, system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
@@ -38,7 +78,9 @@
   /* Thin, theme-aware scrollbars. */
   * {
     scrollbar-width: thin;
-    scrollbar-color: rgb(148 163 184 / 0.5) transparent;
+    /* slate-400 as a literal, because scrollbar-color takes no utility.
+       Kept in step with the ramp in tailwind.config.js by hand. */
+    scrollbar-color: rgb(148 145 138 / 0.5) transparent;
   }
   *::-webkit-scrollbar {
     width: 8px;
@@ -245,8 +287,8 @@
   /* Faint grid, masked to fade out at the edges. */
   .bg-grid {
     background-image:
-      linear-gradient(to right, rgb(100 116 139 / 0.07) 1px, transparent 1px),
-      linear-gradient(to bottom, rgb(100 116 139 / 0.07) 1px, transparent 1px);
+      linear-gradient(to right, rgb(111 108 102 / 0.07) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(111 108 102 / 0.07) 1px, transparent 1px);
     background-size: 56px 56px;
     -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 55%, transparent 100%);
     mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 55%, transparent 100%);
@@ -468,8 +510,31 @@
   .animate-flow,
   .animate-pulse-ring,
   .animate-marquee,
-  .animate-sheen {
+  .animate-sheen,
+  /* These five were uncovered: three are Tailwind built-ins we never named. */
+  .animate-pulse,
+  .animate-shimmer,
+  .animate-fade-up,
+  .aurora {
     animation: none;
+  }
+
+  /* DEFENCE IN DEPTH. Everything above is hand-tuned and stays, because it
+     encodes judgement a blanket rule cannot — reveals must end VISIBLE rather
+     than at their start state, and the progress bar survives because it is
+     information. This catch-all sits underneath and closes the ~60 utilities
+     nobody has enumerated yet, including any added tomorrow.
+
+     `.motion-keep` is the single opt-out, worn by the two things that are
+     genuinely information rather than decoration: the spinner (a frozen
+     spinner reads as a hung request) and the scroll-progress bar. */
+  *:not(.motion-keep),
+  *:not(.motion-keep)::before,
+  *:not(.motion-keep)::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
   /* A demo that advances on a timer is content, not motion decoration — but it
      must not also slide, so the transition is dropped, not the sequence. */

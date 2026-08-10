@@ -66,7 +66,7 @@ export default function MarketingLayout() {
             decorative, hence aria-hidden; browsers without scroll-timeline get
             a scaleX(0) bar, i.e. nothing, which is the correct fallback. */}
         <div
-          className="scroll-progress absolute inset-x-0 bottom-0 h-px origin-left scale-x-0 bg-gradient-to-r from-brand-500 to-accent-500"
+          className="motion-keep scroll-progress absolute inset-x-0 bottom-0 h-px origin-left scale-x-0 bg-gradient-to-r from-brand-500 to-accent-500"
           aria-hidden
         />
         <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-5 sm:px-8">
