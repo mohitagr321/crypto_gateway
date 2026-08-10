@@ -13,6 +13,52 @@
    display sizes tighten correctly instead of looking like scaled-up body text. */
 @import '@fontsource-variable/inter/opsz.css';
 
+/* ===========================================================================
+ * THE DISPLAY SERIF — Newsreader Variable, self-hosted, LATIN SUBSET ONLY.
+ *
+ * DECLARED BY HAND rather than @imported, because this package has no
+ * per-subset entrypoint. @fontsource-variable/newsreader ships exactly
+ * index/wght/opsz/standard (+ their italics) and nothing else, so
+ * `@fontsource-variable/newsreader/latin.css` does not resolve and would fail
+ * the build. Its barrels emit all three subsets it does have — latin 132.0 kB,
+ * latin-ext 86.6 kB, vietnamese 27.2 kB. A reader of our copy fetches only
+ * latin (unicode-range sees to that), so the other 113.8 kB would sit in dist
+ * as pure dead weight. One @font-face, one file, nothing shipped unread.
+ *
+ * THE FAMILY NAME IS 'Newsreader Variable', NOT 'Newsreader'. Read out of
+ * node_modules/@fontsource-variable/newsreader/opsz.css before it was written
+ * here, not guessed — this is the identical bug the note above documents, and
+ * its failure mode is SILENT: the page simply renders in the fallback and
+ * looks merely a bit plain. Verified in the built CSS that the @font-face
+ * family and the --font-display reference are the same string, and at runtime
+ * that the face actually loads.
+ *
+ * `-opsz-` rather than `-wght-`. Newsreader's optical-size axis runs 6..72
+ * (Inter's stops at 32), and `font-optical-sizing: auto` maps the used
+ * font-size in pt onto it: .h-section lands near opsz 36, .h-display near 54,
+ * .figure-xl clamps at 72. That axis is the entire reason a serif is worth
+ * setting this large — it is what makes a display headline a display cut
+ * rather than a text face scaled up. It costs 74.0 kB over the wght-only build
+ * (132.0 vs 58.1 kB); changing the filename below to
+ * `newsreader-latin-wght-normal.woff2` is the one-line way to buy that back if
+ * the landing page's budget ever demands it, at the price of making the three
+ * `font-optical-sizing` declarations no-ops again.
+ * ======================================================================== */
+@font-face {
+  font-family: 'Newsreader Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200 800;
+  src: url('@fontsource-variable/newsreader/files/newsreader-latin-opsz-normal.woff2')
+    format('woff2-variations');
+  /* fontsource's own latin range, copied verbatim. Anything outside it — a
+     name with an accent, a currency mark we don't carry — falls through to
+     Georgia for that glyph alone rather than pulling in a second file. */
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -44,6 +90,17 @@
    * use transform: scaleX() with transform-origin: 0.
    * =================================================================== */
   :root {
+    /* THE WHOLE BET, ON ONE LINE.
+       Exactly three rules read this — .h-display, .h-section, .figure-xl — and
+       nothing else in either app does. Point it at the sans stack and the
+       serif is gone everywhere, with no other edit and no risk of a half-
+       reverted page.
+       The fallback chain is deliberately a SERIF one. If the file fails to
+       load, a headline must degrade to Georgia; degrading to Inter would
+       silently restore the design this phase is being measured against, which
+       is the one failure we would never notice. */
+    --font-display: 'Newsreader Variable', Georgia, 'Times New Roman', serif;
+
     /* The good curve was a literal in three places and a token in none. */
     --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
     --ease-set: cubic-bezier(0.16, 1, 0.3, 1); /* type settling into place */
@@ -99,11 +156,6 @@
     @apply rounded-2xl border border-slate-200/90 bg-white shadow-soft
            dark:border-slate-800 dark:bg-slate-900/70;
   }
-  /* Interactive card (a link, a tile you can click). */
-  .card-hover {
-    @apply card transition duration-200 hover:-translate-y-0.5 hover:shadow-lift
-           hover:border-slate-300 dark:hover:border-slate-700;
-  }
   .input {
     @apply w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-soft outline-none transition placeholder:text-slate-400 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-100;
   }
@@ -145,26 +197,22 @@
            dark:bg-slate-800 dark:text-slate-200;
   }
 
-  /* Section label above a group of cards. */
-  .section-label {
-    @apply text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500;
-  }
-
-  /* Bento tile. Spans are applied per instance so importance drives size —
-     the grid itself stays dumb. */
-  .tile {
-    @apply card flex flex-col p-5 sm:p-6;
-  }
-
-  /* Loading placeholder with a sweep, rather than a static grey block. */
-  .skeleton {
-    @apply relative overflow-hidden rounded-xl bg-slate-100 dark:bg-slate-800/70;
-  }
-  .skeleton::after {
-    @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r
-           from-transparent via-white/50 to-transparent dark:via-white/5;
-    content: '';
-  }
+  /* ===================================================================
+   * DELETED HERE, DELIBERATELY: `.card-hover`, `.section-label`, `.tile` and
+   * `.skeleton` — matching the same deletion in admin-panel/src/index.css.
+   *
+   * All four were residue of the boxed/bento idiom this panel was converted
+   * OUT of, and all four had zero call sites left in src/: the conversion
+   * replaced the bento grid with ruled columns (`.rule` + `.runhead` + the
+   * editorial figure) and the sweeping placeholder with `.ghost`.
+   *
+   * `.skeleton` was the one that actually mattered. It ran `animate-shimmer`,
+   * an INFINITE loop, and it was the ONLY reference pulling the shimmer
+   * keyframes into the built stylesheet — so while it sat here unused, every
+   * merchant still downloaded a looping animation the frequency boundary bans
+   * on dashboard routes. `.ghost` below documents why the replacement is
+   * static; that note is now the only copy.
+   * =================================================================== */
 
   /* ===================================================================
    * MARKETING LAYER
@@ -199,27 +247,81 @@
     @apply text-xs font-semibold uppercase tracking-[0.14em] text-brand-600 dark:text-brand-400;
   }
   /* Display type. `clamp()` rather than breakpoint jumps so the headline scales
-     continuously with the viewport — on a 360px phone it lands at 2.5rem, on a
-     wide desktop at 5.5rem, with no step where it looks wrong. Optical sizing
+     continuously with the viewport — on a 360px phone it lands at 2.25rem, on a
+     wide desktop at 4.5rem, with no step where it looks wrong. Optical sizing
      and tight tracking are what a variable font buys us; at display sizes the
-     default letter-spacing reads loose and cheap. */
+     default letter-spacing reads loose and cheap.
+
+     ---------------------------------------------------------------------
+     RETUNED FOR NEWSREADER. Every number below was set for Inter, and a value
+     that is right for a large-x-height grotesque is wrong for a text serif.
+     Measured — out of the two woff2 files, and then out of the rendered
+     variable instances via canvas TextMetrics, which is the only way to see
+     what the opsz-54 cut at wght 600 actually does:
+
+                                Newsreader   Inter
+       x-height                   0.426 em   0.546
+       cap-height                 0.670 em   0.728
+       asc+desc box               1.000 em   1.210
+       INK, ascender to descender 0.977 em   0.939
+       opsz axis                  6..72      14..32
+
+     LINE-HEIGHT GOES UP, NOT DOWN — and that last row is why. The tempting
+     argument is that Newsreader's x-height is only 78% of Inter's, so a line
+     of it looks airier and can be set tighter. That argument is about the
+     x-height band, and the thing that actually collides is the EXTENDERS.
+     Newsreader's ink fills 0.977 of its 1.000 em box; Inter's fills 0.939 of
+     a 1.210 em box. So at Inter's old 1.02 there was 0.082 em between a
+     descender and the ascender on the line below, and at the same 1.02 in
+     Newsreader there would be 0.043 em — half the room, at the exact sizes
+     where a near-touch is most visible. 1.06 restores 0.083 em: the clearance
+     the design was drawn with, unchanged. .h-section takes 1.10 for the same
+     reason and the same result (0.123 em, against Inter's 0.122 at 1.06).
+
+     LETTER-SPACING goes from -0.035em to roughly a third of that. Inter needs
+     heavy negative tracking at display size because a grotesque is spaced for
+     UI; a serif is already spaced by its serifs, which reach toward their
+     neighbours, and the opsz-54 cut tightens it again on its own. Keeping
+     -0.035em here would jam serifs into each other — worst on 'rn', 'Ty' and
+     any capital-to-round pair — which reads as a rendering fault, not as
+     tight setting.
+
+     FONT-WEIGHT drops from 680 to 600. A serif carries far more ink per stem
+     than Inter at the same number, and the opsz-54 cut raises stroke contrast
+     on top of that; 680 turned the headline into a slab.
+
+     SIZE IS DELIBERATELY UNCHANGED. Newsreader's cap-height is 7.9% shorter
+     than Inter's, so a matched headline would want ~4.85rem — but the clamp
+     ceiling here is load-bearing for the fold note below, and a bigger clamp
+     grows the line box by the same 8%. The fold constraint is a product
+     requirement; an 8% optical match is a preference. The fold wins. (The
+     line-height change costs the fold 0.04 x 72px x 2 lines = 5.8px at the
+     ceiling, which it can afford; a size bump would have cost 8% of the whole
+     block.)
+     --------------------------------------------------------------------- */
   .h-display {
     /* Tuned so the primary CTA stays ABOVE THE FOLD on a 1440x900 laptop and on
        a 360x640 phone. An oversized hero that pushes the button off-screen
        looks impressive in a screenshot and costs signups in practice. */
+    font-family: var(--font-display);
     font-size: clamp(2.25rem, 1.5rem + 3vw, 4.5rem);
-    line-height: 1.02;
-    letter-spacing: -0.035em;
-    font-weight: 680;
+    line-height: 1.06;
+    letter-spacing: -0.012em;
+    font-weight: 600;
     font-optical-sizing: auto;
     text-wrap: balance;
     @apply text-slate-900 dark:text-slate-50;
   }
   .h-section {
+    font-family: var(--font-display);
     font-size: clamp(1.875rem, 1.1rem + 2.4vw, 3rem);
-    line-height: 1.06;
-    letter-spacing: -0.028em;
-    font-weight: 660;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    font-weight: 600;
+    /* Was missing, and was a silent no-op on Inter anyway: this clamps at
+       3rem = 36pt, above Inter's opsz ceiling of 32. Newsreader's axis reaches
+       72, so here it finally does something. */
+    font-optical-sizing: auto;
     text-wrap: balance;
     @apply text-slate-900 dark:text-slate-50;
   }
@@ -311,14 +413,51 @@
      rather than filing it into a row of identical stat cards where every number
      is the same size and therefore none of them is the point.
      Tabular, lining figures: these are read as quantities, and proportional
-     digits make a big number look hand-set at the wrong widths. */
+     digits make a big number look hand-set at the wrong widths.
+
+     THE ONE NUMERAL THAT GETS THE SERIF, and the only one. Every other figure
+     in the product — .figure-lg, .num, the ledger, every amount and balance —
+     stays on Inter, because a serif on a money figure someone has to read and
+     trust is a legibility regression wearing a bow tie. This is not that: it
+     is a single editorial numeral on a marketing or auth page, set at up to
+     7.5rem, doing the job a masthead figure does. Checked in the font before
+     committing to it: Newsreader carries `tnum` (so `tabular-nums` genuinely
+     applies and the digits keep a fixed advance) and carries NEITHER `lnum`
+     nor `onum`, which means it has one figure set and that set is lining. So
+     `lining-nums` is a no-op here rather than a wrong-op — the digits are
+     already lining, and nothing about the pairing above changed meaning.
+
+     LINE-HEIGHT 0.88 -> 1.06, and this one is a correction, not a preference.
+     0.88 was a box drawn tight around Inter's digits: Inter's ascender stands
+     0.969 em up and its lining figures only 0.739, so there was 0.23 em of
+     headroom to cut into. Newsreader's figures rise to 0.735 em and its
+     ascender is 0.735 em — measured, at wght 560 / opsz 72, ink ascent equals
+     font ascent to the pixel. There is NO headroom. Any line-height under
+     1.00 pushes the digits out through the top of their own line box: at 0.88
+     they cleared it by 10px on the Pricing hero and sat almost on the rule
+     above, which is what sent me to measure in the first place. 1.06 puts
+     0.029 em of air back above the figure and is the floor plus a margin.
+
+     A serif's descender is the other half of that trade. The digits do not
+     descend, so the 0.24 em Newsreader reserves below the baseline is dead
+     space inside the block, and .figure-label's own mt-3 would have stacked
+     on top of it and set the caption adrift. The adjacent-sibling rule below
+     hands that space back — scoped to a label that follows THIS figure, since
+     .figure-label also captions .figure-lg on six dashboard screens where the
+     figure is Inter and its spacing is already right. */
   .figure-xl {
+    font-family: var(--font-display);
     font-size: clamp(3.25rem, 1.75rem + 6vw, 7.5rem);
-    line-height: 0.88;
-    letter-spacing: -0.045em;
-    font-weight: 640;
+    line-height: 1.06;
+    letter-spacing: -0.018em;
+    /* Lighter than .h-display, not heavier: ink scales with size, and at
+       7.5rem a 640 serif numeral is a doorstop. */
+    font-weight: 560;
     font-optical-sizing: auto;
     @apply block tabular-nums lining-nums text-slate-900 dark:text-slate-50;
+  }
+  .figure-xl + .figure-label {
+    margin-top: 0;
   }
   /* The caption that says what the figure counts. It has to be small: the
      figure is the statement, this is the footnote that keeps it honest. */
@@ -424,12 +563,14 @@
     @apply block tabular-nums lining-nums text-slate-900 dark:text-slate-50;
   }
 
-  /* STATIC loading placeholder. Deliberately NOT `.skeleton`: that one runs
-     `animate-shimmer`, which is an INFINITE loop, and the frequency boundary
-     bans loops on dashboard routes. A merchant who opens Payments forty times
-     a day should not be shown forty shimmering light sweeps. Shape and a
-     stepped opacity say "not loaded yet" perfectly well without motion.
-     Use `.skeleton` on marketing routes, `.ghost` on the dashboard. */
+  /* THE loading placeholder, and deliberately STATIC.
+     Its predecessor `.skeleton` ran `animate-shimmer`, an INFINITE loop, and
+     the frequency boundary bans loops on dashboard routes: a merchant who
+     opens Payments forty times a day should not be shown forty shimmering
+     light sweeps. Shape and a stepped opacity say "not loaded yet" perfectly
+     well without motion. `.skeleton` has since been deleted outright (see the
+     note in the components layer above), so this is the only placeholder in
+     the panel — reach for it on every route, marketing included. */
   .ghost {
     @apply block rounded bg-slate-200 dark:bg-slate-800;
   }
@@ -475,12 +616,10 @@
     --ledger-edge: color-mix(in srgb, theme('colors.slate.50') 12%, transparent);
   }
   .card,
-  .tile,
   .glass-card {
     --ledger-ground: theme('colors.white');
   }
   .dark .card,
-  .dark .tile,
   .dark .glass-card {
     --ledger-ground: theme('colors.slate.900');
   }
@@ -570,12 +709,10 @@
   .ledger :where(tr > :last-child) {
     padding-right: 0;
   }
-  .card .ledger :where(tr > :first-child),
-  .tile .ledger :where(tr > :first-child) {
+  .card .ledger :where(tr > :first-child) {
     @apply pl-4;
   }
-  .card .ledger :where(tr > :last-child),
-  .tile .ledger :where(tr > :last-child) {
+  .card .ledger :where(tr > :last-child) {
     @apply pr-4;
   }
 
@@ -630,11 +767,28 @@
       radial-gradient(40rem 26rem at 50% 108%, rgb(67 56 202 / 0.14), transparent 60%);
   }
 
-  /* Faint grid, masked to fade out at the edges. */
+  /* Faint grid, masked to fade out at the edges.
+
+     The ink is pulled from the ramp with `theme()` rather than written as a
+     literal. It used to be `rgb(111 108 102 / 0.07)` — the exact value of
+     slate-500, copied by hand. `slate` is REMAPPED in tailwind.config.js, so a
+     literal copy of one of its steps is a value that silently goes stale the
+     next time the ramp is retuned: the grid would keep the old ink while every
+     other neutral on the page moved. Same color-mix + theme() spelling the
+     ledger already uses for `--ledger-edge`, which is the house pattern for a
+     ramp colour that needs an alpha. */
   .bg-grid {
     background-image:
-      linear-gradient(to right, rgb(111 108 102 / 0.07) 1px, transparent 1px),
-      linear-gradient(to bottom, rgb(111 108 102 / 0.07) 1px, transparent 1px);
+      linear-gradient(
+          to right,
+          color-mix(in srgb, theme('colors.slate.500') 7%, transparent) 1px,
+          transparent 1px
+        ),
+      linear-gradient(
+          to bottom,
+          color-mix(in srgb, theme('colors.slate.500') 7%, transparent) 1px,
+          transparent 1px
+        );
     background-size: 56px 56px;
     -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 55%, transparent 100%);
     mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 55%, transparent 100%);
@@ -761,12 +915,6 @@
     mask-image: linear-gradient(to right, transparent, #000 8%, #000 92%, transparent);
   }
 
-  /* Slow specular sweep across a surface. The one piece of pure decoration
-     here — it reads as glass catching light and costs a single transform. */
-  .animate-sheen {
-    animation: cg-sheen 7s ease-in-out infinite;
-  }
-
   /* Depth field behind the hero. Two counter-drifting radial blooms; far
      cheaper than a canvas and it recolours for dark mode instead of washing
      out. `filter: blur()` on a large element is expensive, so this uses soft
@@ -796,9 +944,6 @@
     animation-direction: alternate-reverse;
   }
 
-  .animate-float {
-    animation: cg-float 6s ease-in-out infinite;
-  }
   /* Dashes travel along the payment-flow connectors in the hero diagram. */
   .animate-flow {
     stroke-dasharray: 5 7;
@@ -809,10 +954,6 @@
   }
 }
 
-@keyframes cg-float {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-8px); }
-}
 @keyframes cg-flow {
   to { stroke-dashoffset: -24; }
 }
@@ -824,10 +965,6 @@
 @keyframes cg-marquee {
   from { transform: translateX(0); }
   to { transform: translateX(-50%); }
-}
-@keyframes cg-sheen {
-  0%, 62% { transform: translateX(-120%) skewX(-14deg); }
-  100% { transform: translateX(320%) skewX(-14deg); }
 }
 @keyframes cg-drift {
   from { transform: translate3d(-4%, -3%, 0) scale(1); }
@@ -852,14 +989,15 @@
   .scroll-progress {
     animation-duration: 1ms;
   }
-  .animate-float,
+  /* The named loops this panel actually runs, all of them on marketing routes.
+     `.animate-float`, `.animate-sheen`, `.animate-pulse` and `.animate-shimmer`
+     used to be listed here too and have been dropped: the first two were
+     deleted along with their keyframes once their last call sites went, and the
+     latter two are Tailwind built-ins this panel never names, so nothing
+     generates them. The catch-all below covers any of them if they return. */
   .animate-flow,
   .animate-pulse-ring,
   .animate-marquee,
-  .animate-sheen,
-  /* These five were uncovered: three are Tailwind built-ins we never named. */
-  .animate-pulse,
-  .animate-shimmer,
   .animate-fade-up,
   .aurora {
     animation: none;

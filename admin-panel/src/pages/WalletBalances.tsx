@@ -1,20 +1,34 @@
 import { useQuery } from '@tanstack/react-query';
-import { AlertTriangle, ExternalLink, Flame, Vault } from 'lucide-react';
-import Badge from '@/components/Badge';
+import { ExternalLink } from 'lucide-react';
+import type { ReactNode } from 'react';
+import { NetworkLabel } from '@/components/Badge';
 import DataTable, { type Column } from '@/components/DataTable';
+import { BandHead, Figure } from '@/components/Editorial';
 import ErrorState from '@/components/ErrorState';
 import PageHeader from '@/components/PageHeader';
 import Spinner from '@/components/Spinner';
 import { apiErrorMessage, walletBalances } from '@/lib/api';
-import { addrLink, formatUsdt, networkTone, shortHash } from '@/lib/format';
+import { addrLink, formatUsdt, networkLabel, shortHash } from '@/lib/format';
 import type {
   ClientPendingBalance,
   NetworkBalances,
   NetworkWallet,
 } from '@/types';
 
+/**
+ * WHERE THE MONEY ACTUALLY IS.
+ *
+ * The dashboard's headline is a flow; this page is the balance sheet, and it is
+ * per chain and per wallet because that is the only shape a gas top-up or a
+ * payout can be acted on in.
+ *
+ * A DRY GAS WALLET IS THE MOST IMPORTANT FACT THIS CONSOLE CAN SHOW. Every sweep
+ * and every payout on that chain fails silently once it runs out, so it is
+ * stated first, in words, above everything else — amber because it is waiting on
+ * an operator to top it up, and it stops being true the moment they do.
+ */
 export default function WalletBalances() {
-  const { data, isLoading, isError, error, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch, dataUpdatedAt } = useQuery({
     queryKey: ['wallets'],
     queryFn: () => walletBalances(),
     // Hot-wallet balances decide whether settlement works at all — keep them
@@ -26,7 +40,11 @@ export default function WalletBalances() {
   if (isError || !data) {
     return (
       <>
-        <PageHeader title="Wallet Balances" subtitle="Central, gas and per-client balances" />
+        <PageHeader
+          eyebrow="Platform"
+          title="Wallet balances"
+          subtitle="Central, gas and per-client balances"
+        />
         <ErrorState message={apiErrorMessage(error)} onRetry={() => refetch()} />
       </>
     );
@@ -52,27 +70,39 @@ export default function WalletBalances() {
       key: 'client',
       header: 'Client',
       sortValue: (c) => c.clientName.toLowerCase(),
-      render: (c) => <span className="font-medium">{c.clientName}</span>,
+      render: (c) => (
+        <span className="font-medium text-slate-900 dark:text-slate-100">{c.clientName}</span>
+      ),
     },
     {
       key: 'network',
       header: 'Network',
       sortValue: (c) => c.network ?? 'BEP20',
-      render: (c) => <Badge tone={networkTone(c.network)}>{c.network ?? 'BEP20'}</Badge>,
+      render: (c) => <NetworkLabel network={c.network} />,
     },
     {
       key: 'pending',
       header: 'Pending',
-      align: 'right',
+      numeric: true,
       sortValue: (c) => Number(c.pending ?? 0),
-      render: (c) => <span className="tabular-nums">{formatUsdt(c.pending)} USDT</span>,
+      render: (c) => (
+        <span className="text-slate-700 dark:text-slate-300">
+          {formatUsdt(c.pending)}
+          <span className="text-slate-500 dark:text-slate-400"> USDT</span>
+        </span>
+      ),
     },
     {
       key: 'available',
       header: 'Available',
-      align: 'right',
+      numeric: true,
       sortValue: (c) => Number(c.available ?? 0),
-      render: (c) => <span className="tabular-nums">{formatUsdt(c.available)} USDT</span>,
+      render: (c) => (
+        <span className="font-medium text-slate-900 dark:text-slate-100">
+          {formatUsdt(c.available)}
+          <span className="font-normal text-slate-500 dark:text-slate-400"> USDT</span>
+        </span>
+      ),
     },
   ];
 
@@ -81,69 +111,76 @@ export default function WalletBalances() {
   return (
     <>
       <PageHeader
-        title="Wallet Balances"
-        subtitle="Central, gas and per-client balances, per settlement network"
+        eyebrow="Platform"
+        title="Wallet balances"
+        subtitle="What each settlement chain is actually holding, and what it owes merchants."
+        meta={`updated ${new Date(dataUpdatedAt).toLocaleTimeString(undefined, {
+          hour: '2-digit',
+          minute: '2-digit',
+        })} · refreshes every minute`}
       />
 
-      {/* The single most important thing on this page: if a gas wallet is dry,
-          every sweep and payout on that chain fails silently until it is topped
-          up. Surface it above everything else. */}
       {lowGasNetworks.map((n) => (
         <div
           key={`low-${n.network}`}
-          className="mb-4 flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm dark:border-amber-500/40 dark:bg-amber-500/10"
+          role="alert"
+          className="mb-6 border-l-2 border-amber-600 pl-4 dark:border-amber-400"
         >
-          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
-          <div>
-            <p className="font-semibold text-amber-800 dark:text-amber-300">
-              {n.network} gas wallet is low ({formatUsdt(n.gas.native, 4)} {n.feeCurrency})
-            </p>
-            <p className="mt-0.5 text-amber-700 dark:text-amber-400/90">
-              Deposit sweeps and payouts on {n.network} will start failing once it
-              runs out. Top up{' '}
-              <span className="font-mono">{shortHash(n.gas.address, 10, 6)}</span> with{' '}
-              {n.feeCurrency}.
-            </p>
-          </div>
+          <span className="runhead text-amber-600 dark:text-amber-400">
+            {n.network} gas wallet is low
+          </span>
+          <p className="measure-wide mt-1.5 text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+            <span className="num font-medium">
+              {formatUsdt(n.gas.native, 4)} {n.feeCurrency}
+            </span>{' '}
+            left. Deposit sweeps and payouts on {n.network} will start failing once
+            it runs out. Top up{' '}
+            <code className="code">{shortHash(n.gas.address, 10, 6)}</code> with{' '}
+            {n.feeCurrency}.
+          </p>
         </div>
       ))}
 
       {networks.map((n) => (
-        <section key={n.network} className="mb-8">
-          <div className="mb-3 flex items-center gap-2">
-            <h2 className="text-sm font-semibold">{n.network}</h2>
-            <Badge tone={networkTone(n.network)}>
-              {n.network === 'TRC20' ? 'Tron' : 'BNB Smart Chain'}
-            </Badge>
-          </div>
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <WalletCard
+        <section key={n.network} className="mb-10">
+          <BandHead>{networkLabel(n.network)}</BandHead>
+          <div className="mt-2 grid grid-cols-1 gap-x-10 gap-y-8 lg:grid-cols-2">
+            <WalletColumn
               wallet={n.central}
               network={n.network}
-              icon={<Vault className="h-5 w-5" />}
-              tone="brand"
-              caption="Receives swept funds from deposit addresses; payouts are signed from it"
+              caption="Receives swept funds from deposit addresses; payouts are signed from it."
             />
-            <WalletCard
+            <WalletColumn
               wallet={n.gas}
               network={n.network}
-              icon={<Flame className="h-5 w-5" />}
-              tone="amber"
-              caption={`Tops up deposit addresses with ${n.feeCurrency} so they can pay their own sweep fee`}
+              caption={`Tops up deposit addresses with ${n.feeCurrency} so they can pay their own sweep fee.`}
               warn={n.lowGas}
             />
           </div>
         </section>
       ))}
 
-      <h2 className="mb-3 mt-8 text-sm font-semibold">Per-client pending balances</h2>
-      <DataTable
-        columns={columns}
-        rows={data.clientPending ?? []}
-        rowKey={(c) => `${c.clientId}:${c.network ?? 'BEP20'}`}
-        emptyMessage="No pending client balances."
-        pageSize={15}
-      />
+      <section>
+        <BandHead>Owed to merchants</BandHead>
+        <div className="mt-3">
+          <DataTable
+            columns={columns}
+            rows={data.clientPending ?? []}
+            rowKey={(c) => `${c.clientId}:${c.network ?? 'BEP20'}`}
+            emptyMessage="No pending client balances."
+            emptyHint="Nothing is currently sitting in a merchant's ledger waiting to be paid out."
+            label="Per-client pending balances"
+            defaultSortKey="available"
+            defaultSortDir="desc"
+            pageSize={15}
+          />
+        </div>
+        <p className="measure-wide mt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+          One row per merchant and chain, never summed — a merchant holding USDT
+          on BEP20 and USDT on TRC20 does not hold one combined number of
+          anything.
+        </p>
+      </section>
     </>
   );
 }
@@ -163,90 +200,93 @@ function legacyWallet(
   };
 }
 
-function WalletCard({
+/**
+ * One wallet on one chain, set as a ruled column rather than a card.
+ *
+ * Two figures, side by side and both stated: the stablecoin it holds and the
+ * native coin it pays fees with. They are different assets and are never added
+ * — a wallet with plenty of USDT and no BNB cannot move a single cent, which is
+ * exactly the failure this page exists to make visible.
+ */
+function WalletColumn({
   wallet,
   network,
-  icon,
-  tone,
   caption,
   warn = false,
 }: {
   wallet: NetworkWallet;
   network: string;
-  icon: React.ReactNode;
-  tone: 'brand' | 'amber';
   caption: string;
   warn?: boolean;
 }) {
-  const toneClass =
-    tone === 'brand'
-      ? 'bg-brand-100 text-brand-700 dark:bg-brand-500/15 dark:text-brand-300'
-      : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300';
-
   // An unconfigured wallet is not the same as an empty one — say so plainly
   // rather than rendering a 0 that looks like a drained wallet.
   if (!wallet.configured) {
     return (
-      <div className="card p-5 opacity-70">
-        <div className="mb-4 flex items-center gap-3">
-          <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${toneClass}`}>
-            {icon}
-          </div>
-          <div>
-            <p className="font-semibold">{wallet.label}</p>
-            <p className="text-xs text-gray-500">Not configured for {network}</p>
-          </div>
-        </div>
-        <p className="text-xs text-gray-400">{caption}</p>
+      <div className="rule pt-3">
+        <span className="runhead">{wallet.label || 'Wallet'}</span>
+        <p className="mt-2 text-base text-slate-700 dark:text-slate-300">
+          Not configured for {network}
+        </p>
+        <p className="measure mt-2 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+          {caption}
+        </p>
       </div>
     );
   }
 
   return (
-    <div className={`card p-5 ${warn ? 'ring-1 ring-amber-400 dark:ring-amber-500/50' : ''}`}>
-      <div className="mb-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${toneClass}`}>
-            {icon}
-          </div>
-          <div>
-            <p className="font-semibold">{wallet.label}</p>
-            <a
-              href={addrLink(wallet.address, network)}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 font-mono text-xs text-brand-600 hover:underline"
-            >
-              {shortHash(wallet.address, 10, 6)} <ExternalLink className="h-3 w-3" />
-            </a>
-          </div>
-        </div>
-        <Badge tone={networkTone(network)}>{network}</Badge>
+    <div className="rule pt-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <span className="runhead">{wallet.label || 'Wallet'}</span>
+        <a
+          href={addrLink(wallet.address, network)}
+          target="_blank"
+          rel="noreferrer"
+          className="link-ink inline-flex items-center gap-1 font-mono text-xs"
+        >
+          {shortHash(wallet.address, 10, 6)} <ExternalLink className="h-3 w-3" aria-hidden />
+        </a>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
-        <div className="rounded-lg bg-gray-50 p-4 dark:bg-gray-800/50">
-          <p className="text-xs text-gray-500">USDT</p>
-          <p className="text-xl font-semibold tabular-nums">{formatUsdt(wallet.usdt)}</p>
-        </div>
-        <div
-          className={`rounded-lg p-4 ${
-            warn
-              ? 'bg-amber-50 dark:bg-amber-500/10'
-              : 'bg-gray-50 dark:bg-gray-800/50'
-          }`}
-        >
-          <p className="text-xs text-gray-500">{wallet.nativeCurrency} (fees)</p>
-          <p
-            className={`text-xl font-semibold tabular-nums ${
-              warn ? 'text-amber-700 dark:text-amber-400' : ''
-            }`}
-          >
-            {formatUsdt(wallet.native, 4)}
-          </p>
-        </div>
+      <div className="mt-3 grid grid-cols-2 gap-x-8">
+        <WalletFigure label="USDT" value={formatUsdt(wallet.usdt)} />
+        <WalletFigure
+          label={`${wallet.nativeCurrency} · fees`}
+          value={formatUsdt(wallet.native, 4)}
+          warn={warn}
+        />
       </div>
-      <p className="mt-3 text-xs text-gray-400">{caption}</p>
+
+      <p className="measure mt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+        {caption}
+      </p>
+    </div>
+  );
+}
+
+function WalletFigure({
+  label,
+  value,
+  warn = false,
+}: {
+  label: ReactNode;
+  value: string;
+  warn?: boolean;
+}) {
+  return (
+    <div>
+      <span className="runhead">{label}</span>
+      <Figure
+        className={`mt-1 truncate ${warn ? '!text-amber-600 dark:!text-amber-400' : ''}`}
+      >
+        {value}
+      </Figure>
+      {warn && (
+        <p className="mt-1 text-xs font-medium text-amber-600 dark:text-amber-400">
+          Running low
+        </p>
+      )}
     </div>
   );
 }

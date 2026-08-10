@@ -1,68 +1,181 @@
 import type { ReactNode } from 'react';
-import { classNames } from '@/lib/format';
+import { classNames, networkLabel } from '@/lib/format';
 
-type Tone = 'green' | 'yellow' | 'red' | 'blue' | 'gray' | 'purple';
+/**
+ * Tone names. Every value the console already passes is still accepted — nothing
+ * that says `tone="purple"` breaks — but the four semantic names are what NEW
+ * code should use: they name the MEANING rather than a hue, which is the only
+ * thing that survives a palette change.
+ */
+type Tone =
+  | 'gray'
+  | 'green'
+  | 'yellow'
+  | 'blue'
+  | 'red'
+  | 'purple'
+  | 'neutral'
+  | 'settled'
+  | 'waiting'
+  | 'failed';
 
-const TONES: Record<Tone, string> = {
-  green: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300',
-  yellow: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
-  red: 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300',
-  blue: 'bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300',
-  purple: 'bg-purple-100 text-purple-700 dark:bg-purple-500/15 dark:text-purple-300',
-  gray: 'bg-gray-100 text-gray-600 dark:bg-gray-700/40 dark:text-gray-300',
+/**
+ * SIX HUES COLLAPSED ONTO FOUR MEANINGS — byte-for-byte the same collapse the
+ * merchant panel's Badge makes, because these two components render the same
+ * statuses and an operator with both panels open must not see two greens.
+ *
+ * The palette this product is set in has exactly four inks and they are not
+ * decorative:
+ *
+ *   emerald  funds arrived / healthy      amber  waiting on someone or something
+ *   red      it failed, or it is unsafe   slate  everything else
+ *
+ * So `blue` (confirming, processing) and `purple` (swept, and the old network
+ * chips) resolve into the semantic set rather than adding two more colours to a
+ * screen that already has four.
+ *
+ * The 600 step for light text and the 400 step for dark: the 500 step measures
+ * below AA on this ground and never carries text.
+ */
+const toneInk: Record<Tone, string> = {
+  gray: 'text-slate-600 dark:text-slate-400',
+  neutral: 'text-slate-600 dark:text-slate-400',
+  purple: 'text-slate-600 dark:text-slate-400',
+  green: 'text-emerald-600 dark:text-emerald-400',
+  settled: 'text-emerald-600 dark:text-emerald-400',
+  yellow: 'text-amber-600 dark:text-amber-400',
+  waiting: 'text-amber-600 dark:text-amber-400',
+  blue: 'text-amber-600 dark:text-amber-400',
+  red: 'text-red-600 dark:text-red-400',
+  failed: 'text-red-600 dark:text-red-400',
 };
 
-// Map every known status string to a tone.
+/**
+ * Amber states are drawn as a HOLLOW RING, everything else as a solid disc.
+ *
+ * This is the second carrier under the word: colour is never allowed to be the
+ * only thing separating two states, and in a greyscale print or for a
+ * red/green-blind operator an open ring against a filled dot is a difference you
+ * can still see. "Still moving" is hollow; settled, failed and archival are
+ * filled.
+ */
+const HOLLOW: ReadonlySet<Tone> = new Set<Tone>(['yellow', 'waiting', 'blue']);
+
+/**
+ * Every status string this console renders, mapped onto a meaning.
+ *
+ * `swept` is settled because the money did arrive — sweeping is the bookkeeping
+ * move that follows, not a separate outcome. A payout that has been `sent` is
+ * amber, not green: broadcast is not yet confirmed, and an operator who reads
+ * "sent" as "done" is the person who double-pays a merchant.
+ */
 const STATUS_TONE: Record<string, Tone> = {
   // clients
-  active: 'green',
-  pending: 'yellow',
-  suspended: 'red',
-  rejected: 'gray',
-  // payments / tx
-  waiting: 'yellow',
-  confirming: 'blue',
-  confirmed: 'green',
-  swept: 'purple',
-  partial: 'yellow',
-  failed: 'red',
-  expired: 'gray',
-  // payouts
-  queued: 'yellow',
-  processing: 'blue',
-  sent: 'green',
+  active: 'settled',
+  pending: 'waiting',
+  suspended: 'failed',
+  rejected: 'neutral',
+  // payments / transactions
+  waiting: 'waiting',
+  confirming: 'waiting',
+  confirmed: 'settled',
+  swept: 'settled',
+  partial: 'waiting',
+  failed: 'failed',
+  expired: 'neutral',
+  // payouts and admin withdrawals
+  queued: 'waiting',
+  processing: 'waiting',
+  sent: 'waiting',
   // webhook / generic
-  success: 'green',
-  true: 'green',
-  false: 'red',
+  success: 'settled',
+  true: 'settled',
+  false: 'failed',
 };
 
 export function statusTone(status?: string): Tone {
-  if (!status) return 'gray';
-  return STATUS_TONE[status.toLowerCase()] ?? 'gray';
+  if (!status) return 'neutral';
+  return STATUS_TONE[status.toLowerCase()] ?? 'neutral';
 }
 
+/**
+ * A status, set as a MARK AND A WORD rather than a filled pill.
+ *
+ * The pill was a coloured rectangle with the word inside it; at a glance an
+ * operator read the colour and the word was decoration. Ranged as small caps
+ * against a dot, the WORD is what you read and the colour and shape are what
+ * confirm it — which is the right way round, and it also stops six pills
+ * fighting the hairlines for attention down a ledger column.
+ */
 export default function Badge({
   children,
   tone,
   status,
+  dot = true,
   className,
 }: {
   children?: ReactNode;
   tone?: Tone;
   status?: string;
+  /** The mark. On by default; turn it off where an icon already carries shape. */
+  dot?: boolean;
   className?: string;
 }) {
   const resolved = tone ?? statusTone(status);
   return (
     <span
       className={classNames(
-        'inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium capitalize',
-        TONES[resolved],
-        className
+        'inline-flex items-center gap-1.5 whitespace-nowrap text-[11px] font-medium uppercase tracking-[0.1em]',
+        toneInk[resolved],
+        className,
       )}
     >
+      {dot &&
+        (HOLLOW.has(resolved) ? (
+          <span
+            className="h-2 w-2 shrink-0 rounded-full border-[1.5px] border-current"
+            aria-hidden
+          />
+        ) : (
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" aria-hidden />
+        ))}
       {children ?? status}
+    </span>
+  );
+}
+
+/**
+ * THE CHAIN, set as a LABEL rather than as a coloured chip.
+ *
+ * A network is not a state, and the old treatment painted it amber or purple in
+ * a column sitting next to a status badge — so a BEP20 row and a "waiting" row
+ * were the same colour, in the same table, meaning nothing in common. Here the
+ * chain is ink and the human name of it is the quiet half, which also stops the
+ * two networks reading as two severities.
+ *
+ * `full` prints "BEP20 · BSC"; the short form is for a column that already has
+ * the chain in its header.
+ */
+export function NetworkLabel({
+  network,
+  full = false,
+}: {
+  network?: string | null;
+  full?: boolean;
+}) {
+  const name = network ?? 'BEP20';
+  if (!full) {
+    return (
+      <span className="whitespace-nowrap font-medium text-slate-800 dark:text-slate-200">
+        {name}
+      </span>
+    );
+  }
+  const [chain, human] = networkLabel(name).split(' · ');
+  return (
+    <span className="whitespace-nowrap">
+      <span className="font-medium text-slate-800 dark:text-slate-200">{chain}</span>
+      <span className="text-slate-500 dark:text-slate-400"> · {human}</span>
     </span>
   );
 }

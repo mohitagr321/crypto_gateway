@@ -1,8 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCircle2, Coins, ExternalLink, Loader2, TrendingUp, Wallet } from 'lucide-react';
 import { useState } from 'react';
-import Badge from '@/components/Badge';
+import Badge, { NetworkLabel } from '@/components/Badge';
 import DataTable, { type Column } from '@/components/DataTable';
+import { BandHead } from '@/components/Editorial';
+import ErrorState from '@/components/ErrorState';
+import FormError from '@/components/FormError';
 import Modal from '@/components/Modal';
 import PageHeader from '@/components/PageHeader';
 import StatCard from '@/components/StatCard';
@@ -13,14 +16,7 @@ import {
   listCommissionWithdrawals,
   withdrawCommission,
 } from '@/lib/api';
-import {
-  addrLink,
-  formatDate,
-  formatUsdt,
-  networkTone,
-  shortHash,
-  txLink,
-} from '@/lib/format';
+import { addrLink, formatDate, formatUsdt, networkLabel, shortHash, txLink } from '@/lib/format';
 import type { AdminWithdrawal, CommissionBalance } from '@/types';
 
 // Address shape differs per chain. Validating client-side is a courtesy — the
@@ -32,6 +28,16 @@ const ADDRESS_RE: Record<string, RegExp> = {
   TRC20: /^T[1-9A-HJ-NP-Za-km-z]{33}$/,
 };
 
+/**
+ * THE GATEWAY'S OWN MONEY.
+ *
+ * One band per chain, and no pooled total anywhere on the page. Commission is
+ * physically held in that chain's central wallet and can only be withdrawn from
+ * there, so a single combined figure would be a number nobody can act on — and
+ * acting on it would mean trying to spend Tron-earned funds out of the BSC
+ * wallet. The non-fungibility discipline is the correctness rule here, exactly
+ * as it is on the merchant panel's balances.
+ */
 export default function Revenue() {
   const qc = useQueryClient();
   const { role } = useAuth();
@@ -65,42 +71,49 @@ export default function Revenue() {
       key: 'createdAt',
       header: 'Date',
       sortValue: (w) => w.createdAt,
-      render: (w) => <span className="text-xs text-gray-500">{formatDate(w.createdAt)}</span>,
+      render: (w) => (
+        <span className="whitespace-nowrap text-slate-500 dark:text-slate-400">
+          {formatDate(w.createdAt)}
+        </span>
+      ),
     },
     {
       key: 'amount',
       header: 'Amount',
-      align: 'right',
+      numeric: true,
       sortValue: (w) => Number(w.amount ?? 0),
       render: (w) => (
-        <span className="tabular-nums">
-          {formatUsdt(w.amount)} {currency}
+        <span className="font-medium text-slate-900 dark:text-slate-100">
+          {formatUsdt(w.amount)}
+          <span className="font-normal text-slate-500 dark:text-slate-400"> {currency}</span>
         </span>
       ),
     },
     {
       key: 'to',
       header: 'To',
+      hideOnMobile: true,
       render: (w) =>
         w.toAddress ? (
           <a
             href={addrLink(w.toAddress, w.network)}
             target="_blank"
             rel="noreferrer"
-            className="inline-flex items-center gap-1 text-brand-600 hover:underline"
+            className="link-ink inline-flex items-center gap-1 font-mono text-xs"
           >
-            <code className="text-xs">{shortHash(w.toAddress, 8, 4)}</code>
-            <ExternalLink className="h-3 w-3" />
+            {shortHash(w.toAddress, 8, 4)}
+            <ExternalLink className="h-3 w-3" aria-hidden />
           </a>
         ) : (
-          <span className="text-gray-400">—</span>
+          <span className="text-slate-500 dark:text-slate-400">not set</span>
         ),
     },
     {
       key: 'network',
       header: 'Network',
+      hideOnMobile: true,
       sortValue: (w) => w.network ?? 'BEP20',
-      render: (w) => <Badge tone={networkTone(w.network)}>{w.network ?? 'BEP20'}</Badge>,
+      render: (w) => <NetworkLabel network={w.network} />,
     },
     {
       key: 'status',
@@ -109,25 +122,32 @@ export default function Revenue() {
       render: (w) => (
         <div>
           <Badge status={w.status} />
-          {w.error && <p className="mt-1 max-w-[200px] truncate text-xs text-red-600">{w.error}</p>}
+          {/* The reason a withdrawal failed is the whole point of the row, so it
+              is printed rather than truncated into a tooltip nobody opens. */}
+          {w.error && (
+            <p className="mt-1 max-w-[22rem] text-xs leading-snug text-red-600 dark:text-red-400">
+              {w.error}
+            </p>
+          )}
         </div>
       ),
     },
     {
       key: 'tx',
       header: 'Tx',
+      hideOnMobile: true,
       render: (w) =>
         w.txHash ? (
           <a
             href={txLink(w.txHash, w.network)}
             target="_blank"
             rel="noreferrer"
-            className="inline-flex items-center gap-1 text-brand-600 hover:underline"
+            className="link-ink inline-flex items-center gap-1 font-mono text-xs"
           >
-            {shortHash(w.txHash)} <ExternalLink className="h-3 w-3" />
+            {shortHash(w.txHash)} <ExternalLink className="h-3 w-3" aria-hidden />
           </a>
         ) : (
-          <span className="text-gray-400">—</span>
+          <span className="text-slate-500 dark:text-slate-400">not broadcast</span>
         ),
     },
   ];
@@ -135,78 +155,95 @@ export default function Revenue() {
   return (
     <>
       <PageHeader
-        title="Revenue / Commission"
-        subtitle="Commission earned and withdrawals to your wallet"
+        eyebrow="Money in"
+        title="Revenue"
+        subtitle="Commission the gateway has earned, per chain, and every withdrawal of it."
         actions={
           isSuper ? (
-            <button className="btn-primary" onClick={() => setOpen(true)}>
+            <button type="button" className="btn-primary" onClick={() => setOpen(true)}>
               <Wallet className="h-4 w-4" /> Withdraw commission
             </button>
-          ) : undefined
+          ) : (
+            <span className="runhead">Read-only · ops role</span>
+          )
         }
       />
 
       {balanceQuery.isError ? (
-        <div className="card p-5 text-sm text-red-600 dark:text-red-400">
-          {apiErrorMessage(balanceQuery.error)}
-        </div>
+        <ErrorState
+          message={apiErrorMessage(balanceQuery.error)}
+          onRetry={() => balanceQuery.refetch()}
+        />
       ) : (
-        <>
-          {/* One block per chain. Commission is physically held in that chain's
-              central wallet and can only be withdrawn from there, so a single
-              pooled total would be misleading — and acting on it would mean
-              trying to spend Tron-earned funds from the BSC wallet. */}
-          {networkBalances.map((b) => (
-            <div key={b.network ?? 'BEP20'} className="mb-4">
-              {networkBalances.length > 1 && (
-                <div className="mb-2 flex items-center gap-2">
-                  <Badge tone={networkTone(b.network)}>{b.network ?? 'BEP20'}</Badge>
-                  <span className="text-xs text-gray-500">
-                    held in the {b.network ?? 'BEP20'} central wallet
+        networkBalances.map((b) => {
+          const net = b.network ?? 'BEP20';
+          return (
+            <section key={net} className="mb-10">
+              <BandHead
+                aside={
+                  <span className="text-xs text-slate-500 dark:text-slate-400">
+                    held in the {net} central wallet
                   </span>
-                </div>
-              )}
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                }
+              >
+                {networkLabel(net)}
+              </BandHead>
+              <div className="mt-2 grid grid-cols-1 gap-x-8 gap-y-6 sm:grid-cols-3">
+                {/* Available first, because it is the only one of the three you
+                    can do anything with. Emerald: this is money that has
+                    arrived and is yours to move. */}
                 <StatCard
-                  label="Accrued (total earned)"
-                  value={`${formatUsdt(b.accrued)} ${b.currency ?? currency}`}
-                  icon={TrendingUp}
-                  tone="blue"
+                  label="Available to withdraw"
+                  value={formatUsdt(b.available)}
+                  icon={Wallet}
+                  tone="emerald"
                   loading={balanceQuery.isLoading}
+                  hint={`${b.currency ?? currency} · payable from the ${net} wallet now`}
+                />
+                <StatCard
+                  label="Accrued"
+                  value={formatUsdt(b.accrued)}
+                  icon={TrendingUp}
+                  loading={balanceQuery.isLoading}
+                  hint={`${b.currency ?? currency} · total ever earned on ${net}`}
                 />
                 <StatCard
                   label="Withdrawn"
-                  value={`${formatUsdt(b.withdrawn)} ${b.currency ?? currency}`}
+                  value={formatUsdt(b.withdrawn)}
                   icon={Coins}
-                  tone="purple"
                   loading={balanceQuery.isLoading}
-                />
-                <StatCard
-                  label="Available to withdraw"
-                  value={`${formatUsdt(b.available)} ${b.currency ?? currency}`}
-                  icon={Wallet}
-                  tone="brand"
-                  hint="Withdrawable now"
-                  loading={balanceQuery.isLoading}
+                  hint={`${b.currency ?? currency} · already taken out`}
                 />
               </div>
-            </div>
-          ))}
-        </>
+            </section>
+          );
+        })
       )}
 
-      <div className="mt-6">
-        <h2 className="mb-3 text-sm font-semibold">Withdrawal history</h2>
-        <DataTable
-          columns={columns}
-          rows={historyQuery.data ?? []}
-          rowKey={(w) => w.id}
-          loading={historyQuery.isLoading}
-          error={historyQuery.isError ? apiErrorMessage(historyQuery.error) : null}
-          emptyMessage="No withdrawals yet."
-          pageSize={15}
-        />
-      </div>
+      <section>
+        <BandHead>Withdrawal history</BandHead>
+        <div className="mt-3">
+          <DataTable
+            columns={columns}
+            rows={historyQuery.data ?? []}
+            rowKey={(w) => w.id}
+            loading={historyQuery.isLoading}
+            error={historyQuery.isError ? apiErrorMessage(historyQuery.error) : null}
+            onRetry={() => historyQuery.refetch()}
+            emptyMessage="No commission has been withdrawn yet."
+            emptyHint="Every withdrawal is recorded here with the chain it settled on and the transaction that carried it."
+            label="Commission withdrawals"
+            defaultSortKey="createdAt"
+            defaultSortDir="desc"
+            skeletonRows={8}
+            pageSize={15}
+          />
+        </div>
+        <p className="measure-wide mt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+          Amounts are never summed across chains: commission earned on one chain
+          can only be withdrawn from that chain's central wallet.
+        </p>
+      </section>
 
       {isSuper && (
         <WithdrawModal
@@ -297,17 +334,22 @@ function WithdrawModal({
       onClose={close}
       title={
         <span className="flex items-center gap-2">
-          <Wallet className="h-4 w-4" /> Withdraw commission
+          <Wallet className="h-4 w-4 shrink-0" aria-hidden /> Withdraw commission
         </span>
       }
       footer={
         <>
-          <button className="btn-secondary" onClick={close}>
+          <button type="button" className="btn-secondary" onClick={close}>
             Cancel
           </button>
-          <button className="btn-primary" disabled={mutation.isPending} onClick={onSubmit}>
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={mutation.isPending}
+            onClick={onSubmit}
+          >
             {mutation.isPending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
+              <Loader2 className="motion-keep h-4 w-4 animate-spin" />
             ) : (
               <CheckCircle2 className="h-4 w-4" />
             )}
@@ -317,21 +359,16 @@ function WithdrawModal({
       }
     >
       <div className="space-y-4">
-        {mutation.isError && (
-          <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-500/10 dark:text-red-300">
-            {apiErrorMessage(mutation.error)}
-          </div>
-        )}
-        {fieldError && (
-          <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-500/10 dark:text-red-300">
-            {fieldError}
-          </div>
-        )}
+        {mutation.isError && <FormError>{apiErrorMessage(mutation.error)}</FormError>}
+        {fieldError && <FormError title="Check this first">{fieldError}</FormError>}
 
         {balances.length > 1 && (
           <div>
-            <label className="label">Network</label>
+            <label className="label" htmlFor="wd-network">
+              Network
+            </label>
             <select
+              id="wd-network"
               className="input"
               value={network}
               onChange={(e) => onNetworkChange(e.target.value)}
@@ -343,7 +380,7 @@ function WithdrawModal({
                 </option>
               ))}
             </select>
-            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
               Paid from the {network} central wallet. Commission is not
               transferable between chains.
             </p>
@@ -351,18 +388,21 @@ function WithdrawModal({
         )}
 
         <div>
-          <div className="flex items-center justify-between">
-            <label className="label">Amount ({currency})</label>
+          <div className="flex items-baseline justify-between gap-3">
+            <label className="label" htmlFor="wd-amount">
+              Amount ({currency})
+            </label>
             <button
               type="button"
-              className="text-xs font-medium text-brand-600 hover:underline"
+              className="mb-1.5 text-xs font-medium text-brand-600 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-brand-500 dark:text-brand-400"
               onClick={() => setAmount(balance?.available ?? '')}
             >
-              Max: {formatUsdt(balance?.available)}
+              Max: <span className="num">{formatUsdt(balance?.available)}</span>
             </button>
           </div>
           <input
-            className="input"
+            id="wd-amount"
+            className="input num"
             placeholder="100.00"
             inputMode="decimal"
             value={amount}
@@ -371,22 +411,26 @@ function WithdrawModal({
         </div>
 
         <div>
-          <label className="label">Destination address ({network})</label>
+          <label className="label" htmlFor="wd-address">
+            Destination address ({network})
+          </label>
           <input
+            id="wd-address"
             className="input font-mono text-sm"
             placeholder={network === 'TRC20' ? 'T…' : '0x…'}
             value={toAddress}
             onChange={(e) => setToAddress(e.target.value)}
           />
-          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+          <p className="mt-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
             Must be a {network === 'TRC20' ? 'Tron (T…)' : 'BEP20 (0x…)'} address.
             On-chain transfers are irreversible.
           </p>
         </div>
 
-        <p className="text-xs text-gray-500 dark:text-gray-400">
-          Available to withdraw: {formatUsdt(balance?.available)} {currency}. The withdrawal is
-          queued and broadcast on {network} by the settlement worker.
+        <p className="measure text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+          Available to withdraw: <span className="num">{formatUsdt(balance?.available)}</span>{' '}
+          {currency}. The withdrawal is queued and broadcast on {network} by the
+          settlement worker.
         </p>
       </div>
     </Modal>

@@ -129,13 +129,6 @@
     @apply rounded-2xl border border-slate-200/90 bg-white shadow-soft
            dark:border-slate-800 dark:bg-slate-900/70;
   }
-  /* Interactive card (a link, a tile you can click). Within the 8px / 200ms
-     dashboard budget, and keyed to hover rather than to render. */
-  .card-hover {
-    @apply card transition duration-200 hover:-translate-y-0.5 hover:shadow-lift
-           hover:border-slate-300 dark:hover:border-slate-700;
-  }
-
   .input {
     @apply w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-soft outline-none transition placeholder:text-slate-400 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-100 dark:placeholder:text-slate-500;
   }
@@ -179,26 +172,24 @@
            dark:bg-slate-800 dark:text-slate-200;
   }
 
-  /* Section label above a group of cards. */
-  .section-label {
-    @apply text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500;
-  }
-
-  /* Bento tile. Spans are applied per instance so importance drives size —
-     the grid itself stays dumb. */
-  .tile {
-    @apply card flex flex-col p-5 sm:p-6;
-  }
-
-  /* Loading placeholder with a sweep, rather than a static grey block. */
-  .skeleton {
-    @apply relative overflow-hidden rounded-xl bg-slate-100 dark:bg-slate-800/70;
-  }
-  .skeleton::after {
-    @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r
-           from-transparent via-white/50 to-transparent dark:via-white/5;
-    content: '';
-  }
+  /* ===================================================================
+   * DELETED HERE, DELIBERATELY: `.card-hover`, `.section-label`, `.tile` and
+   * `.skeleton`.
+   *
+   * All four were residue of the boxed idiom this console was converted OUT of,
+   * and all four had zero call sites left in src/ — the conversion replaced the
+   * bento grid with ruled columns (`.rule` + `.runhead` + Editorial's `Figure`)
+   * and the sweeping placeholder with Editorial's static `Ghost`.
+   *
+   * `.skeleton` was the one that actually mattered: it ran `animate-shimmer`,
+   * an INFINITE loop, and every route in this app is a console route, so there
+   * was nowhere it could ever legally be used. Leaving it defined was an
+   * invitation to reintroduce a banned loop. Editorial.tsx already documents
+   * why the replacement is static; that note is now the only copy.
+   *
+   * Nothing referenced them, so removing them also drops the shimmer keyframes
+   * from the built stylesheet.
+   * =================================================================== */
 
   /* ===================================================================
    * BROADSHEET LAYER
@@ -357,15 +348,18 @@
 
 /* Accessibility: honour the OS setting. */
 @media (prefers-reduced-motion: reduce) {
-  /* Hand-tuned entries first, because they encode judgement a blanket rule
-     cannot. These are the named animations this app actually runs. */
-  .animate-pulse,
-  .animate-shimmer,
-  .animate-fade-up {
-    animation: none;
-  }
+  /* NOTHING HAND-TUNED IS LEFT TO LIST. This block used to enumerate
+     `.animate-pulse`, `.animate-shimmer` and `.animate-fade-up`, but none of
+     the three is generated any more: the console names no Tailwind animation
+     utility anywhere in src/, and `.skeleton` — the last thing that pulled
+     `animate-shimmer` in — was deleted with the boxed idiom (see the note in
+     the components layer). Selectors for animations that cannot exist are dead
+     CSS that reads as coverage, which is worse than no coverage at all.
 
-  /* DEFENCE IN DEPTH. The catch-all sits underneath and closes the ~60
+     The one loop this app does run is the spinner, and it opts OUT below on
+     purpose. Everything else is closed by the catch-all.
+
+     DEFENCE IN DEPTH. The catch-all closes the ~60
      utilities nobody has enumerated, including any added tomorrow.
 
      `.motion-keep` is the single opt-out, worn by the things that are genuinely

@@ -1,6 +1,40 @@
 import type { LucideIcon } from 'lucide-react';
-import { classNames } from '@/lib/format';
+import type { ReactNode } from 'react';
+import { Figure, Ghost } from './Editorial';
 
+/**
+ * The icon's INK, not a tinted rounded tile.
+ *
+ * The tile version painted `bg-brand-100 text-brand-700` behind a decorative
+ * glyph by default, which broke the one colour rule that matters here: brand
+ * means "something you can click", and a stat figure is not clickable. So the
+ * two non-semantic tones resolve to slate-400 — the step documented for
+ * decorative icons — and only a genuine state tone is allowed to carry hue,
+ * where it is still never the sole carrier because the label sits right beside
+ * it.
+ */
+const toneInk = {
+  brand: 'text-slate-400',
+  blue: 'text-slate-400',
+  purple: 'text-slate-400',
+  neutral: 'text-slate-400',
+  amber: 'text-amber-600 dark:text-amber-400',
+  emerald: 'text-emerald-600 dark:text-emerald-400',
+  red: 'text-red-600 dark:text-red-400',
+} as const;
+
+/**
+ * One figure in a stat strip, set as a RULED COLUMN rather than a box.
+ *
+ * A row of four bordered, shadowed, rounded cards states four numbers at
+ * identical weight inside four identical rectangles, so nothing is the point and
+ * the enclosure costs ~24px of padding on every side. Here each figure is opened
+ * by a hairline, headed by a running head, and set at the working figure size:
+ * lay four across a grid and they read as a ledger strip.
+ *
+ * NOTHING ANIMATES ON MOUNT — no count-up, no entrance. The figure is simply
+ * there when the operator arrives, which is what they came for.
+ */
 export default function StatCard({
   label,
   value,
@@ -10,33 +44,29 @@ export default function StatCard({
   loading,
 }: {
   label: string;
-  value: string | number;
-  icon: LucideIcon;
-  hint?: string;
-  tone?: 'brand' | 'blue' | 'amber' | 'purple';
+  value: ReactNode;
+  icon?: LucideIcon;
+  /** The footnote that keeps the figure honest — the asset, the period, the caveat. */
+  hint?: ReactNode;
+  tone?: keyof typeof toneInk;
   loading?: boolean;
 }) {
-  const toneClasses = {
-    brand: 'bg-brand-100 text-brand-700 dark:bg-brand-500/15 dark:text-brand-300',
-    blue: 'bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300',
-    amber: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
-    purple: 'bg-purple-100 text-purple-700 dark:bg-purple-500/15 dark:text-purple-300',
-  }[tone];
-
   return (
-    <div className="card flex items-center gap-4 p-5">
-      <div className={classNames('flex h-12 w-12 shrink-0 items-center justify-center rounded-lg', toneClasses)}>
-        <Icon className="h-6 w-6" />
+    <div className="rule flex h-full flex-col pt-3">
+      <div className="flex items-start justify-between gap-2">
+        <span className="runhead min-w-0 truncate">{label}</span>
+        {Icon && <Icon size={14} className={`mt-px shrink-0 ${toneInk[tone]}`} aria-hidden />}
       </div>
-      <div className="min-w-0">
-        <p className="truncate text-sm text-gray-500 dark:text-gray-400">{label}</p>
-        {loading ? (
-          <div className="mt-1 h-6 w-24 animate-pulse rounded bg-gray-200 dark:bg-gray-700" />
-        ) : (
-          <p className="truncate text-2xl font-semibold tracking-tight">{value}</p>
-        )}
-        {hint && <p className="mt-0.5 truncate text-xs text-gray-400">{hint}</p>}
-      </div>
+
+      {loading ? (
+        <Ghost className="mt-3 h-7 w-2/3" />
+      ) : (
+        <Figure className="mt-2 truncate">{value}</Figure>
+      )}
+
+      {!loading && hint && (
+        <p className="mt-2 text-xs leading-snug text-slate-500 dark:text-slate-400">{hint}</p>
+      )}
     </div>
   );
 }

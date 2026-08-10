@@ -1,19 +1,33 @@
 import { useQuery } from '@tanstack/react-query';
-import { CheckCircle2, ChevronDown, ChevronRight, XCircle } from 'lucide-react';
-import { Fragment, useState } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
+import { Fragment, useState, type ReactNode } from 'react';
 import Badge from '@/components/Badge';
+import ErrorState from '@/components/ErrorState';
 import PageHeader from '@/components/PageHeader';
 import Spinner from '@/components/Spinner';
-import ErrorState from '@/components/ErrorState';
 import { apiErrorMessage, listWebhookLogs } from '@/lib/api';
 import { formatDate, relativeTime } from '@/lib/format';
 import type { WebhookLog } from '@/types';
 
+/**
+ * DELIVERY ATTEMPTS, set as a ledger with rows that open.
+ *
+ * The expansion is the point of this screen — an operator is here because a
+ * merchant said "we never got the webhook", and the answer is in the endpoint,
+ * the response and the payload. So the row opens in place under its own hairline
+ * rather than pushing them into a modal that loses the row they were reading.
+ *
+ * It is a hand-rolled table rather than DataTable because DataTable has no
+ * concept of a row that expands, and giving it one to serve a single page would
+ * cost every other ledger a prop. Everything visible is the same ledger
+ * treatment: running heads over an ink rule, hairlines between rows, ranged to
+ * the ends of the page.
+ */
 export default function WebhookLogs() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [onlyFailed, setOnlyFailed] = useState(false);
 
-  const { data, isLoading, isError, error, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ['webhook-logs', onlyFailed],
     queryFn: () => listWebhookLogs(onlyFailed ? { success: false } : undefined),
   });
@@ -22,25 +36,32 @@ export default function WebhookLogs() {
 
   const renderPayload = (payload: WebhookLog['payload']) => {
     if (payload == null) return '—';
-    const text = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
-    return text;
+    return typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
   };
 
   return (
     <>
       <PageHeader
-        title="Webhook Logs"
-        subtitle="Delivery attempts to client webhook endpoints"
+        eyebrow="Monitoring"
+        title="Webhook logs"
+        subtitle="Every delivery attempt to a merchant's endpoint, with the response it came back with."
         actions={
-          <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
             <input
               type="checkbox"
-              className="h-4 w-4 rounded border-gray-300"
+              className="h-4 w-4 rounded border-slate-400 accent-brand-600 dark:border-slate-600"
               checked={onlyFailed}
               onChange={(e) => setOnlyFailed(e.target.checked)}
             />
             Failures only
           </label>
+        }
+        meta={
+          isLoading
+            ? undefined
+            : `${logs.length.toLocaleString()} attempt${logs.length === 1 ? '' : 's'}${
+                onlyFailed ? ' · failures only' : ''
+              }${isFetching ? ' · updating' : ''}`
         }
       />
 
@@ -49,87 +70,131 @@ export default function WebhookLogs() {
       ) : isError ? (
         <ErrorState message={apiErrorMessage(error)} onRetry={() => refetch()} />
       ) : (
-        <div className="card overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] text-sm">
+        <>
+          <div className="overflow-auto">
+            <table className="w-full border-separate border-spacing-0 text-sm text-slate-700 dark:text-slate-300">
               <thead>
-                <tr className="border-b border-gray-200 bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500 dark:border-gray-800 dark:bg-gray-800/50 dark:text-gray-400">
-                  <th className="w-8 px-4 py-3" />
-                  <th className="px-4 py-3 font-medium">Event</th>
-                  <th className="px-4 py-3 font-medium">Client</th>
-                  <th className="px-4 py-3 font-medium">Status</th>
-                  <th className="px-4 py-3 text-right font-medium">Attempt</th>
-                  <th className="px-4 py-3 font-medium">Next retry</th>
-                  <th className="px-4 py-3 font-medium">Time</th>
+                <tr>
+                  {/* The disclosure column has no name; a running head over an
+                      empty 2rem column would be labelling a chevron. */}
+                  <Th className="w-8" />
+                  <Th>Event</Th>
+                  <Th>Client</Th>
+                  <Th>Result</Th>
+                  <Th className="text-right">Attempt</Th>
+                  <Th className="hidden md:table-cell">Next retry</Th>
+                  <Th className="hidden md:table-cell">Time</Th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+              <tbody>
                 {logs.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-4 py-12 text-center text-gray-400">
-                      No webhook attempts recorded.
+                    <td colSpan={7} className="py-12">
+                      <span className="runhead">Nothing here</span>
+                      <p className="measure mt-3 text-base leading-relaxed text-slate-700 dark:text-slate-300">
+                        {onlyFailed
+                          ? 'No failed delivery attempts. Every webhook the gateway has sent was accepted.'
+                          : 'No webhook attempts recorded.'}
+                      </p>
+                      {onlyFailed && (
+                        <button
+                          type="button"
+                          className="btn-secondary mt-5"
+                          onClick={() => setOnlyFailed(false)}
+                        >
+                          Show every attempt
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ) : (
-                  logs.map((log) => {
+                  logs.map((log, i) => {
                     const isOpen = expanded === log.id;
+                    const ruled = i > 0 ? 'border-t border-slate-200 dark:border-slate-800' : '';
                     return (
                       <Fragment key={log.id}>
                         <tr
-                          className="cursor-pointer transition hover:bg-gray-50 dark:hover:bg-gray-800/50"
+                          className="cursor-pointer outline-none transition-colors duration-[var(--dur-press)] hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500 dark:hover:bg-slate-800"
+                          tabIndex={0}
+                          aria-expanded={isOpen}
                           onClick={() => setExpanded(isOpen ? null : log.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && e.target === e.currentTarget) {
+                              setExpanded(isOpen ? null : log.id);
+                            }
+                          }}
                         >
-                          <td className="px-4 py-3 text-gray-400">
-                            {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                          </td>
-                          <td className="px-4 py-3">
-                            <code className="text-xs">{log.event}</code>
-                          </td>
-                          <td className="px-4 py-3">{log.clientName ?? log.clientId}</td>
-                          <td className="px-4 py-3">
-                            <span className="inline-flex items-center gap-2">
-                              {log.success ? (
-                                <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                              ) : (
-                                <XCircle className="h-4 w-4 text-red-500" />
-                              )}
-                              <Badge tone={log.success ? 'green' : 'red'}>
-                                {log.statusCode ?? (log.success ? 'ok' : 'error')}
-                              </Badge>
+                          <Td className={`${ruled} text-slate-400`}>
+                            {isOpen ? (
+                              <ChevronDown className="h-4 w-4" aria-hidden />
+                            ) : (
+                              <ChevronRight className="h-4 w-4" aria-hidden />
+                            )}
+                            <span className="sr-only">
+                              {isOpen ? 'Hide' : 'Show'} delivery detail
                             </span>
-                          </td>
-                          <td className="px-4 py-3 text-right tabular-nums">
+                          </Td>
+                          <Td className={ruled}>
+                            <code className="code">{log.event}</code>
+                          </Td>
+                          <Td className={`${ruled} font-medium text-slate-900 dark:text-slate-100`}>
+                            {log.clientName ?? log.clientId}
+                          </Td>
+                          <Td className={ruled}>
+                            {/* The HTTP status is the fact; the word beside it is
+                                what makes the colour redundant rather than
+                                load-bearing. */}
+                            <Badge tone={log.success ? 'settled' : 'failed'}>
+                              {log.success ? 'ok' : 'failed'}
+                              {log.statusCode != null && ` · ${log.statusCode}`}
+                            </Badge>
+                          </Td>
+                          <Td className={`${ruled} text-right tabular-nums lining-nums`}>
                             {log.attempt}
                             {log.maxAttempts ? ` / ${log.maxAttempts}` : ''}
-                          </td>
-                          <td className="px-4 py-3 text-xs text-gray-500">
-                            {log.success ? '—' : log.nextRetryAt ? relativeTime(log.nextRetryAt) : '—'}
-                          </td>
-                          <td className="px-4 py-3 text-xs text-gray-500">{formatDate(log.createdAt)}</td>
+                          </Td>
+                          <Td className={`${ruled} hidden md:table-cell`}>
+                            {log.success ? (
+                              <span className="text-slate-500 dark:text-slate-400">
+                                not needed
+                              </span>
+                            ) : log.nextRetryAt ? (
+                              <span className="text-amber-600 dark:text-amber-400">
+                                {relativeTime(log.nextRetryAt)}
+                              </span>
+                            ) : (
+                              <span className="text-slate-500 dark:text-slate-400">
+                                no retry left
+                              </span>
+                            )}
+                          </Td>
+                          <Td
+                            className={`${ruled} hidden whitespace-nowrap text-slate-500 md:table-cell dark:text-slate-400`}
+                          >
+                            {formatDate(log.createdAt)}
+                          </Td>
                         </tr>
                         {isOpen && (
-                          <tr className="bg-gray-50/70 dark:bg-gray-800/30">
-                            <td colSpan={7} className="px-4 py-4">
-                              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                                <div>
-                                  <p className="mb-1 text-xs font-medium uppercase text-gray-500">Endpoint</p>
-                                  <code className="block overflow-x-auto rounded-lg bg-white px-3 py-2 text-xs dark:bg-gray-900">
+                          <tr>
+                            <td colSpan={7} className="border-t border-slate-200 py-4 dark:border-slate-800">
+                              <div className="grid grid-cols-1 gap-x-10 gap-y-6 lg:grid-cols-2">
+                                <div className="min-w-0">
+                                  <span className="runhead">Endpoint</span>
+                                  <code className="mt-1.5 block overflow-x-auto rounded bg-slate-100 px-3 py-2 font-mono text-xs text-slate-800 dark:bg-slate-800 dark:text-slate-200">
                                     {log.url}
                                   </code>
                                   {log.response && (
                                     <>
-                                      <p className="mb-1 mt-3 text-xs font-medium uppercase text-gray-500">
-                                        Response
-                                      </p>
-                                      <pre className="max-h-40 overflow-auto rounded-lg bg-white px-3 py-2 text-xs dark:bg-gray-900">
+                                      <span className="runhead mt-4 block">Response</span>
+                                      <pre className="mt-1.5 max-h-40 overflow-auto rounded bg-slate-100 px-3 py-2 font-mono text-xs text-slate-800 dark:bg-slate-800 dark:text-slate-200">
                                         {log.response}
                                       </pre>
                                     </>
                                   )}
                                 </div>
-                                <div>
-                                  <p className="mb-1 text-xs font-medium uppercase text-gray-500">Payload</p>
-                                  <pre className="max-h-56 overflow-auto rounded-lg bg-white px-3 py-2 text-xs dark:bg-gray-900">
+                                <div className="min-w-0">
+                                  <span className="runhead">Payload</span>
+                                  <pre className="mt-1.5 max-h-56 overflow-auto rounded bg-slate-100 px-3 py-2 font-mono text-xs text-slate-800 dark:bg-slate-800 dark:text-slate-200">
                                     {renderPayload(log.payload)}
                                   </pre>
                                 </div>
@@ -144,8 +209,31 @@ export default function WebhookLogs() {
               </tbody>
             </table>
           </div>
-        </div>
+
+          <p className="measure-wide rule mt-4 pt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+            The failures-only switch is asked of the server. Open a row to see the
+            endpoint, the payload the gateway sent and whatever came back.
+          </p>
+        </>
       )}
     </>
+  );
+}
+
+/** A running head in this page's hand-rolled ledger. */
+function Th({ children, className = '' }: { children?: ReactNode; className?: string }) {
+  return (
+    <th
+      scope="col"
+      className={`whitespace-nowrap border-b border-slate-900 px-3 pb-2 pt-1 text-left align-bottom text-xs font-medium uppercase tracking-[0.18em] text-slate-500 first:pl-0 last:pr-0 dark:border-slate-100 dark:text-slate-400 ${className}`}
+    >
+      {children}
+    </th>
+  );
+}
+
+function Td({ children, className = '' }: { children?: ReactNode; className?: string }) {
+  return (
+    <td className={`px-3 py-3.5 align-middle first:pl-0 last:pr-0 ${className}`}>{children}</td>
   );
 }

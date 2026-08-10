@@ -116,6 +116,22 @@ export default {
         // system-ui on every screen — see the note at the top of src/index.css.
         sans: ['Inter Variable', 'Inter', 'system-ui', 'sans-serif'],
         mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        /**
+         * THE DISPLAY SERIF. Newsreader Variable, latin subset, declared and
+         * explained at the top of src/index.css.
+         *
+         * Routed through the SAME custom property the three display classes
+         * read, rather than repeating the stack here — two copies of a font
+         * stack is how one of them ends up stale, and the point of this phase
+         * is that the whole bet reverts by editing one line.
+         *
+         * `font-display` is for DISPLAY TYPE: a headline, a masthead figure,
+         * the two or three words at the top of a page. It is not for body
+         * copy, labels, controls, tables, or any figure a merchant reads to
+         * make a decision — those stay on Inter, deliberately. If you are
+         * about to put this on a number in a table, you want `.num`.
+         */
+        display: ['var(--font-display)'],
       },
       // Elevation is expressed as soft, low-opacity shadows rather than the
       // default hard grey — on a dark surface the stock Tailwind shadows are

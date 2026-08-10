@@ -150,8 +150,19 @@ export default function PaymentCard({
             Payment status
           </h3>
           {polling && (
+            /* NO PULSE. This is a dashboard route and the frequency boundary
+               bans looping animation on one; the utility that used to be here
+               loops forever, and it looped hardest on the screen a merchant is
+               already anxiously watching. The WORD "live" carries the meaning
+               and the dot is shape, not the message — the same idiom as the
+               sidebar colophon.
+
+               The class name is deliberately NOT spelled out anywhere in this
+               file: Tailwind scans .tsx as raw text, comments included, so
+               naming it here would regenerate the looping utility into the
+               built stylesheet even with no element using it. */
             <span className="flex items-center gap-1.5 text-xs text-slate-400">
-              <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
+              <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden />
               Live
             </span>
           )}
@@ -220,10 +231,15 @@ export default function PaymentCard({
 
                 It also scales rather than resizes: a width transition is a
                 layout animation on every frame, and this bar ticks on every
-                new confirmation. */}
+                new confirmation.
+
+                `--dur-pop` (180ms), NOT `--dur-set` (520ms): the budget on a
+                dashboard route is 200ms, and the identical bar on
+                PaymentDetail already runs at pop. 520ms was the marketing
+                duration, left behind here. */}
             <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
               <div
-                className={`h-full w-full origin-left transition-transform duration-[var(--dur-set)] ease-[var(--ease-out)] ${
+                className={`h-full w-full origin-left transition-transform duration-[var(--dur-pop)] ease-[var(--ease-out)] ${
                   payment.status === 'confirmed'
                     ? 'bg-emerald-600 dark:bg-emerald-400'
                     : 'bg-amber-600 dark:bg-amber-400'

@@ -131,23 +131,44 @@ export function buildCommissionInput(
 // Read-only display of the current commission.
 // ---------------------------------------------------------------------------
 export function CommissionSummary({ commission }: { commission?: Commission | null }) {
-  if (!commission) return <span className="text-gray-400">Not set</span>;
+  // Never a bare dash: say WHICH nothing this is. An unset commission means the
+  // gateway is taking nothing from this merchant, which is a fact worth reading
+  // rather than an empty cell.
+  if (!commission) {
+    return <span className="text-slate-500 dark:text-slate-400">Not set</span>;
+  }
 
   if (commission.type === 'tiered' && commission.tiers?.length) {
     return (
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full border-separate border-spacing-0 text-sm">
           <thead>
-            <tr className="text-left text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
-              <th className="py-1.5 pr-4 font-medium">Range (USDT)</th>
-              <th className="py-1.5 font-medium">Rate</th>
+            <tr>
+              <th className="border-b border-slate-900 py-1.5 pr-4 text-left text-xs font-medium uppercase tracking-[0.18em] text-slate-500 dark:border-slate-100 dark:text-slate-400">
+                Range (USDT)
+              </th>
+              <th className="border-b border-slate-900 py-1.5 text-right text-xs font-medium uppercase tracking-[0.18em] text-slate-500 dark:border-slate-100 dark:text-slate-400">
+                Rate
+              </th>
             </tr>
           </thead>
           <tbody>
             {commission.tiers.map((t, i) => (
-              <tr key={i} className="border-t border-gray-100 dark:border-gray-800">
-                <td className="py-1.5 pr-4 tabular-nums">{tierRangeLabel(t)}</td>
-                <td className="py-1.5 tabular-nums">{tierRateLabel(t)}</td>
+              <tr key={i}>
+                <td
+                  className={`py-1.5 pr-4 tabular-nums lining-nums text-slate-700 dark:text-slate-300 ${
+                    i > 0 ? 'border-t border-slate-200 dark:border-slate-800' : ''
+                  }`}
+                >
+                  {tierRangeLabel(t)}
+                </td>
+                <td
+                  className={`py-1.5 text-right tabular-nums lining-nums text-slate-900 dark:text-slate-100 ${
+                    i > 0 ? 'border-t border-slate-200 dark:border-slate-800' : ''
+                  }`}
+                >
+                  {tierRateLabel(t)}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -157,7 +178,7 @@ export function CommissionSummary({ commission }: { commission?: Commission | nu
   }
 
   return (
-    <span className="font-medium">
+    <span className="num font-medium text-slate-900 dark:text-slate-100">
       {commission.type === 'percentage'
         ? `${formatRate(commission.value)}%`
         : `${formatUsdt(commission.value)} USDT`}
@@ -246,24 +267,31 @@ export default function CommissionEditor({
             value={draft.value}
             onChange={(e) => set({ value: e.target.value })}
           />
-          {err.value && <p className="mt-1 text-xs text-red-600">{err.value}</p>}
+          {err.value && (
+            <p className="mt-1 text-xs text-red-600 dark:text-red-400">{err.value}</p>
+          )}
         </div>
       ) : (
         <div className="space-y-3">
-          <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500 dark:bg-gray-800/50 dark:text-gray-400">
+          {/* The worked example, set as a footnote on a measure rather than
+              inside a tinted box. It is the fastest way to explain a slab table
+              and it costs one line. */}
+          <p className="measure text-xs leading-relaxed text-slate-500 dark:text-slate-400">
             Example: 0.1–10 → $1 fixed, 10–1000 → 1%, 1000+ → 0.5%. Leave the last
             tier's Max empty for unbounded (∞).
-          </div>
+          </p>
 
-          {err.tiers && <p className="text-xs text-red-600">{err.tiers}</p>}
+          {err.tiers && <p className="text-xs text-red-600 dark:text-red-400">{err.tiers}</p>}
 
-          {/* Header (sm and up) */}
-          <div className="hidden gap-2 px-1 text-xs font-medium text-gray-500 dark:text-gray-400 sm:grid sm:grid-cols-[1fr_1fr_1fr_1fr_auto]">
+          {/* The slab table's running heads, over the ledger's ink rule. From
+              `sm` up the tiers read as ruled rows under these; below it each
+              tier stacks and carries its own field labels. */}
+          <div className="hidden gap-2 border-b border-slate-900 pb-1.5 text-xs font-medium uppercase tracking-[0.18em] text-slate-500 sm:grid sm:grid-cols-[1fr_1fr_1fr_1fr_auto] dark:border-slate-100 dark:text-slate-400">
             <span>Min</span>
             <span>Max (∞ if empty)</span>
             <span>Type</span>
             <span>Value</span>
-            <span className="w-8" />
+            <span className="w-9" />
           </div>
 
           {draft.tiers.map((t, i) => {
@@ -271,7 +299,9 @@ export default function CommissionEditor({
             return (
               <div
                 key={i}
-                className="grid grid-cols-2 gap-2 rounded-lg border border-gray-200 p-2 dark:border-gray-800 sm:grid-cols-[1fr_1fr_1fr_1fr_auto] sm:border-0 sm:p-0"
+                className={`grid grid-cols-2 gap-2 sm:grid-cols-[1fr_1fr_1fr_1fr_auto] ${
+                  i > 0 ? 'border-t border-slate-200 pt-3 dark:border-slate-800' : ''
+                }`}
               >
                 <TierField
                   label="Min"
@@ -290,7 +320,9 @@ export default function CommissionEditor({
                   error={err[`tier.${i}.maxAmount`]}
                 />
                 <div>
-                  <span className="mb-1 block text-xs text-gray-500 sm:hidden">Type</span>
+                  <span className="mb-1 block text-xs text-slate-500 sm:hidden dark:text-slate-400">
+                    Type
+                  </span>
                   <select
                     className="input"
                     disabled={disabled}
@@ -310,11 +342,17 @@ export default function CommissionEditor({
                   error={err[`tier.${i}.value`]}
                 />
                 <div className="col-span-2 flex items-end justify-end sm:col-span-1">
+                  {/* Red is a WARNING about the action here, which is the same
+                      meaning it carries on a failed payment — consistent, not a
+                      collision. The label is in the accessible name, because an
+                      icon-only control that only says what it does in a `title`
+                      says nothing to a screen reader. */}
                   <button
                     type="button"
-                    className="btn-ghost h-9 w-9 !p-0 text-red-600 disabled:opacity-30"
+                    className="btn-ghost h-9 w-9 !p-0 text-red-600 disabled:opacity-30 dark:text-red-400"
                     disabled={disabled || draft.tiers.length === 1}
                     title="Remove tier"
+                    aria-label={`Remove tier ${i + 1}`}
                     onClick={() => removeTier(i)}
                   >
                     <Trash2 className="h-4 w-4" />
@@ -355,15 +393,18 @@ function TierField({
 }) {
   return (
     <div>
-      <span className="mb-1 block text-xs text-gray-500 sm:hidden">{label}</span>
+      <span className="mb-1 block text-xs text-slate-500 sm:hidden dark:text-slate-400">
+        {label}
+      </span>
       <input
-        className={classNames('input', error && 'border-red-400 focus:border-red-500')}
+        className={classNames('input', error && 'border-red-600 focus:border-red-600')}
         disabled={disabled}
+        aria-invalid={error ? true : undefined}
         placeholder={placeholder}
         value={value}
         onChange={(e) => onChange(e.target.value)}
       />
-      {error && <p className="mt-1 text-xs text-red-600">{error}</p>}
+      {error && <p className="mt-1 text-xs text-red-600 dark:text-red-400">{error}</p>}
     </div>
   );
 }
