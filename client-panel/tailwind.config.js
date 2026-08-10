@@ -115,7 +115,21 @@ export default {
         // actually registers. Asking for plain 'Inter' silently fell through to
         // system-ui on every screen — see the note at the top of src/index.css.
         sans: ['Inter Variable', 'Inter', 'system-ui', 'sans-serif'],
-        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        /**
+         * THE MONO. Declared and explained at the top of src/index.css.
+         *
+         * `zero` and `tnum` are switched on for EVERY font-mono call site, not
+         * left to the individual page. A slashed zero is the difference between
+         * 0 and O on a wallet address, and `tnum` keeps hashes and ids from
+         * jittering in a column. On a product where a misread address loses the
+         * money for good, both are free once a real mono is loaded — and they
+         * are exactly the kind of detail that never gets applied consistently
+         * if it has to be remembered per usage.
+         */
+        mono: [
+          ['JetBrains Mono Variable', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+          { fontFeatureSettings: '"zero", "tnum"' },
+        ],
         /**
          * THE DISPLAY SERIF. Newsreader Variable, latin subset, declared and
          * explained at the top of src/index.css.
