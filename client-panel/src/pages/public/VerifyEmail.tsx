@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { CheckCircle2, XCircle } from 'lucide-react';
+import { Check, CheckCircle2, XCircle } from 'lucide-react';
 import AuthShell from '@/components/AuthShell';
 import Spinner from '@/components/Spinner';
 import { errorMessage, resendVerification, verifyEmail } from '@/lib/api';
@@ -27,6 +27,31 @@ type State = 'working' | 'done' | 'failed';
  * in-flight response is then thrown away — leaving the page spinning forever on
  * a request that actually succeeded. Setting state after unmount is a harmless
  * no-op in React 18, so the ref alone is both necessary and sufficient.
+ *
+ * ---------------------------------------------------------------------------
+ * SET IN TYPE, AND DELIBERATELY BARE.
+ *
+ * Three states, each of which used to centre a 44-52px icon inside a tinted
+ * rounded panel roughly 200px tall — the standard way a page with almost no
+ * content pretends to have some. All three panels are gone. Each state is now a
+ * running head, the shell's h1, one statement on the reading measure and at most
+ * one action, with the state itself carried by a single line of coloured type
+ * that always ships an icon and a word beside the hue.
+ *
+ * The colour rule the old version broke twice: success was `brand`, which made
+ * the interactive hue mean "good outcome" on this one screen, and failure was
+ * `text-red-500` in both themes — the one step that must never carry text,
+ * because it fails AA on the paper ground. Success is emerald (verified),
+ * failure is red at 600 in light and 400 in dark.
+ *
+ * `aside={null}` ON EVERY STATE, and that is load-bearing rather than a
+ * judgement about the copy. This page swaps its entire body AFTER mount, but
+ * React reconciles the three returns into the same AuthShell instance, so the
+ * shell's useReveal() never re-runs — it collected its targets during the
+ * `working` state. Any `.reveal` reaching the DOM later (the default standing
+ * matter carries four) would never be observed and would render permanently
+ * INVISIBLE in browsers without scroll-driven animation. Nothing on this page
+ * may carry `.reveal`, and no margin column may appear here.
  */
 export default function VerifyEmail() {
   const [params] = useSearchParams();
@@ -62,10 +87,16 @@ export default function VerifyEmail() {
 
   if (state === 'working') {
     return (
-      <AuthShell title="Confirming your email" subtitle="One moment.">
-        <div className="flex justify-center py-10">
-          <Spinner size={30} />
-        </div>
+      <AuthShell
+        runhead="Confirm your email"
+        title="Confirming your email"
+        subtitle="One moment."
+        aside={null}
+      >
+        {/* Ranged left with everything else, not centred in a tall empty box.
+            The label gives the spinner an accessible name — its role="status"
+            announced nothing at all before. */}
+        <Spinner size={22} label="Checking your link…" />
       </AuthShell>
     );
   }
@@ -73,52 +104,71 @@ export default function VerifyEmail() {
   if (state === 'done') {
     return (
       <AuthShell
+        runhead="Confirm your email"
         title="You're all set"
         subtitle="Your email is confirmed and your account is active. Taking you to your dashboard…"
+        aside={null}
       >
-        <div className="flex flex-col items-center gap-4 rounded-2xl border border-brand-200 bg-brand-50/60 py-12 dark:border-brand-900/60 dark:bg-brand-900/15">
-          <CheckCircle2 className="text-brand-600 dark:text-brand-400" size={52} />
-          <p className="text-sm font-medium text-brand-700 dark:text-brand-300">
+        <div className="space-y-6">
+          <p
+            role="status"
+            className="flex items-center gap-2 text-sm font-medium text-emerald-700 dark:text-emerald-400"
+          >
+            <CheckCircle2 size={16} className="shrink-0" aria-hidden />
             Account activated
           </p>
+          {/* The redirect fires in 1.4s; this is the manual path for anyone it
+              does not reach, and the only brand-coloured thing on the page. */}
+          <Link to="/onboarding" className="btn-primary w-full">
+            Continue to setup
+          </Link>
         </div>
-        <Link to="/onboarding" className="btn-primary mt-5 w-full">
-          Continue to setup
-        </Link>
       </AuthShell>
     );
   }
 
   return (
     <AuthShell
+      runhead="Confirm your email"
       title="This link didn't work"
-      subtitle={error ?? undefined}
+      /* The standfirst is now the EXPLANATION, and the server's message has
+         moved down into the alert line where a failure belongs. Both strings
+         still appear, and the reason a reader needs — why a link stops working,
+         and what to do about it — is the one on the reading measure. */
+      subtitle="Confirmation links expire after 24 hours and can only be used once. Enter your email and we'll send a fresh one."
+      aside={null}
       footer={
         <>
           Already confirmed?{' '}
-          <Link to="/login" className="font-medium text-brand-600 hover:underline dark:text-brand-400">
+          <Link to="/login" className="link-ink">
             Sign in
           </Link>
+          .
         </>
       }
     >
-      <div className="space-y-5">
-        <div className="flex items-center justify-center rounded-2xl border border-red-200 bg-red-50/60 py-10 dark:border-red-900/50 dark:bg-red-900/15">
-          <XCircle className="text-red-500" size={44} />
-        </div>
-
-        <p className="text-sm text-slate-600 dark:text-slate-400">
-          Confirmation links expire after 24 hours and can only be used once.
-          Enter your email and we'll send a fresh one.
-        </p>
+      <div className="space-y-6">
+        {error && (
+          <p
+            role="alert"
+            className="flex items-start gap-2 text-sm font-medium text-red-600 dark:text-red-400"
+          >
+            <XCircle size={16} className="mt-0.5 shrink-0" aria-hidden />
+            <span>{error}</span>
+          </p>
+        )}
 
         {resent ? (
-          <p className="rounded-lg bg-brand-50 px-3 py-2.5 text-center text-sm font-medium text-brand-700 dark:bg-brand-900/25 dark:text-brand-300">
-            If that address needs confirming, a new link is on its way.
+          <p
+            role="status"
+            className="flex items-start gap-2 text-sm font-medium text-emerald-700 dark:text-emerald-400"
+          >
+            <Check size={16} className="mt-0.5 shrink-0" aria-hidden />
+            <span>If that address needs confirming, a new link is on its way.</span>
           </p>
         ) : (
           <form
-            className="space-y-3"
+            className="space-y-4"
             onSubmit={async (e) => {
               e.preventDefault();
               try {
