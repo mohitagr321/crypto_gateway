@@ -243,6 +243,121 @@
   }
 
   /* ===================================================================
+   * BROADSHEET LAYER
+   * The editorial primitives the public pages are set with.
+   *
+   * The marketing classes above describe a page assembled from cards: every
+   * idea gets a rounded rectangle, every section is centred, and the result is
+   * a template with our logo on it. This block is the alternative. PayCrypo is
+   * SET IN TYPE, and its distinctiveness comes from STRUCTURE, not ornament:
+   *
+   *   RULES, NOT BOXES         a hairline divides content; a card is the
+   *                            exception, not the default
+   *   A MEASURE, NOT PADDING   body copy sits on a real reading measure,
+   *                            ranged left, rather than centred in a box
+   *   RUNNING HEADS            every band is labelled like a newspaper section
+   *   ASYMMETRY                a narrow margin column against a wide main one
+   *   ONE ENORMOUS FIGURE      the one number worth stating anchors the section
+   *
+   * These sit ALONGSIDE the card classes rather than replacing them. The
+   * dashboard is a tool and stays boxed; only the public routes get set.
+   * =================================================================== */
+
+  /* The workhorse. A hairline is how a newspaper separates two ideas — it
+     costs one pixel and no enclosure, where a card costs a border, a radius, a
+     shadow and 24px of padding on all four sides to say the same thing.
+     Works on a bare <div> and on an <hr>: preflight has already zeroed the
+     other three edges. */
+  .rule {
+    @apply border-t border-slate-200 dark:border-slate-800;
+  }
+  /* The heavier stroke that OPENS a section, not one that divides within it.
+     Ink rather than the hairline grey, because this is a masthead gesture: it
+     should read at a glance from across the page. Use it once per section. */
+  .rule-strong {
+    @apply border-t-2 border-slate-900 dark:border-slate-100;
+  }
+
+  /* THE READING MEASURE. Line length, not font size, is what decides whether a
+     paragraph gets read: past roughly 75 characters the eye loses the return
+     sweep and starts re-reading lines. 62ch is the comfortable centre of that
+     range. Ranged left and explicitly so — centred body copy ragged on both
+     sides is the single loudest tell of a template. */
+  .measure {
+    max-width: 62ch;
+    text-align: left;
+    text-wrap: pretty;
+  }
+  /* Wider measure for an intro or a standfirst, which is read in one gulp
+     rather than paragraph by paragraph and can carry the longer line. */
+  .measure-wide {
+    max-width: 78ch;
+    text-align: left;
+    text-wrap: pretty;
+  }
+
+  /* THE RUNNING HEAD. Small, quiet, letter-spaced — it tells you which section
+     of the paper you are in without competing with the headline for the eye.
+     Usually sat above a .rule or alone in the .col-aside margin.
+     Deliberately slate, not brand: .eyebrow shouts, this one labels, and brand
+     is reserved for things you can actually click. */
+  .runhead {
+    @apply block text-xs font-medium uppercase tracking-[0.18em]
+           text-slate-500 dark:text-slate-400;
+  }
+
+  /* ONE ENORMOUS FIGURE PER SECTION. A commission rate, a confirmation count, a
+     settlement time — set it at display size and let it carry the composition,
+     rather than filing it into a row of identical stat cards where every number
+     is the same size and therefore none of them is the point.
+     Tabular, lining figures: these are read as quantities, and proportional
+     digits make a big number look hand-set at the wrong widths. */
+  .figure-xl {
+    font-size: clamp(3.25rem, 1.75rem + 6vw, 7.5rem);
+    line-height: 0.88;
+    letter-spacing: -0.045em;
+    font-weight: 640;
+    font-optical-sizing: auto;
+    @apply block tabular-nums lining-nums text-slate-900 dark:text-slate-50;
+  }
+  /* The caption that says what the figure counts. It has to be small: the
+     figure is the statement, this is the footnote that keeps it honest. */
+  .figure-label {
+    @apply mt-3 block text-sm leading-snug text-slate-500 dark:text-slate-400;
+  }
+
+  /* A BAND: full-width, opened by a rule, with its own vertical rhythm. This is
+     the editorial replacement for a card grid — stack bands down a .section and
+     the page is divided by strokes and space instead of by 12 rounded boxes.
+     Rule on TOP only, so consecutive bands never double up and the last one
+     doesn't leave a stroke hanging under the page. */
+  .band {
+    @apply w-full border-t border-slate-200 py-12 sm:py-16 dark:border-slate-800;
+  }
+
+  /* The narrow margin column of the asymmetric grid — running head, date line,
+     a one-line gloss on what the main column is doing. Assumes a 12-column
+     grid; the span is a default and a utility on the element overrides it,
+     since utilities win over components. Quiet by design: this column annotates
+     the main one, it does not compete with it. */
+  .col-aside {
+    @apply text-sm leading-relaxed text-slate-500 md:col-span-3 dark:text-slate-400;
+  }
+
+  /* A link inside body copy. Ink text with a 1px brand underline sat 3px off
+     the baseline, so the descenders stay legible and the link reads as part of
+     the sentence rather than as a coloured interruption of it.
+     THIS is the sanctioned decorative use of brand: an underline, drawn on
+     something you can genuinely click. Never a fill, never a headline, and
+     never to indicate state. */
+  .link-ink {
+    @apply text-slate-900 underline decoration-brand-600 decoration-1 underline-offset-[3px]
+           outline-none hover:decoration-brand-700 focus-visible:rounded-sm
+           focus-visible:ring-2 focus-visible:ring-brand-500
+           dark:text-slate-100 dark:decoration-brand-400 dark:hover:decoration-brand-300;
+  }
+
+  /* ===================================================================
    * SEMANTIC COLOUR — meaning, never decoration.
    *
    *   brand (indigo)  the action you can take

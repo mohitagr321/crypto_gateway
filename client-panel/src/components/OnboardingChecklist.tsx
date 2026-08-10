@@ -58,9 +58,13 @@ export default function OnboardingChecklist({
         aria-valuemax={100}
         aria-label="Setup progress"
       >
+        {/* scaleX, not width: a width transition is a layout animation. Brand
+            is correct here and is NOT a state violation — this measures how far
+            through setup you are, which is a task you can act on, not the state
+            of a payment. */}
         <div
-          className="h-full rounded-full bg-brand-600 transition-all duration-500"
-          style={{ width: `${pct}%` }}
+          className="h-full w-full origin-left bg-brand-600 transition-transform duration-500"
+          style={{ transform: `scaleX(${Math.min(1, Math.max(0, pct / 100))})` }}
         />
       </div>
 

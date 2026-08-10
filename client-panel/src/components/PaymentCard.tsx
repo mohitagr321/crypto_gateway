@@ -212,14 +212,28 @@ export default function PaymentCard({
                 {requiredConfirmations}
               </span>
             </div>
+            {/* State, not brand. This bar answers "is my money irreversible
+                yet?", which is the definition of a payment state — it used to
+                be bg-brand-500, i.e. the CTA colour spent on a status readout.
+                Amber while confirming, emerald once confirmed, matching the
+                badge above it and the checkout mock on the marketing site.
+
+                It also scales rather than resizes: a width transition is a
+                layout animation on every frame, and this bar ticks on every
+                new confirmation. */}
             <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
               <div
-                className="h-full rounded-full bg-brand-500 transition-all"
+                className={`h-full w-full origin-left transition-transform duration-[var(--dur-set)] ease-[var(--ease-out)] ${
+                  payment.status === 'confirmed'
+                    ? 'bg-emerald-600 dark:bg-emerald-400'
+                    : 'bg-amber-600 dark:bg-amber-400'
+                }`}
                 style={{
-                  width: `${Math.min(
-                    100,
-                    (payment.confirmations / requiredConfirmations) * 100,
-                  )}%`,
+                  transform: `scaleX(${
+                    requiredConfirmations > 0
+                      ? Math.min(1, payment.confirmations / requiredConfirmations)
+                      : 0
+                  })`,
                 }}
               />
             </div>

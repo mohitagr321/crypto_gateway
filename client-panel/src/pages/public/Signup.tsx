@@ -50,8 +50,13 @@ function scorePassword(pw: string): { score: number; label: string; tone: string
   if (pw.length < 10) return { score: 1, label: 'Too short', tone: 'bg-red-500' };
   if (score <= 2) return { score: 2, label: 'Weak', tone: 'bg-amber-500' };
   if (score === 3) return { score: 3, label: 'Fair', tone: 'bg-amber-400' };
-  if (score === 4) return { score: 4, label: 'Strong', tone: 'bg-brand-500' };
-  return { score: 5, label: 'Very strong', tone: 'bg-brand-600' };
+  // Emerald, not brand. This ramp runs red -> amber -> GOOD, which makes it a
+  // state readout, and brand is the colour of things you can click — capping a
+  // state ramp with it teaches "brand = good outcome" on this one page and
+  // "brand = clickable" on every other. Strong and Very strong share a hue
+  // because the segment count already distinguishes them.
+  if (score === 4) return { score: 4, label: 'Strong', tone: 'bg-emerald-600 dark:bg-emerald-400' };
+  return { score: 5, label: 'Very strong', tone: 'bg-emerald-600 dark:bg-emerald-400' };
 }
 
 export default function Signup() {
@@ -150,10 +155,14 @@ export default function Signup() {
             >
               {n}
             </span>
-            <span className="h-1 flex-1 rounded-full bg-slate-200 dark:bg-slate-800">
+            {/* Draws with scaleX rather than growing from w-0 to w-full: a
+                width transition is a layout animation. The cap rounding lives
+                on the track, which clips — scaling a rounded child stretches
+                its cap into an oval. */}
+            <span className="block h-1 flex-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
               <span
-                className={`block h-1 rounded-full bg-brand-600 transition-all duration-300 ${
-                  step > n ? 'w-full' : 'w-0'
+                className={`block h-1 w-full origin-left bg-brand-600 transition-transform duration-300 ${
+                  step > n ? 'scale-x-100' : 'scale-x-0'
                 }`}
               />
             </span>
