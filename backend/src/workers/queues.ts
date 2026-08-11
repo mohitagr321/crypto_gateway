@@ -12,6 +12,7 @@
 import { Queue, JobsOptions } from 'bullmq';
 import { bullConnectionOptions } from '../db/redis';
 import { config } from '../config/env';
+import { logger } from '../config/logger';
 
 export const QUEUE_NAMES = {
   webhook: 'webhook',
@@ -129,43 +130,54 @@ export const webhookJobOptions: JobsOptions = {
 // BullMQ owns the producer connections (created from options).
 const connection = bullConnectionOptions;
 
-export const webhookQueue = new Queue(QUEUE_NAMES.webhook, {
-  connection,
-  defaultJobOptions: webhookJobOptions,
-});
+/**
+ * Construct a Queue WITH an `error` listener attached.
+ *
+ * A bare `new Queue(...)` is not neutral. BullMQ 5.x re-emits an internal
+ * failure as an `'error'` event (queue-base.js wraps `super.emit` in
+ * try/catch), and an EventEmitter `'error'` with no listener falls through to a
+ * bare `console.error` — unstructured stderr with no level, no `service` field
+ * and no redaction, while every other line this process writes is pino JSON. A
+ * Redis connection failure on a producer therefore becomes invisible to log
+ * aggregation, and a queue that has stopped accepting jobs presents as an
+ * ABSENCE of activity rather than an alert.
+ *
+ * Routing every queue through one factory is the point: it is what stops the
+ * next queue being added without a listener.
+ *
+ * `defaultJobOptions` is passed through EXACTLY as given — including omitted,
+ * which is a real choice for the three repeatable-tick queues (they set their
+ * own per-job options at `add` time and must not inherit the blockchain retry
+ * policy).
+ */
+function makeQueue(name: string, defaultJobOptions?: JobsOptions): Queue {
+  const q = defaultJobOptions
+    ? new Queue(name, { connection, defaultJobOptions })
+    : new Queue(name, { connection });
+  q.on('error', (err) => logger.error({ queue: name, err }, 'bullmq queue error'));
+  return q;
+}
 
-export const sweepQueue = new Queue(QUEUE_NAMES.sweep, {
-  connection,
-  defaultJobOptions: {
-    ...defaultJobOptions,
-    attempts: 5,
-    backoff: { type: 'exponential', delay: 15_000 },
-  },
-});
+/** Shared by the three chain-facing queues: 5 attempts, 15s exponential. */
+const chainJobOptions: JobsOptions = {
+  ...defaultJobOptions,
+  attempts: 5,
+  backoff: { type: 'exponential', delay: 15_000 },
+};
 
-export const payoutQueue = new Queue(QUEUE_NAMES.payout, {
-  connection,
-  defaultJobOptions: {
-    ...defaultJobOptions,
-    attempts: 5,
-    backoff: { type: 'exponential', delay: 15_000 },
-  },
-});
+export const webhookQueue = makeQueue(QUEUE_NAMES.webhook, webhookJobOptions);
 
-export const expiryQueue = new Queue(QUEUE_NAMES.expiry, { connection });
+export const sweepQueue = makeQueue(QUEUE_NAMES.sweep, chainJobOptions);
 
-export const settleQueue = new Queue(QUEUE_NAMES.settle, { connection });
+export const payoutQueue = makeQueue(QUEUE_NAMES.payout, chainJobOptions);
 
-export const subscriptionQueue = new Queue(QUEUE_NAMES.subscription, { connection });
+export const expiryQueue = makeQueue(QUEUE_NAMES.expiry);
 
-export const adminWithdrawQueue = new Queue(QUEUE_NAMES.adminWithdraw, {
-  connection,
-  defaultJobOptions: {
-    ...defaultJobOptions,
-    attempts: 5,
-    backoff: { type: 'exponential', delay: 15_000 },
-  },
-});
+export const settleQueue = makeQueue(QUEUE_NAMES.settle);
+
+export const subscriptionQueue = makeQueue(QUEUE_NAMES.subscription);
+
+export const adminWithdrawQueue = makeQueue(QUEUE_NAMES.adminWithdraw, chainJobOptions);
 
 // ---- Job payload types ----
 export interface WebhookJob {

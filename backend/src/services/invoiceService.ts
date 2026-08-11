@@ -607,9 +607,36 @@ export function invoiceUrl(token: string): string {
  *
  * A PAID invoice cannot be voided — the money has already moved, and pretending
  * otherwise would put the ledger and the document into permanent disagreement.
+ *
+ * ============================ A CHECKOUT ALREADY OPEN IS NOT "FUTURE" ========
+ * Disabling the link only stops the NEXT customer: it is consulted when a use is
+ * claimed, and never again. A payment already created from this link keeps its
+ * deposit address in every listener's watch set and runs its whole lifecycle to
+ * confirmed and swept — after which the money counts toward the merchant's
+ * withdrawable balance while the invoice sits at 'void' forever, matched by no
+ * reconciliation and reported by no log line. So the payments are dealt with
+ * here, explicitly, in one of two ways:
+ *
+ *   - FUNDS HAVE ARRIVED (amount_received > 0): refuse the void, naming the
+ *     payment. The merchant is asking to withdraw a demand that is in the middle
+ *     of being met; there is no refund path in this system, so the only honest
+ *     answer is to say so rather than to void and let the money land anyway.
+ *
+ *   - NOTHING HAS ARRIVED: void, and expire those payments in the same
+ *     transaction. That is the same terminal state processExpiry would give them
+ *     minutes later, reached deliberately: the address leaves the watch set with
+ *     the demand it belonged to, and the customer's checkout stops showing an
+ *     address for an invoice that no longer exists.
+ *
+ * ORDERING IS LOAD-BEARING. The link is disabled BEFORE the payments are read.
+ * That UPDATE takes the same row lock claimLinkUse holds while it creates a
+ * payment, so a checkout racing this void either commits first and is seen by
+ * the read below, or waits and then finds the link disabled. Reading first would
+ * leave a window in which a brand-new payment is missed entirely.
  */
 export async function voidInvoice(clientId: string, id: string): Promise<Invoice> {
-  return withTransaction(async (tx) => {
+  const expired: string[] = [];
+  const invoice = await withTransaction(async (tx) => {
     const current = await tx.query<InvoiceRow>(
       `SELECT * FROM invoices WHERE id = $1 AND client_id = $2 FOR UPDATE`,
       [id, clientId],
@@ -630,13 +657,75 @@ export async function voidInvoice(clientId: string, id: string): Promise<Invoice
         `UPDATE payment_links SET status = 'disabled', updated_at = now() WHERE id = $1`,
         [row.payment_link_id],
       );
+
+      // `funded` is evaluated in NUMERIC, in the database. An 18-decimal amount
+      // must never make the trip through a JS number to be compared with zero.
+      //
+      // FOR UPDATE, because this read is a money decision. Under READ COMMITTED
+      // a plain SELECT takes its snapshot at statement start, so a listener
+      // crediting one of these payments mid-statement is invisible to it: the
+      // 409 below would not fire, the expiry UPDATE (which re-reads under its
+      // own lock) would then decline to match the now-funded row, and the
+      // invoice would be voided with live money against it — exactly the hole
+      // this block exists to close. Locking makes the read see the committed
+      // credit and refuse. It adds no blocking exposure that was not already
+      // there: the expiry UPDATE three statements down takes the same row locks.
+      const live = await tx.query<{ id: string; funded: boolean }>(
+        `SELECT id, (amount_received > 0) AS funded
+           FROM payments
+          WHERE payment_link_id = $1
+            AND status IN ('waiting','confirming','partial')
+          FOR UPDATE`,
+        [row.payment_link_id],
+      );
+
+      const funded = live.rows.filter((p) => p.funded);
+      if (funded.length > 0) {
+        throw AppError.conflict(
+          funded.length > 1
+            ? `${funded.length} payments are already in flight against this invoice ` +
+              `(including ${funded[0].id}). It cannot be voided while funds are ` +
+              'arriving — let them settle, or resolve them out of band first.'
+            : `Payment ${funded[0].id} is already in flight against this invoice and ` +
+              'funds have arrived. It cannot be voided — let it settle, or resolve ' +
+              'that payment out of band first.',
+        );
+      }
+
+      // Only 'waiting' with nothing received. A 'confirming' or 'partial' row
+      // reached that state by recording a transfer, so it is funded by
+      // construction and was refused above; restricting the predicate means this
+      // statement can never touch a payment whose money is being tracked.
+      const closed = await tx.query<{ id: string }>(
+        `UPDATE payments SET status = 'expired'
+          WHERE payment_link_id = $1
+            AND status = 'waiting'
+            AND amount_received = 0
+          RETURNING id`,
+        [row.payment_link_id],
+      );
+      expired.push(...closed.rows.map((p) => p.id));
     }
+
     const updated = await tx.query<InvoiceRow>(
       `UPDATE invoices SET status = 'void' WHERE id = $1 RETURNING *`,
       [id],
     );
     return toInvoice(updated.rows[0], await loadItems(id, tx), null);
   });
+
+  // AFTER the commit, for two reasons: enqueueWebhook reads the payment back on
+  // a pooled connection and would otherwise see the pre-void status, and a
+  // rolled-back void must not leave a merchant told their payment expired.
+  // Same event processExpiry emits for the same transition, so no integration
+  // sees a state change it has no vocabulary for.
+  for (const paymentId of expired) {
+    logger.info({ invoiceId: id, paymentId }, 'invoice voided; unfunded checkout expired with it');
+    enqueueWebhook({ paymentId, event: 'payment.expired' }).catch((err) =>
+      logger.warn({ err, paymentId }, 'payment.expired webhook enqueue failed'),
+    );
+  }
+  return invoice;
 }
 
 /**
@@ -701,6 +790,21 @@ export async function sendInvoice(clientId: string, id: string): Promise<{ sent:
  * 'swept' is included alongside 'confirmed' because a fast sweep can move a
  * payment past 'confirmed' between two ticks; excluding it would leave those
  * invoices unpaid forever.
+ *
+ * ============================ THE AMOUNT IS CHECKED, NOT ASSUMED =============
+ * `amount_received >= amount` is deliberately restated here even though the
+ * listeners now hold a short payment at 'partial' and never promote it to
+ * 'confirmed'. This statement turns a chain status into a merchant-facing
+ * accounting fact and an invoice.paid webhook, and it is edited by different
+ * people at different times from the listeners — so it states its own
+ * precondition rather than inheriting one.
+ *
+ * It cannot strand a genuinely paid invoice: promotion requires the sum of
+ * transfers that have INDIVIDUALLY cleared their confirmations to reach
+ * `amount`, and `amount_received` is that same sum plus anything still pending,
+ * so it is >= it by construction. A payment that fails this predicate was never
+ * promotable in the first place, and it stays at 'partial' where the customer
+ * can still top it up — after which the next tick marks the invoice paid.
  */
 export async function reconcilePaidInvoices(): Promise<number> {
   const rows = await query<{ id: string; payment_id: string; client_id: string }>(
@@ -713,6 +817,7 @@ export async function reconcilePaidInvoices(): Promise<number> {
       WHERE l.id = i.payment_link_id
         AND i.status = 'open'
         AND p.status IN ('confirmed','swept')
+        AND p.amount_received >= p.amount
       RETURNING i.id, p.id AS payment_id, i.client_id`,
   );
 

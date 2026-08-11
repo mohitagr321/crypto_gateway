@@ -131,7 +131,13 @@ export async function getActiveCommission(
                  ELSE 2
                END,
                (network IS NOT NULL) DESC,
-               created_at DESC
+               -- created_at is transaction START time and two commission rows for
+               -- one client can share it to the microsecond. Without a total
+               -- order the winner of a tie is whatever the plan happens to emit
+               -- first, i.e. the rate a merchant is charged could differ between
+               -- two reads of the same data. id is unique, so this makes the
+               -- pick deterministic; it costs nothing and decides nothing else.
+               created_at DESC, id DESC
       LIMIT 1`,
     [clientId, scopeNetwork, scopeAsset],
   );
@@ -335,9 +341,28 @@ export async function setCommission(
   }
 
   return withTransaction(async (client: PoolClient) => {
-    const exists = await client.query(`SELECT 1 FROM clients WHERE id = $1`, [
-      input.clientId,
-    ]);
+    // FOR UPDATE — this is the serialisation point for "one active commission per
+    // scope", not just an existence check.
+    //
+    // The deactivate-then-insert pair below is read-modify-write, and
+    // withTransaction issues a bare BEGIN, i.e. READ COMMITTED. Two operators
+    // saving a commission for the same client at once interleaved like this:
+    // T2's UPDATE blocked on T1's row lock over the pre-existing active row, and
+    // when T1 committed, T2 re-evaluated and found is_active already false —
+    // while T1's newly INSERTED row was invisible to T2's already-started
+    // statement. T2 then inserted its own, leaving TWO active rows in one scope.
+    // getActiveCommission's ORDER BY then picks one of them deterministically
+    // forever, which may not be the one the operator who saved last was shown.
+    //
+    // Locking the CLIENT row makes the pair atomic per client: the second
+    // transaction waits here, before it reads anything about commissions, and
+    // therefore sees the first one's insert. The lock is held only for this
+    // short transaction and setCommission is a rare, human-driven admin action,
+    // so there is nothing to queue behind it.
+    const exists = await client.query(
+      `SELECT 1 FROM clients WHERE id = $1 FOR UPDATE`,
+      [input.clientId],
+    );
     if (exists.rowCount === 0) {
       throw AppError.notFound('Client not found');
     }
@@ -364,23 +389,38 @@ export async function setCommission(
       );
     }
 
-    const res = await client.query<CommissionRow>(
-      `INSERT INTO commissions
-         (client_id, type, value, tiers, network_fee_payer, asset, network,
-          is_active, created_by)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, true, $8)
-       RETURNING *`,
-      [
-        input.clientId,
-        input.type,
-        storedValue,
-        storedTiers ? JSON.stringify(storedTiers) : null,
-        input.networkFeePayer,
-        storedAsset,
-        storedNetwork,
-        input.createdByUserId,
-      ],
-    );
+    let res;
+    try {
+      res = await client.query<CommissionRow>(
+        `INSERT INTO commissions
+           (client_id, type, value, tiers, network_fee_payer, asset, network,
+            is_active, created_by)
+         VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, true, $8)
+         RETURNING *`,
+        [
+          input.clientId,
+          input.type,
+          storedValue,
+          storedTiers ? JSON.stringify(storedTiers) : null,
+          input.networkFeePayer,
+          storedAsset,
+          storedNetwork,
+          input.createdByUserId,
+        ],
+      );
+    } catch (err) {
+      // uq_commissions_one_active (migration 026, if applied): at most one active
+      // row per (client_id, network, asset). The row lock above already prevents
+      // the race that produced a second one, so this is the backstop telling an
+      // operator something changed under them rather than letting apiError.ts map
+      // a raw 23505 to the generic 'Resource already exists'.
+      if ((err as { code?: string } | null)?.code === '23505') {
+        throw AppError.conflict(
+          "This client's commission was changed concurrently. Reload and try again.",
+        );
+      }
+      throw err;
+    }
     const row = res.rows[0];
 
     await writeAudit(

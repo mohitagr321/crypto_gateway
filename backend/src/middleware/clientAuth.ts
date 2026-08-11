@@ -55,6 +55,22 @@ export async function clientAuth(
       throw AppError.forbidden('Merchant role required');
     }
 
+    // WHO is doing this, not just which account it happens to. `req.user` was
+    // set only by jwtAuth, which is mounted on the ADMIN router alone, so on
+    // every merchant route it was permanently undefined. Two things depended on
+    // it and silently did nothing:
+    //   - the "a new API key was created on your account" security email in
+    //     routes/account.ts is guarded by `if (req.user?.email)` and could
+    //     therefore never send;
+    //   - a dozen writeAudit calls pass `actorUserId: req.user?.userId ?? null`
+    //     while auditService stamps actor_type='user', so every merchant audit
+    //     row recorded a user action with a NULL actor.
+    // The decoded claims are already in hand and already verified — the client
+    // lookup below is scoped by `decoded.sub` regardless, so this adds no
+    // authority, only attribution. API-key requests still have no `req.user`,
+    // correctly: a machine credential is not a person.
+    req.user = { userId: decoded.sub, role: decoded.role, email: decoded.email };
+
     const client = await queryOne<{
       id: string;
       business_name: string;
@@ -115,7 +131,12 @@ export function requireApprovedClient(
  * bearer tokens exist.
  *
  * So: money-in and reads are API-key work. Changing where money goes is a human
- * at a keyboard, holding a short-lived access token, past login and MFA.
+ * at a keyboard, holding a short-lived access token, past login.
+ *
+ * NOT past MFA — this note used to say so and it was wrong. `users.mfa_enabled`
+ * and `users.mfa_secret` are only ever READ (routes/auth.ts); no route, script
+ * or seed writes them, so no account can have a second factor and this gate is
+ * exactly one password strong. Treat that as the control you actually have.
  *
  * Use AFTER `clientAuth`.
  */

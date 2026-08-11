@@ -4,6 +4,7 @@
  * Auth: `clientAuth` (JWT merchant OR API key).
  *   GET  /payouts   paginated list of this merchant's payouts
  *   POST /payouts   request a payout to the configured payout wallet -> 202
+ *                   Honours an optional `Idempotency-Key` header (see below).
  *
  * RESPONSE SHAPE CHANGE (GET /payouts): this used to return a BARE ARRAY of
  * every payout row the merchant had ever had — no LIMIT, no pagination, sorted
@@ -26,6 +27,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { asyncHandler } from '../utils/apiError';
 import { clientAuth, requireApprovedClient } from '../middleware/clientAuth';
+import { idempotency } from '../middleware/idempotency';
 import { requireScope } from '../middleware/auth';
 import { SCOPES } from '../services/apiKeyService';
 import { requestPayout, PayoutRow } from '../services/payoutService';
@@ -119,11 +121,43 @@ router.get(
   }),
 );
 
+// A PAYOUT IS THE ONE MERCHANT-FACING REQUEST THAT MOVES MONEY OUT.
+//
+// It had no dedupe of any kind: no `idempotency` middleware (POST /payments has
+// carried it since it was written), no unique constraint a duplicate could hit,
+// and PayoutSchema is {amount, network?, asset?} — nothing that identifies the
+// INTENT. The advisory lock in requestPayout serialises two identical requests
+// but does not deduplicate them, so whenever the merchant genuinely holds 2x the
+// amount, a double-clicked button or a client that retried a 502 creates a
+// SECOND payout row and a second on-chain transfer, with commission charged and
+// a network fee burned twice.
+//
+// Mounting the shared middleware makes the header WORK where before it was
+// silently ignored; it is deliberately NOT made mandatory, because requiring it
+// would 400 every existing integration and the client panel, which is a breaking
+// change to a published contract. Absent a header the middleware calls next()
+// and this route behaves exactly as it did.
+//
+// What this does and does not close: a retry that arrives AFTER the first
+// response is served replays the cached 202 and creates nothing. Whatever the
+// shared middleware does about two GENUINELY CONCURRENT submissions with the
+// same key is inherited here rather than re-implemented — read
+// middleware/idempotency.ts for the current guarantee, and note that it is a
+// property of that file, so fixing it there fixes every route at once. Two error
+// responses on this route therefore originate in the middleware, not in this
+// handler, and only when the header is sent: a 409 while an identical request is
+// still in flight, and a 422 when one key is reused with a DIFFERENT body.
+// docs/openapi.yaml does not document the header on this route yet.
+//
+// The defence that does NOT depend on the middleware, and is unchanged, is the
+// balance guard inside requestPayout's advisory lock: a second request only gets
+// through if the merchant really holds twice the amount.
 router.post(
   '/',
   clientAuth,
   requireApprovedClient,
   requireScope(SCOPES.payoutsWrite),
+  idempotency,
   asyncHandler(async (req, res) => {
     const client = req.client!;
     const { amount, network, asset } = PayoutSchema.parse(req.body);

@@ -46,6 +46,7 @@ import {
   feeRateSatPerVb,
   getTx,
   isBtcAddress,
+  listAllUtxos,
   listUtxos,
   satsToBtc,
   signerFor,
@@ -121,6 +122,36 @@ async function usableFeeRate(context: string): Promise<number | null> {
     return null;
   }
   return rate;
+}
+
+/**
+ * Turn a starved input selection into a message that names the real constraint.
+ *
+ * `listUtxos` returns CONFIRMED outputs only, and that is correct — but it means
+ * the moment a payout is broadcast the central wallet's change becomes invisible
+ * to the next one, which then fails with "no confirmed UTXOs to spend" while the
+ * admin panel still shows the full balance. That contradiction reads as a broken
+ * wallet and invites exactly the wrong intervention. Bitcoin payout throughput is
+ * genuinely capped at (confirmed UTXO count) per block; this says so.
+ *
+ * DIAGNOSTIC ONLY: it runs after selection has already failed and never changes
+ * which inputs are chosen. Its own failure is swallowed — a diagnostic must never
+ * replace the real error with one of its own.
+ */
+async function explainStarvedSelection(base: string): Promise<string> {
+  try {
+    const pending = (await listAllUtxos(centralAddress)).filter((u) => !u.confirmed);
+    if (pending.length === 0) return base;
+    const sats = pending.reduce((acc, u) => acc + u.value, 0n);
+    return (
+      `${base}. ${pending.length} unconfirmed UTXO(s) worth ${satsToBtc(sats)} BTC are ` +
+      `waiting for a block — typically change from a payout broadcast moments ago. ` +
+      `Bitcoin payouts serialise at roughly one per block; this will clear on its own ` +
+      `once the next block lands.`
+    );
+  } catch {
+    return base;
+  }
 }
 
 export const bitcoinAdapter: ChainAdapter = {
@@ -284,7 +315,9 @@ export const bitcoinAdapter: ChainAdapter = {
 
     const available = await listUtxos(centralAddress);
     if (available.length === 0) {
-      throw new Error('central Bitcoin wallet has no confirmed UTXOs to spend');
+      throw new Error(
+        await explainStarvedSelection('central Bitcoin wallet has no confirmed UTXOs to spend'),
+      );
     }
 
     // Accumulate inputs in the list's deterministic order until they cover the
@@ -308,9 +341,11 @@ export const bitcoinAdapter: ChainAdapter = {
     }
     if (!covered) {
       throw new Error(
-        `insufficient confirmed Bitcoin balance: have ${satsToBtc(sum)} BTC across ` +
-          `${selected.length} UTXO(s), need ${satsToBtc(want + fee)} BTC ` +
-          `(${amountHuman} plus ~${satsToBtc(fee)} fee)`,
+        await explainStarvedSelection(
+          `insufficient confirmed Bitcoin balance: have ${satsToBtc(sum)} BTC across ` +
+            `${selected.length} UTXO(s), need ${satsToBtc(want + fee)} BTC ` +
+            `(${amountHuman} plus ~${satsToBtc(fee)} fee)`,
+        ),
       );
     }
 

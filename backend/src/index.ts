@@ -8,6 +8,7 @@
 // Note: the Express Request augmentation in ./types/express.d.ts is ambient and
 // picked up via tsconfig `include` — it must NOT be imported at runtime (it has
 // no JS output, so Node would throw MODULE_NOT_FOUND).
+import type { Server } from 'node:http';
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
@@ -63,6 +64,14 @@ app.use(
   }),
 );
 
+// NOTE ON NON-JSON BODIES. This `verify` hook runs only for application/json,
+// so req.rawBody stays undefined for any other Content-Type. That is closed
+// where it matters — middleware/auth.ts FAILS CLOSED when a request declares a
+// body that was not captured, rather than signing the empty string — and it is
+// deliberately not papered over here with a catch-all express.raw(): mounting
+// one would turn req.body into a Buffer for every non-JSON request in the
+// system to protect a value nothing outside the HMAC verifier reads.
+
 // Health check — MOUNTED ABOVE THE RATE LIMITER ON PURPOSE.
 //
 // An orchestrator probes from one fixed address that, on a busy node, is also
@@ -95,6 +104,12 @@ app.use('/api/v1', buildRouter());
 app.use(notFoundHandler);
 app.use(errorHandler);
 
+/**
+ * The live HTTP server, published at module scope so the process-level fault
+ * handlers below can drain it. Null until `start()` has called listen.
+ */
+let httpServer: Server | null = null;
+
 async function start(): Promise<void> {
   // Fail fast on a bad asset or rate configuration, in the same spirit as the
   // wallet guards in config/env.ts: a wrong contract address or an unquotable
@@ -114,11 +129,27 @@ async function start(): Promise<void> {
 
   // Register the repeatable expiry job so expired payments get swept even if the
   // worker was the only process that previously scheduled it.
-  try {
-    await scheduleExpiryJob();
-  } catch (err) {
+  //
+  // NOT awaited on the boot path, and bounded. When Redis is unreachable a
+  // BullMQ `add()` does not reject — it awaits a connection that ioredis retries
+  // forever, so it never settles either way and the try/catch that used to wrap
+  // this could not fire. Awaiting it therefore parked the boot BEFORE
+  // app.listen(), which means a Redis outage took the entire API down — /health
+  // included — instead of degrading the one feature that needs Redis. The job is
+  // registered by a fixed jobId and the worker schedules the same one, so
+  // missing this call costs nothing but a later first registration.
+  const SCHEDULE_TIMEOUT_MS = 10_000;
+  void Promise.race([
+    scheduleExpiryJob(),
+    new Promise<never>((_resolve, reject) => {
+      setTimeout(
+        () => reject(new Error('timed out scheduling the expiry job — is Redis reachable?')),
+        SCHEDULE_TIMEOUT_MS,
+      ).unref();
+    }),
+  ]).catch((err: unknown) => {
     logger.warn({ err }, 'failed to schedule expiry job at boot (worker may schedule it)');
-  }
+  });
 
   const server = app.listen(config.port, () => {
     logger.info(
@@ -132,6 +163,22 @@ async function start(): Promise<void> {
       'API listening',
     );
   });
+  httpServer = server;
+
+  // SOCKET TIMEOUTS. Node's defaults leave a slow or half-open client holding a
+  // socket indefinitely, and the keep-alive default (5s) sits BELOW the idle
+  // timeout of everything that fronts this API — 60s on the Apache reverse proxy
+  // the deploy script writes, 60s on an AWS ALB. That ordering is the classic
+  // source of sporadic, unreproducible 502s: the proxy reuses a connection in
+  // the same instant the server decides to close it. keepAliveTimeout must
+  // therefore EXCEED the proxy's idle timeout, and headersTimeout must exceed
+  // keepAliveTimeout or the keep-alive window is cut short by the header clock.
+  // requestTimeout bounds only the RECEIPT of a request (headers plus body, and
+  // the body is capped at 256kb above) — it does not bound how long a handler
+  // may take to respond, so it cannot cut off a slow payout.
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
+  server.requestTimeout = 30_000;
 
   // Handle listen errors (esp. EADDRINUSE) with a clear message instead of an
   // unhandled 'error' event crash. Exit non-zero so a supervisor can react.
@@ -160,6 +207,39 @@ async function start(): Promise<void> {
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
 }
+
+// ===================== PROCESS-LEVEL FAULT HANDLERS =========================
+// Every listener process installs these; the API and the worker did not, so a
+// fault here was terminated by Node's default with a raw stack on stderr — no
+// pino level, no `service` field, no redaction — which means the one line that
+// explains a restart is the one line log aggregation cannot see.
+//
+// The disposition is "log fatally, then exit", NOT the listeners' "log and keep
+// going". That is deliberate and it is not a behaviour change: Node already
+// terminates on both of these (Node 24 defaults to --unhandled-rejections=throw),
+// so this adds the structured line and, for uncaughtException, a drain — it does
+// not keep a process alive that would previously have died. Continuing is the
+// wrong call for this process specifically: every intentional fire-and-forget in
+// the codebase carries its own .catch(), so anything arriving here is by
+// definition unanticipated, and an API that keeps serving money endpoints from
+// unknown state is worse than one a supervisor restarts.
+//
+// Registered before start() so a fault during boot is reported the same way.
+process.on('unhandledRejection', (reason) => {
+  logger.fatal({ reason }, 'unhandledRejection — exiting for restart');
+  process.exit(1);
+});
+
+process.on('uncaughtException', (err) => {
+  logger.fatal({ err }, 'uncaughtException — draining and exiting');
+  const server = httpServer;
+  if (!server) process.exit(1);
+  // Let in-flight requests finish rather than cutting a merchant's POST
+  // mid-response, then exit non-zero for the supervisor. Same 10s force-exit
+  // budget as the SIGTERM path in start(), and unref'd for the same reason.
+  server.close(() => process.exit(1));
+  setTimeout(() => process.exit(1), 10_000).unref();
+});
 
 void start();
 

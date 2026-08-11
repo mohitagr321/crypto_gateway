@@ -1,8 +1,17 @@
 /**
  * Auth routes: dashboard login (merchant + admin) and token refresh.
  *
- * Admins (any role != merchant) with MFA enabled must present a valid TOTP token.
+ * Any account with MFA enabled must present a valid, unused TOTP token.
  * Returns { accessToken, refreshToken, mfaRequired }.
+ *
+ * MFA IS NOT ACTUALLY REACHABLE. `users.mfa_enabled` / `users.mfa_secret` are
+ * read here and redacted in the logger, and that is every reference in the
+ * repo: no route, script or seed ever writes them, so no account can have a
+ * second factor and the admin panel's MFA field is a control the server can
+ * never demand. The code below is kept correct — fail closed when the columns
+ * disagree, single-use codes — but do not count MFA as a control that exists.
+ * Building it is three routes (enroll / confirm / disable) plus an admin
+ * equivalent; see the audit entry.
  *
  * ========================== REFRESH TOKENS ARE REVOCABLE =====================
  * WHAT WAS WRONG. /refresh used to verify the JWT and then rebuild its claims
@@ -54,6 +63,7 @@ import {
 import { authRateLimiter } from '../middleware/rateLimit';
 import { writeAudit } from '../services/auditService';
 import { logger } from '../config/logger';
+import { redis } from '../db/redis';
 
 const router = Router();
 
@@ -141,27 +151,26 @@ router.post(
       throw AppError.unauthorized('Invalid credentials');
     }
 
-    const isAdmin = user.role_name !== 'merchant';
-
-    // MFA: required for admins that have it enabled.
-    if (user.mfa_enabled && user.mfa_secret) {
+    // MFA: enforced for ANY account with it enabled, admin or merchant.
+    //
+    // The misconfigured case (enabled, but no secret to verify against) used to
+    // be fatal for admins and a silent fall-through to password-only for
+    // merchants. Both accounts asked for a second factor; neither can present
+    // one; the only honest answer is to refuse the login rather than to quietly
+    // hand out tokens on one factor. Unreachable today either way — see the
+    // note above `verifyMfaToken` — but it is the branch that decides what
+    // happens on the day enrolment ships, and fail-open is the wrong default to
+    // leave lying there.
+    if (user.mfa_enabled) {
+      if (!user.mfa_secret) {
+        throw AppError.unauthorized('MFA misconfigured; contact support');
+      }
       if (!mfaToken) {
         // Signal the client to collect a TOTP without issuing tokens.
         res.status(200).json({ mfaRequired: true });
         return;
       }
-      const secret = decrypt(user.mfa_secret);
-      const verified = speakeasy.totp.verify({
-        secret,
-        encoding: 'base32',
-        token: mfaToken,
-        window: 1,
-      });
-      if (!verified) {
-        throw AppError.unauthorized('Invalid MFA token');
-      }
-    } else if (isAdmin && user.mfa_enabled && !user.mfa_secret) {
-      throw AppError.unauthorized('MFA misconfigured; contact support');
+      await verifyMfaToken(user.id, user.mfa_secret, mfaToken);
     }
 
     const claims = { sub: user.id, role: user.role_name, email: user.email };
@@ -260,6 +269,73 @@ router.post(
     });
   }),
 );
+
+// ---------------------------------------------------------------------------
+// MFA
+// ---------------------------------------------------------------------------
+
+/**
+ * A TOTP code is valid for its 30-second step plus `window: 1` on either side,
+ * so roughly 90 seconds. Burn it for longer than that and a code cannot be
+ * presented twice within its own lifetime.
+ */
+const MFA_CODE_TTL_SECONDS = 180;
+
+/**
+ * Verify one TOTP code and consume it.
+ *
+ * NOTE ON REACHABILITY: nothing in this product writes `users.mfa_enabled` or
+ * `users.mfa_secret` — there is no enrolment route, nothing in seed, nothing in
+ * the admin panel — so this function cannot run today. It is written to be
+ * correct for the release that adds enrolment rather than left as a
+ * single-use-free verifier for that release to inherit.
+ *
+ * Single use matters here for the same reason it does for HMAC signatures: a
+ * code shoulder-surfed, phished or captured from a support chat stays valid for
+ * a minute and a half, and without a burn it can be spent as many times as the
+ * attacker likes inside that window. Fails OPEN on a Redis error — a cache blip
+ * must not lock every operator out of the dashboard — and logs at ERROR.
+ */
+async function verifyMfaToken(
+  userId: string,
+  encryptedSecret: string,
+  token: string,
+): Promise<void> {
+  const secret = decrypt(encryptedSecret);
+  const verified = speakeasy.totp.verify({
+    secret,
+    encoding: 'base32',
+    token,
+    window: 1,
+  });
+  if (!verified) {
+    throw AppError.unauthorized('Invalid MFA token');
+  }
+
+  // Burned only AFTER a successful verify, so a wrong guess cannot be used to
+  // consume the code the legitimate user is about to type.
+  try {
+    const first = await redis.set(
+      `mfa:used:${userId}:${sha256Hex(token)}`,
+      '1',
+      'EX',
+      MFA_CODE_TTL_SECONDS,
+      'NX',
+    );
+    if (first === null) {
+      throw AppError.unauthorized(
+        'That MFA code has already been used. Wait for your authenticator to ' +
+          'show the next one.',
+      );
+    }
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    logger.error(
+      { err, userId },
+      'MFA replay cache unavailable; accepting the code on TOTP validity alone',
+    );
+  }
+}
 
 // ---------------------------------------------------------------------------
 // refresh_tokens (migration 023)

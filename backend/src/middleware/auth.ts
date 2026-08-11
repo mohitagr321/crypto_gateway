@@ -92,12 +92,17 @@
  *
  * ============================== MODE SELECTION ================================
  * Dispatch is on the PRESENCE of X-Signature, then checked against the key's
- * stored `auth_mode`. A signed request against a simple key (or vice versa) is
+ * stored `auth_mode` AND against which column the credential matched (see
+ * `assertModeMatches`). A signed request against a simple key (or vice versa) is
  * rejected rather than falling back — otherwise an attacker holding a leaked
  * bearer token could simply omit the signature headers to dodge a stricter path,
- * and mode confusion is exactly how downgrade bugs happen.
+ * and mode confusion is exactly how downgrade bugs happen. The column check is
+ * the load-bearing half: `api_keys.api_key` holds a MASKED DISPLAY PREFIX for a
+ * simple key, so authenticating a bearer request off that column would promote
+ * a string printed in the dashboard into a working credential.
  */
 import { NextFunction, Request, Response } from 'express';
+import { BlockList, isIPv4, isIPv6 } from 'net';
 import { query } from '../db/pool';
 import { decrypt, hmacSha256, safeEqual, sha256Hex } from '../utils/crypto';
 import { AppError } from '../utils/apiError';
@@ -121,6 +126,20 @@ interface ApiKeyRow {
   business_name: string;
   client_status: string;
   ip_whitelist: string[] | null;
+  /**
+   * WHICH COLUMN the presented credential matched. Both are projected because
+   * the lookup below tests both in ONE statement, and the two columns mean
+   * completely different things:
+   *   api_key    — a PUBLIC id (hmac) or a MASKED DISPLAY PREFIX (simple).
+   *                Neither is a secret; both are shown in the dashboard.
+   *   token_hash — sha256 of the bearer token, which IS the secret.
+   * So a row that matched on `api_key` must never authenticate a bearer
+   * request: that would turn the masked prefix printed on the dashboard into a
+   * working credential. The mode dispatch below therefore checks the flag, not
+   * just the row.
+   */
+  matched_public: boolean | null;
+  matched_token: boolean | null;
 }
 
 /**
@@ -134,21 +153,53 @@ interface ApiKeyRow {
  */
 let signatureVersionColumn = true;
 
-function keySelect(): string {
+/**
+ * ONE statement for both credential shapes.
+ *
+ * $1 is the presented credential verbatim, $2 its sha256. Previously a miss on
+ * the mode-appropriate column ran a SECOND query against the other column
+ * purely to produce a friendlier 401, so an unauthenticated caller controlled
+ * two indexed lookups and two checkouts from a 20-slot pool per request —
+ * exactly on the path where the pool is already the binding constraint.
+ *
+ * WHY UNION ALL AND NOT `WHERE a = $1 OR b = $2`. The OR form is not indexable
+ * as one condition: the planner falls back to scanning `idx_api_keys_key` (every
+ * ACTIVE key) and filtering, which turns the hottest query in the system into
+ * O(keys). Two LIMIT-1 branches each keep their own index condition, and the
+ * outer LIMIT 1 makes the second branch lazy — so a hit on the first costs one
+ * index probe and only a MISS pays for both, in a single round trip. The
+ * mode-appropriate branch is emitted first for that reason.
+ *
+ * Two rows cannot both match: `api_key` values are `pk_live_`+24 hex or
+ * `ak_live_`+12 hex, `token_hash` values are 64-hex sha256 digests of a
+ * 72-character token, so one presented string cannot be both. If that ever
+ * stopped holding, the first branch wins and `assertModeMatches` fails closed.
+ */
+function keySelect(signed: boolean): string {
+  const byPublicId = keyBranch('k.api_key = $1', 'true', 'false');
+  const byToken = keyBranch('k.token_hash = $2', 'false', 'true');
+  const [first, second] = signed ? [byPublicId, byToken] : [byToken, byPublicId];
+  return `${first}\nUNION ALL\n${second}\nLIMIT 1`;
+}
+
+function keyBranch(predicate: string, matchedPublic: string, matchedToken: string): string {
   return `
-  SELECT k.id           AS api_key_id,
-         k.api_secret_hash,
-         k.auth_mode,
-         ${signatureVersionColumn ? 'k.signature_version' : '1'} AS signature_version,
-         k.scopes,
-         c.id           AS client_id,
-         c.business_name,
-         c.status       AS client_status,
-         c.ip_whitelist
-    FROM api_keys k
-    JOIN clients  c ON c.id = k.client_id
-   WHERE k.status = 'active'
-`;
+  (SELECT k.id           AS api_key_id,
+          k.api_secret_hash,
+          k.auth_mode,
+          ${signatureVersionColumn ? 'k.signature_version' : '1'} AS signature_version,
+          k.scopes,
+          c.id           AS client_id,
+          c.business_name,
+          c.status       AS client_status,
+          c.ip_whitelist,
+          ${matchedPublic} AS matched_public,
+          ${matchedToken}  AS matched_token
+     FROM api_keys k
+     JOIN clients  c ON c.id = k.client_id
+    WHERE k.status = 'active'
+      AND ${predicate}
+    LIMIT 1)`;
 }
 
 export async function merchantAuth(
@@ -166,29 +217,21 @@ export async function merchantAuth(
     }
 
     const signed = Boolean(timestamp || signature);
-    const row = signed
-      ? await lookupByPublicId(presented)
-      : await lookupByToken(presented);
+    const row = await lookupCredential(presented, signed);
 
     if (!row) {
-      // The two modes look the credential up in different columns, so a
-      // mode/credential mismatch simply misses. Probe the other column purely to
-      // return a diagnosable error — an integration that forgets to sign would
-      // otherwise be told "unknown key", which sends people hunting the wrong
-      // bug. The probe leaks nothing: it can only confirm that a PUBLIC key id
-      // exists, and it never reaches verification.
-      const other = signed
-        ? await lookupByToken(presented)
-        : await lookupByPublicId(presented);
-      if (other) {
-        throw AppError.unauthorized(
-          other.auth_mode === 'hmac'
-            ? 'This key requires signed requests — send X-Timestamp and X-Signature.'
-            : 'This is a bearer key — send it in X-Api-Key alone, with no X-Signature.',
-        );
-      }
       throw AppError.unauthorized('Unknown or revoked API key');
     }
+
+    // MODE ASSERTION — the check the header block above has always claimed and
+    // no code performed. It is what keeps the two credential shapes from being
+    // interchangeable:
+    //   - a bearer request must have matched `token_hash` (the secret), never
+    //     `api_key` (the masked prefix, which is not a secret at all);
+    //   - a signed request must have matched `api_key` on an hmac key, so a
+    //     simple key's prefix cannot be dragged into the HMAC path (where it
+    //     used to reach verifyHmac and 500 on a NULL secret).
+    assertModeMatches(signed, row);
 
     if (signed) {
       await verifyHmac(req, row, timestamp, signature);
@@ -210,9 +253,23 @@ export async function merchantAuth(
     };
 
     // Fire-and-forget; must not block or fail the request.
-    query(`UPDATE api_keys SET last_used_at = now() WHERE id = $1`, [row.api_key_id]).catch(
-      (err) => logger.warn({ err }, 'failed to update api_keys.last_used_at'),
-    );
+    //
+    // THROTTLED TO ONE WRITE PER KEY PER MINUTE. Unconditionally, this wrote a
+    // row on EVERY authenticated request: a second pool checkout per request
+    // against a 20-slot pool, and one dead tuple per request on a tiny,
+    // extremely hot table — which turns autovacuum on api_keys into a
+    // foreground concern at the target load. The column feeds a dashboard
+    // timestamp (listApiKeys -> routes/account.ts), never a security decision,
+    // so minute granularity is the whole cost. The predicate does the filtering
+    // in the database rather than here on purpose: it stays correct across
+    // multiple api instances, which a per-process cache would not.
+    query(
+      `UPDATE api_keys
+          SET last_used_at = now()
+        WHERE id = $1
+          AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')`,
+      [row.api_key_id],
+    ).catch((err) => logger.warn({ err }, 'failed to update api_keys.last_used_at'));
 
     // Per-key throttle — chained here rather than mounted on the router because
     // it keys on `req.client.apiKeyId`, which only exists once the lines above
@@ -228,24 +285,18 @@ export async function merchantAuth(
 // Lookup
 // ---------------------------------------------------------------------------
 
-async function lookupByPublicId(apiKey: string): Promise<ApiKeyRow | undefined> {
-  return selectKey('AND k.api_key = $1', apiKey);
-}
-
 /**
- * Simple mode. The digest is the lookup key, so an attacker cannot probe for a
- * valid prefix — either the whole token hashes to a stored row or it does not.
+ * Look the presented credential up in both columns at once. The digest is what
+ * matches a simple-mode token, so an attacker cannot probe for a valid prefix —
+ * either the whole token hashes to a stored row or it does not.
  */
-async function lookupByToken(token: string): Promise<ApiKeyRow | undefined> {
-  return selectKey('AND k.token_hash = $1', sha256Hex(token));
-}
-
-async function selectKey(
-  predicate: string,
-  param: string,
+async function lookupCredential(
+  presented: string,
+  signed: boolean,
 ): Promise<ApiKeyRow | undefined> {
+  const params = [presented, sha256Hex(presented)];
   try {
-    const rows = await query<ApiKeyRow>(`${keySelect()} ${predicate} LIMIT 1`, [param]);
+    const rows = await query<ApiKeyRow>(keySelect(signed), params);
     return rows[0];
   } catch (err) {
     // 42703 = undefined_column: migration 023 has not been applied yet.
@@ -257,11 +308,42 @@ async function selectKey(
           'treating every key as signature_version=1 — legacy v1 signatures ' +
           'stay accepted until the migration runs and the API restarts',
       );
-      const rows = await query<ApiKeyRow>(`${keySelect()} ${predicate} LIMIT 1`, [param]);
+      const rows = await query<ApiKeyRow>(keySelect(signed), params);
       return rows[0];
     }
     throw err;
   }
+}
+
+/**
+ * Reject a credential presented in the wrong shape, with a message that names
+ * the actual mistake — an integration that forgets to sign would otherwise be
+ * told "unknown key", which sends people hunting the wrong bug. Nothing leaks:
+ * every branch here has already matched a row on a value the merchant can read
+ * off their own dashboard, and none of them reaches verification.
+ */
+function assertModeMatches(signed: boolean, row: ApiKeyRow): void {
+  if (signed) {
+    if (row.matched_public && row.auth_mode === 'hmac') return;
+    throw AppError.unauthorized(
+      row.auth_mode === 'simple'
+        ? 'This is a bearer key — send it in X-Api-Key alone, with no X-Signature.'
+        : 'Unknown or revoked API key',
+    );
+  }
+
+  if (row.matched_token && row.auth_mode === 'simple') return;
+  if (row.auth_mode === 'hmac') {
+    throw AppError.unauthorized(
+      'This key requires signed requests — send X-Timestamp and X-Signature.',
+    );
+  }
+  // Matched a simple key on `api_key`, i.e. the masked display prefix rather
+  // than the token. That prefix is not a credential and must never authenticate.
+  throw AppError.unauthorized(
+    'That is the masked display prefix shown in the dashboard, not the API key. ' +
+      'Send the full ak_live_… token you were given when the key was created.',
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +381,27 @@ async function verifyHmac(
   } catch {
     logger.error({ apiKeyId: row.api_key_id }, 'failed to decrypt stored api secret');
     throw AppError.internal('API key secret unreadable');
+  }
+
+  // FAIL CLOSED WHEN THE BODY WAS NOT CAPTURED.
+  //
+  // req.rawBody is populated only by the `verify` hook on express.json(), whose
+  // `type` defaults to application/json. Any other Content-Type makes
+  // body-parser skip that hook, and the line below then silently degrades to
+  // signing the EMPTY string — a signature verifier reporting success over
+  // bytes it never saw. Nobody can exploit that today beyond the replay window,
+  // but "the signature covered nothing" must never be a passing outcome, and v2
+  // hashes rawBody directly.
+  const declaredLength = Number(req.headers['content-length'] ?? 0);
+  const carriesBody =
+    (Number.isFinite(declaredLength) && declaredLength > 0) ||
+    Boolean(req.headers['transfer-encoding']);
+  if (carriesBody && !req.rawBody) {
+    throw AppError.unauthorized(
+      'Request body was not covered by the signature. The merchant API accepts ' +
+        'JSON only — send Content-Type: application/json so the body is signed ' +
+        'and verified.',
+    );
   }
 
   const rawBody = req.rawBody ? req.rawBody.toString('utf8') : '';
@@ -446,20 +549,109 @@ function warnLegacySignature(row: ApiKeyRow): void {
  * load balancer in front of the API. Both IPv4 and the IPv6-mapped form of the
  * same address are accepted, because a dual-stack proxy will present
  * `::ffff:1.2.3.4` for what the merchant entered as `1.2.3.4`.
+ *
+ * CIDR. Entries containing a `/` are matched as ranges. This used to be exact
+ * string equality only, so a merchant who entered `10.0.0.0/8` — the obvious
+ * thing to enter, and what the settings UI invites — stored a value that could
+ * never equal an IP address and locked every API key out of their own account
+ * with a 403 whose only diagnostic was a server-side log. Adding range matching
+ * is strictly widening: a literal IP still matches exactly as before, and an
+ * entry with a `/` matched nothing at all before this.
  */
 function enforceIpAllowlist(req: Request, row: ApiKeyRow): void {
   const allow = row.ip_whitelist ?? [];
   if (allow.length === 0) return;
 
   const ip = req.ip ?? '';
-  const candidates = new Set([ip, ip.replace(/^::ffff:/, '')]);
+  const bare = ip.replace(/^::ffff:/, '');
+  const candidates = new Set([ip, bare]);
   if (allow.some((entry) => candidates.has(entry.trim()))) return;
+  if (matchesCidrEntry(allow, bare)) return;
 
   logger.warn(
     { clientId: row.client_id, apiKeyId: row.api_key_id, ip },
     'API request rejected: source IP not in client allowlist',
   );
   throw AppError.forbidden('Source IP is not allowed for this account');
+}
+
+/**
+ * Parsed allowlists, keyed on the CIDR entries themselves. Building a BlockList
+ * per request would be wasted work on the hottest path in the system; the key
+ * is the entry list rather than the client id so a settings change is picked up
+ * without any invalidation plumbing. Bounded, and a miss only costs a re-parse.
+ */
+const cidrCache = new Map<string, BlockList | null>();
+const CIDR_CACHE_MAX = 500;
+
+function matchesCidrEntry(allow: string[], ip: string): boolean {
+  if (!ip) return false;
+  const family = isIPv4(ip) ? 'ipv4' : isIPv6(ip) ? 'ipv6' : null;
+  if (!family) return false;
+
+  const list = cidrListFor(allow);
+  if (!list) return false;
+  try {
+    return list.check(ip, family);
+  } catch {
+    return false;
+  }
+}
+
+function cidrListFor(allow: string[]): BlockList | null {
+  const entries = allow.map((e) => e.trim()).filter((e) => e.includes('/'));
+  if (entries.length === 0) return null;
+
+  const cacheKey = entries.join(',');
+  const cached = cidrCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const list = new BlockList();
+  let added = 0;
+  for (const entry of entries) {
+    const cut = entry.lastIndexOf('/');
+    const addr = entry.slice(0, cut);
+    // The prefix must be an EXPLICIT run of digits. `Number('')` is 0, so
+    // parsing with Number alone turned a truncated entry like `10.0.0.0/` — a
+    // plausible typo, and `ipWhitelist` is stored unvalidated (routes/account.ts
+    // accepts any 3..45-character string) — into `10.0.0.0/0`, i.e. a subnet
+    // that matches EVERY address. That silently converts the allowlist into
+    // "allow everything", which is the opposite of both the old behaviour (an
+    // entry with a `/` matched nothing and the request was refused) and of the
+    // rule stated below. `Number` also accepts '1e1' and ' 8'; the digits-only
+    // test rejects those too.
+    const prefixText = entry.slice(cut + 1);
+    const prefix = /^\d{1,3}$/.test(prefixText) ? Number(prefixText) : NaN;
+    const family = isIPv4(addr) ? 'ipv4' : isIPv6(addr) ? 'ipv6' : null;
+    const maxPrefix = family === 'ipv4' ? 32 : 128;
+    if (!family || !Number.isInteger(prefix) || prefix < 0 || prefix > maxPrefix) {
+      // Unparseable entries are ignored, exactly as they were before ranges
+      // existed — never treated as "allow everything".
+      logger.warn({ entry }, 'ignoring unparseable ip_whitelist CIDR entry');
+      continue;
+    }
+    if (prefix === 0) {
+      // Explicitly written /0. Honoured, because it is unambiguous, but it
+      // matches the entire address space and therefore disables the control the
+      // merchant thinks they configured — say so loudly rather than silently.
+      logger.warn(
+        { entry },
+        'ip_whitelist entry has a /0 prefix and matches every address — the IP ' +
+          'allowlist is effectively disabled for this account',
+      );
+    }
+    try {
+      list.addSubnet(addr, prefix, family);
+      added += 1;
+    } catch (err) {
+      logger.warn({ err, entry }, 'ignoring unparseable ip_whitelist CIDR entry');
+    }
+  }
+
+  const result = added > 0 ? list : null;
+  if (cidrCache.size >= CIDR_CACHE_MAX) cidrCache.clear();
+  cidrCache.set(cacheKey, result);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -471,8 +663,14 @@ function enforceIpAllowlist(req: Request, row: ApiKeyRow): void {
  * `clientAuth`/`merchantAuth`.
  *
  * A dashboard session is granted every scope by clientAuth — the human is the
- * account owner and is already past login and (where enabled) MFA. Scopes exist
- * to constrain long-lived machine credentials, not people.
+ * account owner and is already past login. Scopes exist to constrain long-lived
+ * machine credentials, not people.
+ *
+ * This note used to add "and MFA". It should not: `users.mfa_enabled` /
+ * `mfa_secret` are READ at routes/auth.ts and redacted in the logger, and that
+ * is the complete set of references — nothing in the product ever WRITES them,
+ * so there is no enrolment path and no second factor behind any session. Do not
+ * size a threat model around it until that is built.
  */
 export function requireScope(scope: Scope) {
   return (req: Request, _res: Response, next: NextFunction): void => {

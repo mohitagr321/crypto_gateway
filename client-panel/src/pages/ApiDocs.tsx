@@ -476,7 +476,8 @@ const ERRORS: [string, string, string][] = [
   ['401', 'unauthorized', 'Missing, unknown or revoked key; bad signature; timestamp outside the 5-minute window.'],
   ['403', 'forbidden', 'Key lacks the required scope, account not approved, or the caller IP is not on your allowlist.'],
   ['404', 'not_found', 'No such resource, or it belongs to another merchant.'],
-  ['409', 'conflict', 'Idempotency-Key reused with a different body.'],
+  ['409', 'conflict', 'A request with this Idempotency-Key is still in flight. Retry after a moment.'],
+  ['422', 'idempotency_key_reuse', 'Idempotency-Key reused with a different body. Use a fresh key per request.'],
   ['429', 'rate_limited', 'Throttled. Back off and retry — see the RateLimit-* headers.'],
   ['500', 'internal_error', 'Our fault. Safe to retry with the same Idempotency-Key.'],
 ];

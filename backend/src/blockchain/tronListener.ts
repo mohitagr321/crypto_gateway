@@ -291,6 +291,22 @@ async function fetchInboundTransfers(
  * transfers that moved TRX to this address. Reverted transactions are dropped
  * here rather than downstream — a failed transfer moved nothing, and recording
  * it would credit a payment that was never paid.
+ *
+ * ====================== ONE ROW PER TRANSACTION, NOT PER LEG =================
+ * A single Tron transaction can move TRX to the same address several times: a
+ * top-level TransferContract plus any number of internal transfers forwarded by
+ * a contract. Every leg carries the same txID, and recordIncomingNative files
+ * native transfers under the sentinel log_index -1 — so under
+ * UNIQUE (tx_hash, log_index) the second and later legs collided with the first,
+ * and because the ON CONFLICT clause updates only `block_number`, their VALUE
+ * was discarded in silence. A payment paid by a batching or forwarding contract
+ * was credited with one leg out of N and then held as `partial` forever.
+ *
+ * So the legs of one transaction are SUMMED into one transfer here. That keeps
+ * exactly one row per (tx_hash, -1) — no new sentinel values, no migration, and
+ * no change to the settled-txid skip in scanAddress, which is keyed on txid —
+ * while crediting the full amount that actually arrived. The cost is per-leg
+ * provenance: `from` is the first leg's sender.
  */
 async function fetchInboundNative(
   address: string,
@@ -306,7 +322,28 @@ async function fetchInboundNative(
   const body = await trongrid<{ data?: TrongridNativeTx[] }>(url, `${address} (native)`);
   const rows = Array.isArray(body.data) ? body.data : [];
 
-  const out: NativeTransfer[] = [];
+  // Keyed by txID; insertion-ordered, so the returned order still follows the
+  // feed's.
+  const byTx = new Map<string, NativeTransfer>();
+  // EVERY LEG IS ADDED AT MOST ONCE, keyed by its position in the transaction.
+  //
+  // Summing is not idempotent the way the old one-row-per-leg return was: that
+  // shape leaned on ON CONFLICT (tx_hash, log_index) to collapse a repeat into
+  // the same single row, so a feed that listed one transaction twice cost
+  // nothing. A sum would instead credit it twice, and an OVER-credit marks an
+  // invoice paid on money that never arrived — the opposite direction of the
+  // bug this aggregation exists to fix, and the worse one. The leg key restores
+  // that idempotency inside the pass; identical legs of a repeated record
+  // collapse, genuinely distinct legs (different indexes) still sum.
+  const seenLegs = new Set<string>();
+  const add = (legKey: string, t: NativeTransfer): void => {
+    if (seenLegs.has(legKey)) return;
+    seenLegs.add(legKey);
+    const existing = byTx.get(t.txId);
+    if (existing) existing.amountSun += t.amountSun;
+    else byTx.set(t.txId, t);
+  };
+
   for (const tx of rows) {
     if (!tx.blockNumber) continue; // not in a block yet
     // A reverted transaction moved nothing. contractRet is absent on some very
@@ -321,7 +358,7 @@ async function fetchInboundNative(
       const to = tronAddressFromHex(v.to_address ?? '');
       const amount = BigInt(Math.trunc(v.amount ?? 0));
       if (to === address && amount > 0n) {
-        out.push({
+        add(`${tx.txID}:top`, {
           txId: tx.txID,
           blockNumber: tx.blockNumber,
           from: tronAddressFromHex(v.owner_address ?? ''),
@@ -332,7 +369,9 @@ async function fetchInboundNative(
     }
 
     // ---- TRX forwarded by a contract ----
-    for (const it of tx.internal_transactions ?? []) {
+    const internals = tx.internal_transactions ?? [];
+    for (let i = 0; i < internals.length; i += 1) {
+      const it = internals[i];
       if (it.rejected) continue;
       const to = tronAddressFromHex(it.transferTo_address ?? '');
       if (to !== address) continue;
@@ -341,7 +380,9 @@ async function fetchInboundNative(
         0n,
       );
       if (amount <= 0n) continue;
-      out.push({
+      // The index, not `it.hash`: the hash is optional on this feed and several
+      // internal transfers of one transaction can share it.
+      add(`${tx.txID}:int:${i}`, {
         txId: tx.txID,
         blockNumber: tx.blockNumber,
         from: tronAddressFromHex(it.caller_address ?? ''),
@@ -350,7 +391,7 @@ async function fetchInboundNative(
       });
     }
   }
-  return out;
+  return Array.from(byTx.values());
 }
 
 /**
@@ -476,15 +517,42 @@ async function recordTransfer(params: {
     return;
   }
 
-  await query(
+  // The RETURNING clause is a COLLAPSE DETECTOR, not bookkeeping.
+  //
+  // On conflict this statement updates only `block_number`, so a second transfer
+  // arriving under the same (tx_hash, log_index) leaves the first row's amount
+  // standing and its own value is dropped without a trace. The native path can no
+  // longer produce that (fetchInboundNative sums a transaction's legs into one
+  // transfer), but the token path still can in principle: every TRC20 row carries
+  // log_index 0, so two different tokens moved to one address in ONE transaction
+  // share a key. `amount` is not in the DO UPDATE list, so the value returned here
+  // is the row as it now stands — comparing it to what we tried to write says
+  // whether we just lost money quietly.
+  const written = await query<{ amount: string; amount_differs: boolean }>(
     `INSERT INTO blockchain_transactions
        (payment_id, direction, tx_hash, from_address, to_address, amount, token,
         network, block_number, confirmations, status, log_index, asset)
      VALUES ($1, 'incoming', $2, $3, $4, $5, $7, 'TRC20', $6, 0, 'pending', $8, $7)
      ON CONFLICT (tx_hash, log_index)
-     DO UPDATE SET block_number = EXCLUDED.block_number`,
+     DO UPDATE SET block_number = EXCLUDED.block_number
+     RETURNING amount, (amount IS DISTINCT FROM $5::numeric) AS amount_differs`,
     [payment.id, txId, from, to, amountHuman, blockNumber, asset.symbol, logIndex],
   );
+  if (written[0]?.amount_differs) {
+    logger.error(
+      {
+        paymentId: payment.id,
+        txHash: txId,
+        logIndex,
+        asset: asset.symbol,
+        recorded: written[0].amount,
+        arriving: amountHuman,
+      },
+      'TRC20 transfer collides with an existing row on (tx_hash, log_index) but ' +
+        'carries a different amount — one of the two is NOT credited. Recover it ' +
+        'by HD index; do not assume amount_received is complete.',
+    );
+  }
 
   // Recomputed from the transaction rows rather than set to this transfer's
   // value — see the same code in listener.ts for why. A customer paying a TRC20

@@ -28,8 +28,26 @@ export function signRefreshToken(payload: Omit<JwtPayload, 'type'>): string {
   } as jwt.SignOptions);
 }
 
+/**
+ * `algorithms` is pinned rather than left to the library's inference.
+ *
+ * jsonwebtoken 9 already refuses `alg: none` unless it is explicitly named, and
+ * defaults the accepted set to the HS family when the key material is a secret,
+ * so this is not a live hole today — it is a hole one dependency bump or one
+ * "let's support RS256 for the admin panel" away, and at that point an attacker
+ * who knows any public key can re-sign a token as HS256 against it. Naming the
+ * one algorithm we actually issue costs nothing and takes that class off the
+ * table permanently.
+ *
+ * Issuer/audience are deliberately NOT added here: pinning them on verify while
+ * live tokens (refresh tokens last 7 days) carry neither would sign every
+ * operator and merchant out at deploy. Doing it needs a release that only signs
+ * them, then a later release that requires them.
+ */
 export function verifyToken(token: string): JwtPayload {
-  return jwt.verify(token, config.jwt.secret) as JwtPayload;
+  return jwt.verify(token, config.jwt.secret, {
+    algorithms: ['HS256'],
+  }) as JwtPayload;
 }
 
 export function jwtAuth(req: Request, _res: Response, next: NextFunction): void {

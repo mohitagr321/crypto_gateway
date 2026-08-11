@@ -50,6 +50,8 @@ import { pool, query, queryOne } from '../db/pool';
 import { sweepQueue, SweepJob } from '../workers/queues';
 import { enqueueWebhook } from '../services/webhookService';
 import { addressTxs, satsToBtc, tipHeight } from './bitcoin';
+import { assetFor } from './assets';
+import { recordUnexpectedDeposit } from '../services/unexpectedDepositService';
 
 /**
  * SQL for a payment's received total: the sum of its non-reorged incoming
@@ -137,12 +139,57 @@ async function recordIncoming(params: {
       LIMIT 1`,
     [address],
   );
-  // No wrong-asset case to handle: Bitcoin has exactly one asset, so an
-  // unmatched payment here means the address is simply not ours (or its payment
-  // already settled). Nothing to record.
-  if (!payment) return;
-
   const amountHuman = satsToBtc(valueSats);
+
+  if (!payment) {
+    // There is no WRONG-ASSET case on Bitcoin — one chain, one asset. What there
+    // is, and what this used to drop on the floor with a bare `return`, is the
+    // LATE PAYMENT case: coins landing on OUR deposit address after its payment
+    // stopped being creditable (expired between the customer broadcasting and
+    // this listener seeing it, or already confirmed/swept). EVM and Tron have
+    // filed that as an unexpected_deposits row since the service existed; BTC
+    // alone left no row, no warn and nothing an operator or the merchant could
+    // act on, while the funds sat at an address only the HD index can reach.
+    //
+    // THE EXISTENCE CHECK IS LOAD-BEARING. Esplora returns an address's FULL
+    // history on every pass, and the watch-set snapshot is up to
+    // ADDRESS_REFRESH_MS stale — so an ordinary deposit that was credited and
+    // then promoted out of ('waiting','confirming','partial') is re-read here on
+    // the very next scan. Without this, every healthy BTC payment would file
+    // itself as unrecovered money the moment it confirmed, and the operator
+    // recovery flow would try to sweep an address the sweep worker owns.
+    // (tx_hash, log_index) is UNIQUE on blockchain_transactions, so the lookup
+    // is an index probe.
+    const alreadyCredited = await queryOne<{ id: string }>(
+      `SELECT id FROM blockchain_transactions
+        WHERE tx_hash = $1 AND log_index = $2 AND direction = 'incoming'
+        LIMIT 1`,
+      [txid, vout],
+    );
+    if (alreadyCredited) return;
+
+    try {
+      await recordUnexpectedDeposit({
+        network: 'BTC',
+        asset: assetFor('BTC', 'BTC'),
+        amountHuman,
+        depositAddress: address,
+        txHash: txid,
+        // The output index, exactly as the credited path uses it — so one
+        // transaction paying the address twice files two rows rather than one,
+        // and a row here can never collide with a different output.
+        logIndex: vout,
+      });
+    } catch (err) {
+      // recordUnexpectedDeposit swallows its own failures; this catches the
+      // asset lookup. A listener must never die over a bookkeeping row.
+      logger.error(
+        { err, txHash: txid, vout, address },
+        'btc: could not record an unmatched deposit; funds remain recoverable by HD index',
+      );
+    }
+    return;
+  }
 
   await query(
     `INSERT INTO blockchain_transactions

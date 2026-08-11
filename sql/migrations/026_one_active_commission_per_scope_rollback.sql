@@ -1,0 +1,22 @@
+-- =============================================================================
+-- Rollback for 026_one_active_commission_per_scope.sql
+--
+-- Run with: psql "$DATABASE_URL" -f sql/migrations/026_one_active_commission_per_scope_rollback.sql
+--
+-- NO BEGIN/COMMIT — DROP INDEX CONCURRENTLY cannot run inside a transaction
+-- block, same as the forward file.
+--
+-- Dropping the index removes the database-level backstop only. The serialisation
+-- that actually prevents two active rows in one scope is the
+-- `SELECT 1 FROM clients WHERE id = $1 FOR UPDATE` in setCommission
+-- (backend/src/services/commissionService.ts) and is unaffected; the 23505 catch
+-- there simply stops being reachable.
+--
+-- THE DE-DUPLICATION IS NOT UNDONE, and cannot be: the forward migration
+-- deactivated rows that getActiveCommission was already ignoring (every active
+-- row in a scope except the newest), and there is no record of which rows those
+-- were. Nothing depends on them — no client's effective commission changed when
+-- they were deactivated, and none changes now.
+-- =============================================================================
+
+DROP INDEX CONCURRENTLY IF EXISTS uq_commissions_one_active;

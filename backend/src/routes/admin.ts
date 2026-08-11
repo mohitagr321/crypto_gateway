@@ -884,6 +884,16 @@ router.get(
  * `--scale api=4` the worst case is 4 computations per TTL instead of 4 per
  * request. The real fix is a materialized view refreshed by the settle worker,
  * which spans files this change does not touch.
+ *
+ * KNOWN AND UNFIXED: every figure below is summed ACROSS ASSETS. BTC, ETH, BNB,
+ * USDT and USDC amounts are added together as if they were fungible, so
+ * `totalVolume` and `totalCommission` are not a quantity of anything —
+ * `networkBreakdown` splits by chain but still mixes the assets on it. Making
+ * these correct means returning per-(network, asset) arrays instead of scalars,
+ * which is a breaking change to the admin-panel contract and is deliberately not
+ * done here. NOTHING IN THIS PAYLOAD GATES A MOVEMENT OF MONEY: the payout guard
+ * is getBalanceWith (services/payoutService.ts), which is per-(network, asset)
+ * and in BigInt. Read these as a trend, never as a balance.
  */
 const ANALYTICS_TTL_MS = 60_000;
 let analyticsCache: { at: number; payload: unknown } | null = null;
@@ -927,11 +937,20 @@ async function computeAnalytics(): Promise<unknown> {
     `SELECT
        (SELECT COALESCE(SUM(amount_received),0) FROM payments
           WHERE status IN ('confirmed','swept'))::text AS total_volume,
+       -- COMMISSION IS ONLY EARNED WHEN THE PAYOUT IT WAS TAKEN FROM SETTLES.
+       -- These two sums had no status filter at all, so a payout that never
+       -- reached the wire ('failed') counted as revenue, and so did the
+       -- replacement row the settle tick creates for it — the same commission
+       -- booked twice. 'pending'/'processing' rows are likewise not revenue yet;
+       -- they are counted separately below as pending_payout_amount. Same set as
+       -- total_revenue immediately below, so the two agree.
        (SELECT COALESCE(SUM(commission_amount),0) FROM payouts
-          WHERE created_at >= date_trunc('day', now()))::text AS today_revenue,
+          WHERE status IN ('sent','confirmed')
+            AND created_at >= date_trunc('day', now()))::text AS today_revenue,
        (SELECT COALESCE(SUM(net_amount),0) FROM payouts
           WHERE status IN ('sent','confirmed'))::text AS total_revenue,
-       (SELECT COALESCE(SUM(commission_amount),0) FROM payouts)::text AS total_commission,
+       (SELECT COALESCE(SUM(commission_amount),0) FROM payouts
+          WHERE status IN ('sent','confirmed'))::text AS total_commission,
        (SELECT COUNT(*) FROM clients WHERE status = 'approved')::text AS active_clients,
        (SELECT COUNT(*) FROM payouts WHERE status IN ('pending','processing'))::text AS pending_payouts,
        (SELECT COALESCE(SUM(gross_amount),0) FROM payouts
@@ -967,7 +986,10 @@ async function computeAnalytics(): Promise<unknown> {
               COALESCE(SUM(commission_amount),0) AS revenue,
               COALESCE(SUM(commission_amount),0) AS commission
          FROM payouts
-        WHERE created_at >= date_trunc('day', now()) - interval '29 days'
+        -- Same settled-only set as the headline totals above; without it a
+        -- failed payout and its replacement both showed up on the chart.
+        WHERE status IN ('sent','confirmed')
+          AND created_at >= date_trunc('day', now()) - interval '29 days'
         GROUP BY 1
      )
      SELECT to_char(days.d, 'YYYY-MM-DD') AS date,
@@ -998,7 +1020,8 @@ async function computeAnalytics(): Promise<unknown> {
        ) v ON v.client_id = c.id
        LEFT JOIN (
          SELECT client_id, SUM(commission_amount) AS commission
-           FROM payouts GROUP BY client_id
+           FROM payouts WHERE status IN ('sent','confirmed')
+          GROUP BY client_id
        ) cm ON cm.client_id = c.id
       ORDER BY COALESCE(v.volume,0) DESC
       LIMIT 10`,
@@ -1027,7 +1050,8 @@ async function computeAnalytics(): Promise<unknown> {
        ) v ON v.network = n.network
        LEFT JOIN (
          SELECT network, SUM(commission_amount) AS commission
-           FROM payouts GROUP BY network
+           FROM payouts WHERE status IN ('sent','confirmed')
+          GROUP BY network
        ) cm ON cm.network = n.network
       ORDER BY COALESCE(v.volume,0) DESC`,
     [NETWORKS as unknown as string[]],

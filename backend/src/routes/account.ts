@@ -348,31 +348,60 @@ router.put(
     const client = req.client!;
     const body = SettingsSchema.parse(req.body);
 
-    const row = await queryOne<SettingsRow>(
-      `UPDATE clients
-          SET webhook_url         = COALESCE($2, webhook_url),
-              payout_wallet       = COALESCE($3, payout_wallet),
-              payout_wallet_trc20 = COALESCE($4, payout_wallet_trc20),
-              payout_wallet_erc20 = COALESCE($6, payout_wallet_erc20),
-              payout_wallet_btc   = COALESCE($7, payout_wallet_btc),
-              -- $5 IS NULL means "not supplied"; an empty array is a real value
-              -- (clear the allowlist) and must not be confused with it.
-              ip_whitelist        = COALESCE($5::text[], ip_whitelist),
-              updated_at          = now()
-        WHERE id = $1
-        RETURNING webhook_url, payout_wallet, payout_wallet_trc20,
-                  payout_wallet_erc20, payout_wallet_btc, ip_whitelist,
-                  (webhook_secret IS NOT NULL) AS has_secret`,
-      [
-        client.clientId,
-        body.webhookUrl ?? null,
-        body.payoutWallet ?? null,
-        body.payoutWalletTrc20 ?? null,
+    // ABSENT IS NOT NULL.
+    //
+    // This used to be a fixed UPDATE where every column was
+    // `COALESCE($n, column)`, with each parameter bound as `body.field ?? null`.
+    // That collapses the two things a nullable-optional field can mean —
+    // "leave it alone" and "clear it" — into the same NULL, so a merchant could
+    // never remove a webhook URL or a payout wallet once set: the write was
+    // silently dropped and the response, rendered from RETURNING, echoed the OLD
+    // value with a 200. A dead webhook URL then kept burning delivery attempts
+    // forever (enqueueWebhook only skips when webhook_url IS NULL), and a wallet
+    // the merchant no longer controls stayed as a settlement destination.
+    //
+    // zod's .optional() DROPS absent keys, so `'webhookUrl' in body` is the exact
+    // distinction the COALESCE could not express. The SET list is therefore built
+    // from the keys the caller actually sent. ip_whitelist keeps its existing
+    // semantics (an empty array is a real value) and simply joins the same list.
+    const sets: string[] = [];
+    const args: unknown[] = [client.clientId];
+    const put = (col: string, val: unknown, cast = ''): void => {
+      args.push(val);
+      sets.push(`${col} = $${args.length}${cast}`);
+    };
+    if ('webhookUrl' in body) put('webhook_url', body.webhookUrl ?? null);
+    if ('payoutWallet' in body) put('payout_wallet', body.payoutWallet ?? null);
+    if ('payoutWalletTrc20' in body) put('payout_wallet_trc20', body.payoutWalletTrc20 ?? null);
+    if ('payoutWalletErc20' in body) put('payout_wallet_erc20', body.payoutWalletErc20 ?? null);
+    if ('payoutWalletBtc' in body) put('payout_wallet_btc', body.payoutWalletBtc ?? null);
+    if ('ipWhitelist' in body) {
+      // Cast kept from the original statement: the parameter is an array and the
+      // column is text[], so the type must be stated rather than inferred.
+      put(
+        'ip_whitelist',
         body.ipWhitelist ? body.ipWhitelist.map((s) => s.trim()) : null,
-        body.payoutWalletErc20 ?? null,
-        body.payoutWalletBtc ?? null,
-      ],
-    );
+        '::text[]',
+      );
+    }
+
+    const RETURNING = `webhook_url, payout_wallet, payout_wallet_trc20,
+                       payout_wallet_erc20, payout_wallet_btc, ip_whitelist,
+                       (webhook_secret IS NOT NULL) AS has_secret`;
+
+    // An empty body is a no-op read, not an UPDATE that only bumps updated_at.
+    const row = sets.length
+      ? await queryOne<SettingsRow>(
+          `UPDATE clients
+              SET ${sets.join(', ')}, updated_at = now()
+            WHERE id = $1
+            RETURNING ${RETURNING}`,
+          args,
+        )
+      : await queryOne<SettingsRow>(
+          `SELECT ${RETURNING} FROM clients WHERE id = $1`,
+          [client.clientId],
+        );
     await writeAudit({
       actorUserId: req.user?.userId ?? null,
       actorType: 'user',

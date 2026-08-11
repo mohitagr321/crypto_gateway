@@ -63,6 +63,28 @@ else
   return 0
 end`;
 
+/**
+ * Extend the lease, but ONLY while we still hold it. Token-checked for the same
+ * reason the release is: a lapsed holder must not push out the TTL of whoever
+ * took the lock after it.
+ *
+ * Renewal exists because LOCK_TTL_MS was a hard ceiling on the critical section,
+ * not merely on a crashed holder. The section is a nonce read, a signature, a DB
+ * write and a broadcast; when an RPC goes slow, the lease lapses UNDER a holder
+ * that is still running, a second signer takes the lock, and both pick the same
+ * nonce — precisely the collision this file exists to prevent, and the one whose
+ * loser is recorded as `sent` against a hash that never lands.
+ */
+const RENEW_SCRIPT = `
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('pexpire', KEYS[1], ARGV[2])
+else
+  return 0
+end`;
+
+/** Three renewal attempts per lease, so two may fail before one expires. */
+const RENEW_INTERVAL_MS = Math.floor(LOCK_TTL_MS / 3);
+
 let tokenCounter = 0;
 
 function nextToken(): string {
@@ -89,21 +111,36 @@ export function chainLockKey(network: string, role: ChainLockRole): string {
  * Throws if the lock cannot be acquired within ACQUIRE_TIMEOUT_MS — the caller
  * is a BullMQ job, so throwing means "retry later", which is the correct
  * response to a busy key.
+ *
+ * The lease is renewed in the background for as long as `fn` runs, so a slow
+ * broadcast can no longer lose the lock to a second signer mid-operation.
+ *
+ * `fn` receives an `assertHeld()` callback. Calling it immediately before any
+ * step that SIGNS or BROADCASTS turns "the lease lapsed and we signed anyway"
+ * into a plain, retryable throw before a transaction exists. It is optional by
+ * design — existing callers take no argument and are unaffected — but a caller
+ * that signs should adopt it, because this watchdog makes the lapse rare and
+ * only assertHeld makes it harmless.
  */
 export async function withChainLock<T>(
   network: string,
   role: ChainLockRole,
-  fn: () => Promise<T>,
+  fn: (assertHeld: () => void) => Promise<T>,
 ): Promise<T> {
   const key = chainLockKey(network, role);
   const token = nextToken();
   const deadline = Date.now() + ACQUIRE_TIMEOUT_MS;
 
   let acquired = false;
+  let acquiredAt = 0;
   while (Date.now() < deadline) {
+    // Timestamped BEFORE the round trip: Redis started the TTL when it ran the
+    // SET, which is no later than this, so the lease estimate can only be short.
+    const attemptedAt = Date.now();
     const res = await redis.set(key, token, 'PX', LOCK_TTL_MS, 'NX');
     if (res === 'OK') {
       acquired = true;
+      acquiredAt = attemptedAt;
       break;
     }
     await sleep(RETRY_DELAY_MS);
@@ -116,9 +153,59 @@ export async function withChainLock<T>(
     );
   }
 
+  // Lease bookkeeping. `leaseExpiresAt` is deliberately computed from the moment
+  // the renewal was SENT, not the moment it was acknowledged, so clock drift and
+  // Redis latency shorten our estimate rather than lengthening it.
+  let leaseExpiresAt = acquiredAt + LOCK_TTL_MS;
+  let lostReason: string | null = null;
+
+  const renewer = setInterval(() => {
+    const sentAt = Date.now();
+    void redis
+      .eval(RENEW_SCRIPT, 1, key, token, String(LOCK_TTL_MS))
+      .then((res) => {
+        if (res === 1) {
+          leaseExpiresAt = sentAt + LOCK_TTL_MS;
+          return;
+        }
+        // Sticky: a 0 means the key is gone or belongs to someone else, and our
+        // token can never own it again. Every later renewal would return 0 too.
+        lostReason = 'the lock was taken by another signer or expired before renewal';
+        logger.error(
+          { network, role },
+          'lost the chain signing lease while the critical section was still running',
+        );
+      })
+      .catch((err) => {
+        // A Redis error is NOT proof the lease is gone, so it is not made
+        // sticky — the next tick may well succeed. If Redis stays unreachable,
+        // leaseExpiresAt simply passes and assertHeld reports it accurately.
+        logger.warn({ err, network, role }, 'failed to renew chain signing lock');
+      });
+  }, RENEW_INTERVAL_MS);
+  // Never let the watchdog hold the process open on shutdown.
+  renewer.unref();
+
+  const assertHeld = (): void => {
+    if (lostReason !== null) {
+      throw new Error(`lost the ${network} ${role} signing lock: ${lostReason}`);
+    }
+    if (Date.now() >= leaseExpiresAt) {
+      throw new Error(
+        `the ${network} ${role} signing lease expired mid-operation ` +
+          `(no successful renewal within ${LOCK_TTL_MS}ms) — refusing to sign`,
+      );
+    }
+  };
+
   try {
-    return await fn();
+    return await fn(assertHeld);
   } finally {
+    clearInterval(renewer);
+    // Deliberately no throw here on a lost lease: `fn` has already run, and
+    // turning a completed broadcast into a thrown error is how a payout gets
+    // marked failed and re-driven against money that already left the wallet.
+    // The error line above is the signal; assertHeld is the prevention.
     try {
       await redis.eval(RELEASE_SCRIPT, 1, key, token);
     } catch (err) {

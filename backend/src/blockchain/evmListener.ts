@@ -168,6 +168,19 @@ const FRESH_CURSOR_LOOKBACK = 500;
 const CURSOR_LAG_WARN_BLOCKS = 10 * MAX_SCAN_RANGE;
 const CURSOR_LAG_WARN_INTERVAL_MS = 60_000;
 let cursorLagWarnedAt = 0;
+/**
+ * The same alarm for the NATIVE cursor, which needs it MORE than the token one.
+ *
+ * The native scan reads whole blocks — with prefetched transaction bodies, one
+ * at a time, on a deliberately non-batching provider — so its budget is a fixed
+ * handful of blocks per pass (cfg.nativeScanRange) with no catch-up mode. If a
+ * pass ever costs more wall-clock time than the blocks it covers are produced
+ * in, the gap widens monotonically and nothing in the pass itself says so: the
+ * only line it prints is `debug`. The threshold is expressed in passes rather
+ * than blocks because the budget is per-chain.
+ */
+const NATIVE_CURSOR_LAG_WARN_PASSES = 20;
+let nativeCursorLagWarnedAt = 0;
 
 /**
  * How long one pass may run before this process is treated as wedged and exits
@@ -520,8 +533,38 @@ async function recordIncoming(params: {
     ],
   );
 
-  // Move waiting -> confirming and refresh amount_received/tx_hash. Guarded so it
-  // only advances the state; never downgrades a confirmed payment here.
+  // ============ THE waiting -> confirming TRANSITION, CLAIMED EXACTLY ONCE ====
+  // Run as its OWN guarded statement, ahead of the amount refresh below, and the
+  // `payment.confirming` webhook is fired from ITS result rather than from the
+  // status read at the top of this function.
+  //
+  // The read is stale by construction on the WS fast path. ethers v6 does not
+  // await a contract event listener (it calls each one and moves on), so two
+  // Transfer logs to the same deposit address delivered together both enter this
+  // function, both read `status = 'waiting'`, and both emitted
+  // `payment.confirming`. The two events are byte-identical and the payload has
+  // no delivery id, so a receiver cannot tell them apart from a retry.
+  //
+  // `WHERE status = 'waiting'` takes the row lock and returns rows to exactly one
+  // caller: the second blocks, re-reads `confirming`, and matches nothing. The
+  // pre-check on the stale read is only there to skip a query in the ordinary
+  // case where this transfer is plainly not the first — correctness comes from
+  // the WHERE clause, not from it.
+  let transitioned = false;
+  if (payment.status === 'waiting') {
+    const moved = await query<{ id: string }>(
+      `UPDATE payments SET status = 'confirming'
+        WHERE id = $1 AND status = 'waiting'
+        RETURNING id`,
+      [payment.id],
+    );
+    transitioned = moved.length > 0;
+  }
+
+  // Refresh amount_received/tx_hash. Guarded so it only advances the state; never
+  // downgrades a confirmed payment here. The CASE is retained: the statement above
+  // is skipped whenever the stale read was not 'waiting', and this must still
+  // carry a payment forward if that read was itself behind.
   //
   // amount_received is RECOMPUTED from the transaction rows, not set to this
   // transfer's value. Assigning the single value was wrong three ways: a customer
@@ -549,13 +592,13 @@ async function recordIncoming(params: {
     'incoming transfer recorded (confirming)',
   );
 
-  // Emit 'payment.confirming' exactly once — only when this incoming transfer
-  // actually moved the payment out of 'waiting'.
+  // Emit 'payment.confirming' exactly once — only for the caller whose own
+  // guarded UPDATE above actually moved the payment out of 'waiting'.
   //
   // Not awaited, exactly as before — detection must not wait on a queue — but it
   // now goes through enqueueOrDefer, so an unreachable Redis holds it for retry
   // instead of parking it on an unbounded offline queue that never settles.
-  if (payment.status === 'waiting') {
+  if (transitioned) {
     void enqueueOrDefer({
       kind: 'webhook',
       ctx: { paymentId: payment.id, event: 'payment.confirming' },
@@ -980,6 +1023,30 @@ async function reconcileNativeOnce(): Promise<void> {
   // cannot have been paid before this gateway knew how to accept it.
   const lastScanned = Number(cursorRow?.last_scanned_block ?? 0) || safeHead - 1;
 
+  // Say so when the native scan is falling behind faster than it can catch up.
+  // Detection latency for a native deposit is exactly this gap, and it was
+  // invisible: the per-pass line below is `debug`, so a widening backlog looked
+  // identical to a healthy idle chain.
+  const behind = safeHead - lastScanned;
+  if (
+    behind > NATIVE_CURSOR_LAG_WARN_PASSES * cfg.nativeScanRange &&
+    Date.now() - nativeCursorLagWarnedAt > CURSOR_LAG_WARN_INTERVAL_MS
+  ) {
+    nativeCursorLagWarnedAt = Date.now();
+    logger.warn(
+      {
+        network: cfg.network,
+        asset: asset.symbol,
+        behind,
+        lastScanned,
+        safeHead,
+        perPass: cfg.nativeScanRange,
+      },
+      'native block scan is far behind the chain head — native deposits in the gap ' +
+        'are not detected yet; the per-pass block budget may be too small for this RPC',
+    );
+  }
+
   const fromBlock = lastScanned + 1;
   const scanTo = Math.min(safeHead, fromBlock + cfg.nativeScanRange - 1);
   if (scanTo < fromBlock) return;
@@ -1080,6 +1147,13 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
   // SELECT further down carries NO block bound at all, so they are still picked
   // up and settled. What this removes is the rewrite of every pending row in
   // the table on every pass, forever, against a predicate with no index.
+  //
+  // The last predicate makes an unmoved head write NOTHING. Passes run every 5s
+  // but a block does not arrive every 5s — on Ethereum's ~12s blocks the majority
+  // of passes see the head they saw last time, and each of those used to rewrite
+  // a tuple version per in-flight row to store the number already there.
+  // `confirmations` is NOT NULL DEFAULT 0 (sql/schema.sql), so `<>` cannot be
+  // NULL and cannot silently exclude a row that does need updating.
   await query(
     `UPDATE blockchain_transactions
         SET confirmations = GREATEST(0, $1 - block_number)
@@ -1087,7 +1161,8 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
         AND status = 'pending'
         AND network = '${cfg.network}'
         AND block_number IS NOT NULL
-        AND block_number > $1 - $2`,
+        AND block_number > $1 - $2
+        AND confirmations <> GREATEST(0, $1 - block_number)`,
     [head, confirmationWindowBlocks()],
   );
 
@@ -1466,12 +1541,36 @@ export async function runEvmListener(chain: EvmChainConfig): Promise<void> {
   httpRpc = httpProviderFor(cfg.httpRpc, cfg.chainId);
   nativeRpc = nativeScanProviderFor(cfg.httpRpc, cfg.chainId);
 
-  await refreshDepositAddresses();
+  // Backstop timer FIRST, initial load second — and the initial load does not
+  // take the process down with it.
+  //
+  // This `await` used to be bare, ahead of every setInterval and both signal
+  // handlers. A Postgres blip during boot therefore rejected it, ran the
+  // unhandledRejection handler above (which prints 'listener continues'), and
+  // then exited with code 0 in a few milliseconds because nothing had yet been
+  // registered to keep the event loop alive — the one line it printed said the
+  // opposite of what happened, and a tight restart loop can trip pm2's
+  // unstable-restart guard and leave the listener `errored`, which pm2 will not
+  // restart.
+  //
+  // Nothing downstream depends on this first load succeeding: reconcileOnce and
+  // reconcileNativeOnce each refresh the watch set at the top of their own pass
+  // (that ordering is the cursor-advance correctness argument, not a
+  // convenience), and the WS fast path is best-effort by design — it would miss
+  // events until the first successful refresh, which the reconciler re-detects
+  // anyway. So the cost of a failure here is bounded at one skipped refresh.
   setInterval(() => {
     refreshDepositAddresses().catch((err) =>
       logger.error({ err }, 'address refresh failed'),
     );
   }, ADDRESS_REFRESH_MS);
+  await refreshDepositAddresses().catch((err) =>
+    logger.error(
+      { err, chain: cfg.label },
+      'initial deposit-address load failed — starting anyway; each reconciler pass ' +
+        'refreshes the watch set before it scans, so this recovers on its own',
+    ),
+  );
 
   await startWsSubscription();
 

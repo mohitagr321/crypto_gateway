@@ -47,7 +47,7 @@ import { query, queryOne } from '../db/pool';
 import { decrypt, hmacSha256, sha256Hex } from '../utils/crypto';
 import { config } from '../config/env';
 import { logger } from '../config/logger';
-import { webhookQueue } from '../workers/queues';
+import { WEBHOOK_ATTEMPTS, webhookBackoffMs, webhookQueue } from '../workers/queues';
 
 // ---------------------------------------------------------------------------
 // SSRF guard
@@ -287,6 +287,25 @@ export async function enqueueWebhook(
     status: ctx.overrides?.status ?? row.status,
     signature: '',
   };
+  if (!secret) {
+    // `clients.webhook_secret` is nullable in the schema but both client-creation
+    // paths (routes/admin.ts, routes/register.ts) write an encrypted random
+    // token, so this is unreachable today — which is exactly why it would be
+    // invisible if a future path ever stopped writing one. An unsigned webhook is
+    // a webhook every documented receiver must reject, and silently signing with
+    // '' turns that into "the merchant's integration broke" rather than "the
+    // gateway has a client row with no secret".
+    //
+    // Deliberately NOT a throw: every caller invokes enqueueWebhook detached with
+    // a .catch, so throwing would drop the event entirely and leave no
+    // webhook_logs row at all. Delivering something the merchant can see failing,
+    // loudly, is the better of the two.
+    logger.error(
+      { clientId: row.client_id, paymentId: ctx.paymentId, event: ctx.event },
+      'client has no usable webhook_secret — sending an UNSIGNED webhook, which ' +
+        'conforming receivers will reject. Rotate the client secret.',
+    );
+  }
   const signature = secret ? hmacSha256(secret, canonicalBody(canonical, '')) : '';
   // Fill the real signature in. Delivery rebuilds the body through the same
   // canonicalBody(), so the wire bytes are the signed bytes with only the
@@ -444,9 +463,22 @@ export async function dispatch(job: Job<{ webhookLogId: string }>): Promise<void
     clearTimeout(timer);
   }
 
+  // THE SAME CURVE THE QUEUE ACTUALLY USES, from the same function.
+  //
+  // This was a private `Math.min(2 ** attempt, 3600) * 1000`, which agreed with
+  // nothing: the webhook Worker's backoff strategy IS queues.ts webhookBackoffMs
+  // (capped exponential from 5s), so after the first failure the column promised
+  // +2s against a real +5s and after the seventh +128s against +320s. The
+  // attempt ceiling was wrong in the same direction — WEBHOOK_MAX_RETRIES is
+  // only the FLOOR on the retry tail (see the policy note in queues.ts), so
+  // comparing against it wrote NULL while the queue still had a day of retries
+  // left to run. routes/account.ts renders this column verbatim as `nextRetryAt`
+  // AND uses its non-null-ness to label a delivery 'pending' versus 'failed', so
+  // both the timestamp and the word were wrong, and a merchant watching a
+  // recovering endpoint was told delivery had been abandoned when it had not.
   const nextRetryAt =
-    !success && attempt < config.webhook.maxRetries
-      ? new Date(Date.now() + Math.min(2 ** attempt, 3600) * 1000).toISOString()
+    !success && attempt < WEBHOOK_ATTEMPTS
+      ? new Date(Date.now() + webhookBackoffMs(attempt)).toISOString()
       : null;
 
   await recordAttempt(webhookLogId, attempt, statusCode || null, success, {

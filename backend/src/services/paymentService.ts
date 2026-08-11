@@ -103,12 +103,34 @@ function paymentUriFor(row: PaymentRow): string | undefined {
 }
 
 /** The frozen fiat quote, assembled once and written once. */
-interface LockedQuote {
+export interface LockedQuote {
   currency: string;
   amount: string;
   rate: string;
   source: string;
   lockedAt: Date;
+}
+
+/**
+ * A quote a CALLER already struck, so `createPayment` does not have to strike it
+ * itself. See `CreatePaymentInput.preQuoted` for why that matters.
+ *
+ * It carries the inputs the quote was struck FOR as well as its result. Those
+ * inputs are re-checked here against the ones this call actually resolved, and
+ * anything that does not match exactly is quoted again from scratch — a
+ * mispriced payment is a fund-loss bug, and "the caller probably meant the same
+ * thing" is not a basis on which to write an amount onto a payment row.
+ */
+export interface PreQuoted {
+  /** Asset symbol the quote was struck for, e.g. 'USDT'. */
+  asset: string;
+  /** Exactly the `fiatCurrency` that was passed to `quote()`. */
+  fiatCurrency: string;
+  /** Exactly the `fiatAmount` that was passed to `quote()`. */
+  fiatAmount: string;
+  /** The resulting crypto amount, in `asset`. */
+  amount: string;
+  locked: LockedQuote;
 }
 
 export interface PaymentRow {
@@ -220,9 +242,30 @@ export interface CreatePaymentInput {
    */
   paymentLinkId?: string | null;
   /**
+   * A fiat quote the caller already struck, OUTSIDE any transaction.
+   *
+   * Only consulted for a fiat-priced payment, and only when every input it
+   * records matches the ones resolved here — otherwise it is ignored and the
+   * quote is struck normally. Supplying it never changes what is written; it
+   * only changes WHERE the (possibly slow, possibly outbound-HTTP) conversion
+   * happened.
+   *
+   * A caller that owns the transaction (`tx`) and prices in fiat SHOULD supply
+   * this: without it the rate lookup — which on a cold cache performs an
+   * outbound provider fetch — runs with that caller's transaction already open,
+   * holding both its row locks and its pool connection for the duration.
+   */
+  preQuoted?: PreQuoted;
+  /**
    * Run inside a transaction the CALLER owns, so link-claim + payment-creation
    * commit or roll back together. Without this a failure here would leave a
    * single-use link burned by a payment that was never created.
+   *
+   * A caller that passes this OWNS THE `payment.created` WEBHOOK: it is not
+   * enqueued here, because the enqueue reads the payment back on a POOLED
+   * connection and the caller's transaction has not committed yet, so the read
+   * finds nothing and the event is silently dropped. See the enqueue site
+   * below, and `routes/paymentLinks.ts` for the post-commit call.
    */
   tx?: PoolClient;
 }
@@ -274,24 +317,41 @@ export async function createPayment(
   let locked: LockedQuote | null = null;
   let amount: string;
   if (pricedInFiat) {
-    const q = await quote({
-      asset: asset.symbol,
-      fiatCurrency: input.fiatCurrency!,
-      fiatAmount: input.fiatAmount!,
-    });
-    amount = q.amount;
-    locked = {
-      currency: q.fiatCurrency,
-      amount: q.fiatAmount,
-      rate: q.rate,
-      source: q.source,
-      lockedAt: q.lockedAt,
-    };
-    if (q.source.endsWith(':stale')) {
+    // A caller-supplied quote is used ONLY when it was struck for exactly the
+    // asset, currency and fiat amount this call resolved. Any difference —
+    // including a link whose price changed between the caller's read and its
+    // lock — falls through to a fresh quote rather than pricing the payment
+    // from a stale intent.
+    const pre = input.preQuoted;
+    const preUsable =
+      pre !== undefined &&
+      pre.asset === asset.symbol &&
+      pre.fiatCurrency === input.fiatCurrency &&
+      pre.fiatAmount === input.fiatAmount;
+
+    if (preUsable) {
+      amount = pre!.amount;
+      locked = pre!.locked;
+    } else {
+      const q = await quote({
+        asset: asset.symbol,
+        fiatCurrency: input.fiatCurrency!,
+        fiatAmount: input.fiatAmount!,
+      });
+      amount = q.amount;
+      locked = {
+        currency: q.fiatCurrency,
+        amount: q.fiatAmount,
+        rate: q.rate,
+        source: q.source,
+        lockedAt: q.lockedAt,
+      };
+    }
+    if (locked.source.endsWith(':stale')) {
       // Not an error — this is the degraded mode working as designed — but a
       // quote struck against an old price is worth being able to find later.
       logger.warn(
-        { asset: asset.symbol, fiat: q.fiatCurrency, lockedAt: q.lockedAt },
+        { asset: asset.symbol, fiat: locked.currency, lockedAt: locked.lockedAt },
         'payment quoted from a stale exchange rate',
       );
     }
@@ -389,9 +449,19 @@ export async function createPayment(
 
   // Fire the 'payment.created' (waiting) webhook — best-effort, must not fail
   // the API call. Merchants receive an event for every status, starting here.
-  enqueueWebhook({ paymentId: row.id, event: 'payment.created' }).catch((err) =>
-    logger.warn({ err, paymentId: row.id }, 'failed to enqueue payment.created webhook'),
-  );
+  //
+  // ONLY when this function owned the transaction. enqueueWebhook's first act is
+  // to read the payment back through the POOL (a different connection), so while
+  // a caller's transaction is still open that read cannot see the row: it logs
+  // 'payment not found', returns null, writes no webhook_logs row and throws
+  // nothing, so the .catch below never fires and the event is lost in silence.
+  // That is why every hosted-checkout and invoice payment has never emitted
+  // payment.created. The owning caller enqueues it after ITS commit instead.
+  if (!input.tx) {
+    enqueueWebhook({ paymentId: row.id, event: 'payment.created' }).catch((err) =>
+      logger.warn({ err, paymentId: row.id }, 'failed to enqueue payment.created webhook'),
+    );
+  }
 
   // 4. QR (outside the txn — pure/no DB). URI shape is chain-specific.
   //    Rendering here also warms the cache, so the status polls that follow this

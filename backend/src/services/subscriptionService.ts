@@ -202,10 +202,25 @@ export async function createSubscription(
   }
 
   // A start date in the past would make the subscription immediately overdue
-  // and bill on the very next tick, which is surprising rather than useful.
+  // and bill on the very next tick, which is surprising rather than useful —
+  // and a start date far enough back that the plan is already more than
+  // `max_cycles_behind` cycles late is parked straight into 'needs_attention'
+  // by the first tick, having never billed anything at all.
+  //
+  // The check the comment above has always described is now actually made. The
+  // tolerance is there for clock skew between a merchant's server and this one:
+  // an integration that means "start now" and computes the timestamp itself
+  // must not be rejected for being a few seconds slow.
+  const START_AT_PAST_TOLERANCE_MS = 5 * 60_000;
   const startAt = input.startAt ? new Date(input.startAt) : new Date();
   if (Number.isNaN(startAt.getTime())) {
     throw AppError.badRequest('startAt must be a valid date');
+  }
+  if (startAt.getTime() < Date.now() - START_AT_PAST_TOLERANCE_MS) {
+    throw AppError.badRequest(
+      'startAt cannot be in the past — the first invoice would be issued ' +
+        'immediately. Use a future date, or omit it to start now.',
+    );
   }
 
   const row = await queryOne<SubscriptionRow>(

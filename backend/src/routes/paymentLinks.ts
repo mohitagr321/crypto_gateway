@@ -36,9 +36,14 @@ import { clientAuth, requireApprovedClient } from '../middleware/clientAuth';
 import { requireScope } from '../middleware/auth';
 import { SCOPES } from '../services/apiKeyService';
 import { checkoutReadLimiter, checkoutWriteLimiter } from '../middleware/rateLimit';
-import { withTransaction } from '../db/pool';
+import { queryOne, withTransaction } from '../db/pool';
 import { writeAudit } from '../services/auditService';
-import { createPayment } from '../services/paymentService';
+import { createPayment, PreQuoted } from '../services/paymentService';
+import { enqueueWebhook } from '../services/webhookService';
+import { quote } from '../services/rateService';
+import { parseNetwork } from '../blockchain/networks';
+import { parseAsset } from '../blockchain/assets';
+import { logger } from '../config/logger';
 import {
   claimLinkUse,
   createLink,
@@ -167,6 +172,67 @@ publicCheckoutRouter.post(
     const body = StartPaymentSchema.parse(req.body ?? {});
     const token = req.params.token;
 
+    // ---- Strike the fiat quote BEFORE opening the transaction ---------------
+    //
+    // The conversion below reads the rate cache and, on a cold cache or an
+    // entry past RATE_MAX_STALE_SECONDS, performs an OUTBOUND provider fetch —
+    // up to several seconds. Done inside the transaction (which is where
+    // createPayment does it when nobody supplies `preQuoted`) that fetch runs
+    // while this request holds `claimLinkUse`'s `FOR UPDATE OF l` row lock AND
+    // one of the pool's connections: every other customer on the same link
+    // queues behind the lock, each holding a connection of their own, and a
+    // provider outage turns a checkout burst into pool exhaustion.
+    //
+    // This read is UNLOCKED and advisory only. Nothing is decided from it:
+    // createPayment re-resolves the asset and currency under the lock and
+    // ignores this quote unless all three inputs match exactly, so a link
+    // repriced in the gap is simply re-quoted the old way rather than mispriced.
+    let preQuoted: PreQuoted | undefined;
+    try {
+      const pricing = await queryOne<{
+        fiat_amount: string | null;
+        fiat_currency: string | null;
+        asset: string | null;
+        network: string | null;
+      }>(
+        `SELECT fiat_amount, fiat_currency, asset, network
+           FROM payment_links WHERE token = $1`,
+        [token],
+      );
+      if (pricing?.fiat_amount && pricing.fiat_currency) {
+        const symbol = parseAsset(
+          parseNetwork(pricing.network ?? body.network),
+          pricing.asset ?? body.asset,
+        ).symbol;
+        const q = await quote({
+          asset: symbol,
+          fiatCurrency: pricing.fiat_currency,
+          fiatAmount: pricing.fiat_amount,
+        });
+        preQuoted = {
+          asset: symbol,
+          fiatCurrency: pricing.fiat_currency,
+          fiatAmount: pricing.fiat_amount,
+          amount: q.amount,
+          locked: {
+            currency: q.fiatCurrency,
+            amount: q.fiatAmount,
+            rate: q.rate,
+            source: q.source,
+            lockedAt: q.lockedAt,
+          },
+        };
+      }
+    } catch (err) {
+      // Deliberately swallowed. Every failure reachable here — a disabled
+      // network, an unpriceable asset, a rate-provider outage — is raised again
+      // by createPayment from inside the transaction, against the asset the
+      // LOCKED read resolved rather than the one guessed here. Failing now would
+      // risk reporting the wrong reason; the only cost of continuing is that
+      // this checkout keeps the old, slower shape.
+      logger.debug({ err, token }, 'pre-transaction quote failed; quoting inside the transaction');
+    }
+
     const payment = await withTransaction(async (tx: PoolClient) => {
       // Claims one use under a row lock. A single-use link cannot be claimed
       // twice by concurrent opens, and because createPayment joins THIS
@@ -196,7 +262,12 @@ publicCheckoutRouter.post(
         clientId,
         amount,
         ...(fiatPriced
-          ? { fiatAmount: link.fiat_amount!, fiatCurrency: link.fiat_currency! }
+          ? {
+              fiatAmount: link.fiat_amount!,
+              fiatCurrency: link.fiat_currency!,
+              // Used only if it was struck for exactly these values; see above.
+              preQuoted,
+            }
           : {}),
         // The customer has no order id, so mint one. It stays unique per client
         // (the table's constraint) and traces back to the link it came from.
@@ -208,6 +279,22 @@ publicCheckoutRouter.post(
         tx,
       });
     });
+
+    // ---- payment.created, AFTER the commit -----------------------------------
+    // This transaction owns the event. createPayment deliberately does not
+    // enqueue it when a caller supplies `tx`, because enqueueWebhook reads the
+    // payment back on a pooled connection and would find nothing while this
+    // transaction was still open — which is why no hosted-checkout or invoice
+    // payment has ever produced one. Enqueued here, the row is committed and
+    // visible both to the read and to the worker that picks the job up.
+    // Best-effort, exactly as on the direct API path: a merchant is not told
+    // their payment failed because a webhook could not be queued.
+    enqueueWebhook({ paymentId: payment.paymentId, event: 'payment.created' }).catch((err) =>
+      logger.warn(
+        { err, paymentId: payment.paymentId },
+        'failed to enqueue payment.created webhook',
+      ),
+    );
 
     // Deliberately a trimmed shape rather than the merchant-facing DTO: the
     // customer needs an address, a QR and a status, not the payment's full

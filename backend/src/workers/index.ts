@@ -365,11 +365,19 @@ async function processSweep(job: Job<SweepJob>): Promise<void> {
   const { txHash, amount: balanceHuman } = result;
   const sweptAsset = result.asset ?? payment.asset ?? 'USDT';
 
+  // `log_index = -2` is a deterministic sentinel, not decoration. The column is
+  // nullable and this INSERT used to omit it, so under Postgres's default NULLS
+  // DISTINCT the `ON CONFLICT (tx_hash, log_index)` clause below could never
+  // match and the idempotency it advertises did not exist. The listeners
+  // already established the convention: a real log index for token transfers,
+  // -1 for a native transfer, 0/vout on Tron and Bitcoin. -2 is the sweep, kept
+  // distinct from the gas-funding rows so a top-up and a sweep that shared a
+  // transaction hash could not collide.
   await query(
     `INSERT INTO blockchain_transactions
        (payment_id, direction, tx_hash, from_address, to_address, amount, token,
-        asset, network, status)
-     VALUES ($1, 'sweep', $2, $3, $4, $5, $6, $6, $7, 'confirmed')
+        asset, network, status, log_index)
+     VALUES ($1, 'sweep', $2, $3, $4, $5, $6, $6, $7, 'confirmed', -2)
      ON CONFLICT (tx_hash, log_index) DO NOTHING`,
     [
       paymentId,
@@ -410,10 +418,28 @@ async function processSweep(job: Job<SweepJob>): Promise<void> {
   }
 
   // Mark payment swept.
-  await query(
-    `UPDATE payments SET status = 'swept' WHERE id = $1 AND status = 'confirmed'`,
+  //
+  // This is a compare-and-set against a status that was read at the top of the
+  // function, before an irreversible on-chain transfer. Discarding its result
+  // is how the one case that matters stayed silent: a reorg revert (which sets
+  // a promoted payment back to 'waiting') landing between the read and here
+  // leaves the funds in the central wallet with NO payment in a state anything
+  // will settle. It is narrow — on BSC it needs a 12-to-15 block reorg detected
+  // inside the couple of seconds a just-promoted payment is still a reorg
+  // candidate — but it is exactly the event an operator must be paged for, and
+  // it costs one RETURNING to see it.
+  const swept = await query<{ id: string }>(
+    `UPDATE payments SET status = 'swept' WHERE id = $1 AND status = 'confirmed'
+     RETURNING id`,
     [paymentId],
   );
+  if (swept.length === 0) {
+    logger.error(
+      { paymentId, txHash, amount: balanceHuman, network: payment.network },
+      'SWEEP MOVED FUNDS BUT THE PAYMENT WAS NO LONGER `confirmed` — the balance is ' +
+        'in the central wallet with no settleable payment behind it; reconcile by hand',
+    );
+  }
   logger.info(
     { paymentId, txHash, amount: balanceHuman, network: payment.network },
     'deposit swept to central',
@@ -456,23 +482,101 @@ async function processSweep(job: Job<SweepJob>): Promise<void> {
 // ---------------------------------------------------------------------------
 // EXPIRY: mark waiting payments past expires_at as expired (idempotent).
 // ---------------------------------------------------------------------------
+/**
+ * How many payments one expiry pass may age out.
+ *
+ * This statement used to have no LIMIT at all, and then fanned a DETACHED
+ * `enqueueWebhook` out per returned row. After an outage that is thousands of
+ * promises starting at once, each needing two connections from a 20-slot pool:
+ * most of them reject with 'timeout exceeded when trying to connect' into a
+ * `.catch` that only warns — so the merchant silently never receives
+ * `payment.expired` — while the worker process's pool is pinned for ten
+ * seconds, starving the sweep, payout and settle jobs that share it.
+ *
+ * Bounding it is safe in the way that matters: a payment that misses the cut is
+ * still `waiting`, so it is still in every listener's watch set, still
+ * creditable if the customer pays, and still selected by the next tick sixty
+ * seconds later. The backlog drains at 500/minute instead of stampeding.
+ *
+ * `idx_payments_expires` (partial on status IN ('waiting','confirming')) serves
+ * the inner select, so the cap is applied on an index scan, not a sort of the
+ * whole table.
+ */
+const EXPIRY_BATCH_LIMIT = 500;
+
+/**
+ * How many `payment.expired` enqueues are in flight at once. Each one is two
+ * short indexed queries and takes a pool connection, so this keeps the tick's
+ * demand well inside the pool while still draining a full batch in well under
+ * the BullMQ lock duration.
+ */
+const EXPIRY_WEBHOOK_CONCURRENCY = 5;
+
 async function processExpiry(): Promise<void> {
   const rows = await query<{ id: string }>(
-    `UPDATE payments
+    // Same claim-then-update shape as redeliverAbandonedWebhooks below: the CTE
+    // drives, so the plan is always "read 500 rows off idx_payments_expires,
+    // then 500 primary-key updates" rather than anything that scales with the
+    // size of the waiting set. SKIP LOCKED so two overlapping ticks (a retry,
+    // or two worker hosts) split the batch instead of blocking on each other.
+    `WITH due AS (
+       SELECT id
+         FROM payments
+        WHERE status = 'waiting'
+          AND expires_at < now()
+        ORDER BY expires_at ASC
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED
+     )
+     UPDATE payments p
         SET status = 'expired'
-      WHERE status = 'waiting'
-        AND expires_at < now()
-      RETURNING id`,
+       FROM due d
+      WHERE p.id = d.id
+        AND p.status = 'waiting'
+     RETURNING p.id`,
+    [EXPIRY_BATCH_LIMIT],
   );
-  if (rows.length > 0) {
-    logger.info({ count: rows.length }, 'expired stale waiting payments');
-    for (const r of rows) {
-      enqueueWebhook({
-        paymentId: r.id,
-        event: 'payment.expired',
-        overrides: { status: 'expired' },
-      }).catch((err) => logger.warn({ err, paymentId: r.id }, 'expired webhook enqueue failed'));
-    }
+  if (rows.length === 0) return;
+
+  logger.info(
+    { count: rows.length, capped: rows.length === EXPIRY_BATCH_LIMIT },
+    'expired stale waiting payments',
+  );
+
+  // Awaited in bounded chunks rather than fired off all at once. The status has
+  // ALREADY moved to 'expired', so the next tick's UPDATE will not match these
+  // rows again and a lost enqueue is a permanently lost merchant event — which
+  // is precisely why the failures have to be counted out loud instead of
+  // disappearing into a per-row warn.
+  let failed = 0;
+  for (let i = 0; i < rows.length; i += EXPIRY_WEBHOOK_CONCURRENCY) {
+    const chunk = rows.slice(i, i + EXPIRY_WEBHOOK_CONCURRENCY);
+    const settled = await Promise.allSettled(
+      chunk.map((r) =>
+        enqueueWebhook({
+          paymentId: r.id,
+          event: 'payment.expired',
+          overrides: { status: 'expired' },
+        }),
+      ),
+    );
+    settled.forEach((s, j) => {
+      if (s.status === 'rejected') {
+        failed += 1;
+        logger.warn(
+          { err: s.reason, paymentId: chunk[j].id },
+          'expired webhook enqueue failed',
+        );
+      }
+    });
+  }
+  if (failed > 0) {
+    logger.error(
+      { failed, total: rows.length },
+      'expiry: payment.expired could not be enqueued for some payments — those ' +
+        'merchants will never be told, and the rows are already `expired` so no ' +
+        'later tick re-selects them',
+    );
   }
 }
 
@@ -1259,9 +1363,40 @@ function startWorkers(): Worker[] {
     w.on('completed', (job) => {
       logger.debug({ queue: w.name, jobId: job.id }, 'job completed');
     });
+    // Without this listener BullMQ's re-emitted internal errors reach a bare
+    // console.error — unstructured stderr, outside the pino pipeline, so a
+    // worker that has lost Redis looks like a worker with nothing to do.
+    w.on('error', (err) => {
+      logger.error({ queue: w.name, err }, 'bullmq worker error');
+    });
+    // `stalled` is the signal that fires when a job's lock expired while it was
+    // still active — the orphaned-sweep shape the shutdown guard below exists
+    // for. The re-run is safe (chainBroadcast pins the nonce and the signed
+    // bytes, and processSweep re-reads the live balance), but it must be
+    // VISIBLE: a sweep that stalls repeatedly is a chain call that never
+    // returns, not a transient.
+    w.on('stalled', (jobId) => {
+      logger.warn({ queue: w.name, jobId }, 'bullmq job stalled and will be re-run');
+    });
   }
   return workers;
 }
+
+/**
+ * How long the repeatable-tick registration may take before the boot is
+ * declared failed.
+ *
+ * This is not a nicety. If Redis is unreachable at boot, `expiryQueue.add` does
+ * NOT reject — it awaits BullMQ's `waitUntilReady`, which resolves only on
+ * `'ready'` and rejects only on `'end'`, and ioredis's default retry strategy
+ * reconnects forever without ever reaching `'end'`. So the await HANGS, main()
+ * never reaches the rest of the boot, and the process sits there logging
+ * "starting workers" and consuming nothing: no sweeps, no payouts, no
+ * webhooks, no expiry — with no error, no crash and a zero exit code that no
+ * supervisor will act on. A silent total worker outage is the worst possible
+ * shape for this process, because everything it does is a safety net.
+ */
+const BOOT_TIMEOUT_MS = 20_000;
 
 async function main(): Promise<void> {
   logger.info(
@@ -1271,9 +1406,12 @@ async function main(): Promise<void> {
     },
     'starting workers',
   );
-  await scheduleExpiryJob();
-  await scheduleSettleJob();
-  await scheduleSubscriptionJob();
+
+  // Construct the workers FIRST. Registering the repeatable ticks is the part
+  // that can hang on a cold Redis, and a worker that was never constructed
+  // consumes nothing even after Redis comes back — whereas a worker that
+  // exists reconnects on its own. The schedule calls are idempotent by jobId,
+  // so doing them second costs nothing.
   const workers = startWorkers();
 
   const shutdown = async (signal: string) => {
@@ -1295,8 +1433,57 @@ async function main(): Promise<void> {
     clearTimeout(forced);
     process.exit(0);
   };
+  // Registered BEFORE the boot race below, so a deploy that lands while the
+  // scheduling call is hung on a cold Redis still drains instead of being hard
+  // terminated by the supervisor.
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
+
+  // Bounded, and fatal on failure. Without the repeatable ticks there is no
+  // expiry, no settle safety net and no subscription billing, so a process
+  // that fails to register them must die and be restarted rather than run on
+  // looking healthy.
+  let bootTimer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      Promise.all([scheduleExpiryJob(), scheduleSettleJob(), scheduleSubscriptionJob()]),
+      new Promise<never>((_, reject) => {
+        bootTimer = setTimeout(
+          () =>
+            reject(
+              new Error('repeatable job scheduling timed out — is Redis reachable?'),
+            ),
+          BOOT_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } catch (err) {
+    logger.fatal({ err }, 'worker boot failed: could not register the repeatable ticks');
+    process.exit(1);
+  } finally {
+    if (bootTimer) clearTimeout(bootTimer);
+  }
+
+  logger.info('worker boot complete: repeatable ticks registered');
 }
 
-void main();
+// Log AND exit — deliberately not the listeners' swallow-and-continue. Every
+// intentional fire-and-forget in this process already carries its own
+// `.catch()`, so an unhandled rejection here is by definition unanticipated,
+// and a worker in an unknown state is one that may be half way through moving
+// money. Node already exits non-zero on both of these; the handlers exist so
+// the last line before the exit is structured, redacted pino JSON rather than a
+// raw stack on stderr.
+process.on('unhandledRejection', (reason) => {
+  logger.fatal({ reason }, 'unhandledRejection in worker process');
+  process.exit(1);
+});
+process.on('uncaughtException', (err) => {
+  logger.fatal({ err }, 'uncaughtException in worker process');
+  process.exit(1);
+});
+
+main().catch((err) => {
+  logger.fatal({ err }, 'worker failed to start');
+  process.exit(1);
+});

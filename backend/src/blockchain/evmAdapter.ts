@@ -25,6 +25,7 @@ import {
   Transaction,
   Wallet,
   formatEther,
+  getAddress,
   parseEther,
 } from 'ethers';
 import { config } from '../config/env';
@@ -65,6 +66,38 @@ const FIXED_POLICY_FALLBACK_TRANSFER_GAS = 70_000n;
 const FIXED_POLICY_BUFFER_PERCENT = 50;
 
 export function createEvmAdapter(cfg: EvmChainConfig): ChainAdapter {
+  /**
+   * A FRESH provider per call, deliberately. DO NOT memoise this.
+   *
+   * Reusing one JsonRpcProvider across calls looks like an obvious tidy-up (one
+   * fewer object per balance read; one keep-alive agent instead of many) and it
+   * was tried. It is not safe here, because ethers caches the result of
+   * `getTransactionCount` on the PROVIDER INSTANCE:
+   *
+   *   AbstractProvider.#perform() memoises every account read — getBalance,
+   *   getCode and getTransactionCount — for `cacheTimeout` ms, keyed by
+   *   (method, address, blockTag). The default is 250 (abstract-provider.js
+   *   `defaultOptions`), and httpProviderFor does not override it.
+   *
+   * Every EVM signature in this file derives its nonce through that call:
+   * `preparePayout` reads `rpc.getTransactionCount(central, 'pending')`
+   * explicitly, and the gas-station `sendTransaction` below reaches it via
+   * ethers' own populateTransaction. utils/chainLock.ts serialises those signers
+   * precisely so that each one reads a nonce the previous broadcast has already
+   * advanced — but a shared instance would serve the SECOND signer the FIRST
+   * one's cached nonce whenever the critical section (≈4 RPC round trips and two
+   * DB writes) completes inside 250 ms, which it comfortably does against a
+   * co-located node. Two payouts then sign the same nonce: at most one is mined,
+   * and the loser is either rejected after `broadcast_at` was stamped (a payout
+   * stuck as unresolved with its reserve held) or, if fees moved, REPLACES a
+   * transfer already recorded as sent. That is the exact defect the lock, the
+   * nonce pin and the signed-bytes replay exist to make impossible.
+   *
+   * A per-call instance has an empty cache, so the nonce read always hits the
+   * node. The cost is one short-lived object per operation, which is the price of
+   * the guarantee. If the allocation ever needs to go away, the correct fix is a
+   * shared provider constructed with `cacheTimeout: -1`, not this memoisation.
+   */
   const provider = (): JsonRpcProvider => httpProviderFor(cfg.httpRpc, cfg.chainId);
 
   /**
@@ -338,8 +371,36 @@ export function createEvmAdapter(cfg: EvmChainConfig): ChainAdapter {
     gasStationAddress,
     minSweepAmount: cfg.minSweepAmount,
 
+    /**
+     * Shape AND EIP-55 checksum — this is the last gate before funds leave the
+     * central wallet, and a payout to a mistyped address is unrecoverable.
+     *
+     * It was shape only, which is what the Tron and Bitcoin adapters do NOT do:
+     * tronAdapter routes through TronWeb's base58check and bitcoinAdapter through
+     * `toOutputScript`, both of which catch a single mistyped character. A hex
+     * address has no such structure — only the capitalisation carries the ~15
+     * bits of checksum, and nothing here was reading it.
+     *
+     * ethers' `getAddress` applies exactly the right rule and no more: an address
+     * that is all-lowercase or all-uppercase carries NO checksum information, so
+     * it is accepted unchanged (rejecting it would break legitimate input from
+     * tools that emit lowercase). Mixed case means the sender claims a checksum,
+     * and that claim is verified. The shape regex stays in front of it because
+     * `getAddress` also accepts a bare 40-hex string with no `0x`, which is not a
+     * form this gateway should be storing.
+     *
+     * The signature is unchanged (boolean, no normalisation) — callers store what
+     * the merchant supplied, and returning a different string from a predicate
+     * would be a silent contract change.
+     */
     isValidAddress(address: string): boolean {
-      return /^0x[0-9a-fA-F]{40}$/.test(address);
+      if (!/^0x[0-9a-fA-F]{40}$/.test(address)) return false;
+      try {
+        getAddress(address);
+        return true;
+      } catch {
+        return false;
+      }
     },
 
     deriveDeposit(index: number) {
@@ -457,11 +518,24 @@ export function createEvmAdapter(cfg: EvmChainConfig): ChainAdapter {
           return gasSigner.sendTransaction({ to: depositAddress, value: gasShortfall });
         });
         await fundTx.wait(1);
+        // log_index = -3 is a SENTINEL, and supplying it is what makes the
+        // ON CONFLICT below able to fire at all. The column is nullable and this
+        // insert used to omit it, so every gas_funding row carried NULL — and
+        // under Postgres's default NULLS DISTINCT two NULLs never conflict, which
+        // made `ON CONFLICT (tx_hash, log_index) DO NOTHING` inert. The guard read
+        // as idempotent and was not.
+        //
+        // -3 rather than 0 keeps the convention the native scanner already
+        // established (evmListener.ts uses -1 for a native transfer, and the sweep
+        // row uses -2): all negative, so none can ever collide with a real EVM log
+        // index, and each kind of bookkeeping row is distinct from the others
+        // inside the SAME transaction hash — a top-up and a sweep can in principle
+        // share one.
         await query(
           `INSERT INTO blockchain_transactions
              (payment_id, direction, tx_hash, from_address, to_address, amount, token,
-              network, status)
-           VALUES ($1, 'gas_funding', $2, $3, $4, $5, $6, $7, 'confirmed')
+              network, status, log_index)
+           VALUES ($1, 'gas_funding', $2, $3, $4, $5, $6, $7, 'confirmed', -3)
            ON CONFLICT (tx_hash, log_index) DO NOTHING`,
           [
             paymentId,

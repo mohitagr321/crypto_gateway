@@ -8,10 +8,34 @@
  *
  * Aggregates are APPROXIMATE by design:
  *   volume           = SUM(amount_received) of confirmed/swept payments
- *   pendingBalance   = SUM(amount) of waiting/confirming payments
- *   availableBalance = volume - SUM(net_amount of sent/confirmed payouts)  (>= 0)
+ *   pendingBalance   = SUM(amount) of waiting/confirming/partial payments
+ *   availableBalance = volume - SUM(gross_amount of RESERVED payouts)  (>= 0)
+ *
+ * ===================== READ THIS BEFORE TRUSTING THE NUMBERS =================
+ * They are summed ACROSS (network, asset). A merchant holding 0.4 BTC and 200
+ * USDT shows as "200.4", which is a quantity of nothing. Balances in this system
+ * are never fungible across a (network, asset) pair — getAllBalances
+ * (services/payoutService.ts) is the correct, per-pair view, and getBalanceWith
+ * is the guard that actually decides whether a payout may be created. These
+ * three fields exist for the admin-panel's client list and gate nothing in code;
+ * fixing them properly means returning a per-pair breakdown, which is a breaking
+ * change to the panel contract and is not done here.
+ *
+ * Two things WERE fixed, because they were wrong in ways that mattered even for
+ * a rough figure:
+ *   - the arithmetic was JS float over NUMERIC(38,18) strings
+ *     (Number('123456789.123456789012345678') -> 123456789.12345679). It is now
+ *     BigInt at the ledger accounting scale, like every other money path.
+ *   - `availableBalance` subtracted only `net_amount` of ('sent','confirmed')
+ *     payouts, so a payout that was requested but not yet broadcast was invisible
+ *     and the figure read HIGHER than what a payout could actually draw. It now
+ *     uses the same quantity and the same reserved-status set as the payout guard
+ *     (gross_amount over pending/processing/sent/confirmed/unresolved), so it can
+ *     only ever under-report. An operator sizing a manual payout off this number
+ *     now gets rejected by the guard less often, never more.
  */
 import { query, queryOne } from '../db/pool';
+import { fromAccountingUnits, toAccountingUnits } from '../utils/money';
 import { mapClientStatus, unmapClientStatus } from '../utils/statusMap';
 
 export interface AdminCommission {
@@ -128,27 +152,45 @@ const CLIENT_SELECT = `
      WHERE client_id = c.id AND is_active = true
      ORDER BY created_at DESC LIMIT 1
   ) com ON true
-  LEFT JOIN (
-    SELECT client_id, SUM(amount_received) AS volume
-      FROM payments WHERE status IN ('confirmed','swept')
-     GROUP BY client_id
-  ) vol ON vol.client_id = c.id
-  LEFT JOIN (
-    SELECT client_id, SUM(amount) AS pending_balance
-      FROM payments WHERE status IN ('waiting','confirming')
-     GROUP BY client_id
-  ) pend ON pend.client_id = c.id
-  LEFT JOIN (
-    SELECT client_id, SUM(net_amount) AS paid_out
-      FROM payouts WHERE status IN ('sent','confirmed')
-     GROUP BY client_id
-  ) po ON po.client_id = c.id
+  -- CORRELATED, NOT WHOLE-TABLE. These were three ungrouped subqueries that
+  -- aggregated EVERY payment and EVERY payout in the database, grouped by
+  -- client_id, and then threw all but the rows on this page away — on every
+  -- client-list page load AND on every single-client fetch. Written as LATERAL
+  -- scans correlated to c.id they are served by
+  -- idx_payments_client_network_asset_status / idx_payouts_client_* , which lead
+  -- with client_id. The values are identical: summing one client's rows is the
+  -- same number whether or not every other client was summed alongside.
+  LEFT JOIN LATERAL (
+    SELECT SUM(amount_received) AS volume
+      FROM payments
+     WHERE client_id = c.id AND status IN ('confirmed','swept')
+  ) vol ON true
+  LEFT JOIN LATERAL (
+    -- 'partial' is an underpaid payment whose funds HAVE arrived and are still
+    -- in flight toward the invoice; getAllBalances counts it as pending and this
+    -- must not disagree with it.
+    SELECT SUM(amount) AS pending_balance
+      FROM payments
+     WHERE client_id = c.id AND status IN ('waiting','confirming','partial')
+  ) pend ON true
+  LEFT JOIN LATERAL (
+    -- gross_amount over the RESERVED set, matching getBalanceWith exactly:
+    -- 'failed' is the only status that releases a reservation, and 'unresolved'
+    -- (a payout whose transaction may already be on chain) must stay reserved.
+    SELECT SUM(gross_amount) AS paid_out
+      FROM payouts
+     WHERE client_id = c.id
+       AND status IN ('pending','processing','sent','confirmed','unresolved')
+  ) po ON true
 `;
 
 function toAdminClient(row: ClientAggRow): AdminClient {
-  const volume = Number(row.volume) || 0;
-  const paidOut = Number(row.paid_out) || 0;
-  const available = volume - paidOut;
+  // BigInt at the ledger accounting scale — never a float. The inputs are
+  // NUMERIC(38,18) rendered as strings and routinely carry more significant
+  // digits than a double can hold.
+  const volumeU = toAccountingUnits(row.volume ?? '0');
+  const paidOutU = toAccountingUnits(row.paid_out ?? '0');
+  const availableU = volumeU - paidOutU;
 
   const commission: AdminCommission | null =
     row.c_id && row.c_type && row.c_value
@@ -182,9 +224,11 @@ function toAdminClient(row: ClientAggRow): AdminClient {
     payoutWallet: row.payout_wallet,
     payoutWalletTrc20: row.payout_wallet_trc20,
     commission,
-    volume: String(volume),
+    // Both rendered from the same accounting scale the arithmetic was done in,
+    // so the strings the panel formats are exactly the values that were summed.
+    volume: fromAccountingUnits(volumeU),
     pendingBalance: row.pending_balance ?? '0',
-    availableBalance: String(available < 0 ? 0 : available),
+    availableBalance: fromAccountingUnits(availableU < 0n ? 0n : availableU),
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
   };

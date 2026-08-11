@@ -167,6 +167,11 @@ export interface Utxo {
   value: bigint;
   /** Block height, or null while still in the mempool. */
   height: number | null;
+  /**
+   * Esplora's own confirmed flag. Always true for anything `listUtxos` returns;
+   * only `listAllUtxos` (diagnostics) ever hands back false.
+   */
+  confirmed: boolean;
 }
 
 export interface EsploraTxStatus {
@@ -241,20 +246,38 @@ export async function addressBalanceSats(address: string): Promise<bigint> {
  * way the server's own ordering is not promised to be.
  */
 export async function listUtxos(address: string): Promise<Utxo[]> {
+  return (await listAllUtxos(address)).filter((u) => u.confirmed);
+}
+
+/**
+ * EVERY UTXO at an address, confirmed or not, in the same deterministic order.
+ *
+ * DIAGNOSTIC ONLY. Nothing selects sweep or payout inputs from this — see
+ * listUtxos above for why an unconfirmed parent is not something this system
+ * spends. It exists so a starved input selection can tell "the wallet is empty"
+ * apart from "everything the wallet has is change from the payout broadcast a
+ * minute ago", which produce the same error text today and have opposite
+ * remedies (fund it, versus wait one block).
+ *
+ * Unconfirmed entries sort LAST. That cannot alter listUtxos' ordering — every
+ * row it returns is confirmed and so carries a height — it only keeps this view
+ * in a sensible shape.
+ */
+export async function listAllUtxos(address: string): Promise<Utxo[]> {
   const raw = await esplora<
     Array<{ txid: string; vout: number; value: number; status: EsploraTxStatus }>
   >(`/address/${address}/utxo`);
   return raw
-    .filter((u) => u.status?.confirmed)
     .map((u) => ({
       txid: u.txid,
       vout: u.vout,
       value: BigInt(u.value),
-      height: u.status.block_height ?? null,
+      height: u.status?.block_height ?? null,
+      confirmed: Boolean(u.status?.confirmed),
     }))
     .sort(
       (a, b) =>
-        (a.height ?? 0) - (b.height ?? 0) ||
+        (a.height ?? Number.MAX_SAFE_INTEGER) - (b.height ?? Number.MAX_SAFE_INTEGER) ||
         a.txid.localeCompare(b.txid) ||
         a.vout - b.vout,
     );

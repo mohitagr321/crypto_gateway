@@ -82,6 +82,21 @@ export async function recordUnexpectedDeposit(params: {
   const { network, asset, amountHuman, depositAddress, txHash } = params;
   const logIndex = params.logIndex ?? 0;
 
+  // ======================= ONE ADDRESS, TWO EVM NETWORKS =====================
+  // BEP20 and ERC20 share BIP-44 coin type 60 (see networks.ts), so HD index N
+  // is the SAME address on both chains. That is what makes an Ethereum token
+  // sent to a BSC deposit address recoverable at all — and it is also why an
+  // exact `w.network = $2` match failed to resolve one: the wallets row was
+  // minted under the network the payment was for, not the network the transfer
+  // arrived on, so the lookup returned nothing and the function bailed without
+  // writing a row. Nothing anywhere then recorded that the money existed.
+  //
+  // The ROW still records the network the transfer ACTUALLY arrived on, never
+  // the wallet's minting network, so the merchant's recovery list and
+  // `recover.ts --network=` agree about which chain to sweep on.
+  const walletNetworks =
+    network === 'BEP20' || network === 'ERC20' ? ['BEP20', 'ERC20'] : [network];
+
   try {
     // Resolve the address to a client. Only addresses WE derived are of
     // interest; a transfer to anything else is not ours to record.
@@ -103,9 +118,13 @@ export async function recordUnexpectedDeposit(params: {
          ) p ON true
         WHERE lower(w.address) = lower($1)
           AND w.type = 'deposit'
-          AND w.network = $2
+          AND w.network = ANY($2::text[])
+        ORDER BY (w.network = $3) DESC
         LIMIT 1`,
-      [depositAddress, network],
+      // The ORDER BY keeps the result deterministic when the widened match could
+      // see two rows: an exact network match always wins over its coin-type-60
+      // sibling.
+      [depositAddress, walletNetworks, network],
     );
     if (!owner || !owner.client_id) return;
 
