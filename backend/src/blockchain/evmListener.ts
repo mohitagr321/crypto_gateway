@@ -99,6 +99,225 @@ const ADDRESS_REFRESH_MS = 30_000;
 const MAX_SCAN_RANGE = 2_000;
 
 /**
+ * Where a deployment with no cursor starts the TOKEN scan: this many blocks
+ * behind the safe head. Deliberately a stated number rather than "wherever the
+ * head happens to be", because it is the answer to "how late may this process
+ * start and still see a deposit that already landed?".
+ *
+ * Kept below MAX_SCAN_RANGE so the very first pass closes the whole window in
+ * one queryFilter. 500 blocks is ~4 minutes on BSC and ~100 minutes on Ethereum
+ * — comfortably longer than the gap between an address being minted by the API
+ * and this process coming up, on either chain.
+ */
+const FRESH_CURSOR_LOOKBACK = 500;
+
+/**
+ * Say so, loudly and on a throttle, when the cursor is further behind the head
+ * than the scanner can close in ~10 passes. A cursor that is millions of blocks
+ * behind used to be invisible for days — the pass log is `debug`, so in
+ * production the process looked healthy while detecting nothing.
+ */
+const CURSOR_LAG_WARN_BLOCKS = 10 * MAX_SCAN_RANGE;
+const CURSOR_LAG_WARN_INTERVAL_MS = 60_000;
+let cursorLagWarnedAt = 0;
+
+/**
+ * How long one pass may run before this process is treated as wedged and exits
+ * for its supervisor to restart.
+ *
+ * Sized above ethers' own 300s request timeout (utils/fetch.js sets
+ * `#timeout = 300000`), so a merely slow or hanging RPC call resolves itself
+ * into an ordinary error before this fires. What it catches is the class of
+ * hang that has no timeout at all — see the enqueue section below for the one
+ * that motivated it. Exiting is safe: every write in this file is idempotent
+ * and lives in Postgres, and both supervisors (compose `restart: unless-stopped`,
+ * pm2 autorestart) bring it straight back at the persisted cursor.
+ */
+const PASS_WEDGE_LIMIT_MS = 6 * 60_000;
+
+/**
+ * ======================= ENQUEUING WITHOUT DEPENDING ON REDIS ================
+ *
+ * The chain pass used to `await` its BullMQ enqueues directly, and that awaited
+ * promise could hang FOREVER. BullMQ's connection options set
+ * `maxRetriesPerRequest: null` and leave ioredis's `enableOfflineQueue` at its
+ * default of true, so while Redis is unreachable a command is parked on an
+ * unbounded offline queue and neither settles nor rejects: the two paths that
+ * flush that queue both check for things that are not true here (a numeric
+ * maxRetriesPerRequest, and a connection closing without a retryStrategy).
+ *
+ * A try/catch cannot catch a promise that never settles. Because the enqueue
+ * sits inside updateConfirmationsAndPromote — which runs BEFORE the reorg check
+ * and before the block scan — a Redis outage stopped the listener DETECTING
+ * DEPOSITS, not just delivering webhooks. The `running` guard was then never
+ * cleared, so every later tick returned immediately and the process logged
+ * nothing at all. The damage landed on recovery: a deposit that arrived during
+ * the wedge was never recorded, its payment expired on schedule, and the expiry
+ * dropped its address out of the watch set — funds at an address nobody watches.
+ *
+ * So: every enqueue goes through `enqueueOrDefer`, which is bounded by a
+ * timeout, and anything that does not get through is HELD IN A FIFO AND RETRIED
+ * on later passes rather than dropped. Dropping would trade a wedge for silent
+ * fund stranding, which is the worse of the two.
+ *
+ * What backs this up if the process dies mid-outage and the FIFO goes with it:
+ *   - sweep — `payments.status = 'confirmed'` is the durable record. The settle
+ *     tick (workers/index.ts processSettle) re-enqueues a sweep for every
+ *     confirmed payment, every minute, forever.
+ *   - webhook — enqueueWebhook writes its `webhook_logs` row BEFORE it touches
+ *     the queue, so an undelivered event is still on the merchant's webhook log
+ *     screen with success = false.
+ * Neither is a reason to be careless here; both mean a lost enqueue is
+ * recoverable rather than invisible.
+ *
+ * A duplicate is tolerated where a miss is not: if a parked command drains on
+ * reconnect AND the retry lands, the merchant gets the same payment.confirmed
+ * twice. Webhook delivery is already at-least-once (BullMQ retries), the sweep
+ * job id dedupes, and every receiver is documented as keying on paymentId.
+ */
+type DeferredEnqueue =
+  | { kind: 'webhook'; ctx: Parameters<typeof enqueueWebhook>[0] }
+  | { kind: 'sweep'; paymentId: string };
+
+interface DeferredItem {
+  job: DeferredEnqueue;
+  deferredAt: number;
+  attempts: number;
+}
+
+/** One enqueue may block the pass for this long, and no longer. */
+const ENQUEUE_TIMEOUT_MS = 10_000;
+/**
+ * After a failure, stop touching Redis for this long. Without it a pass that
+ * promotes 50 payments would burn 50 timeouts (500s) against a dead Redis and
+ * trip the wedge watchdog — turning an outage into a restart loop.
+ */
+const ENQUEUE_BACKOFF_MS = 30_000;
+/** Cap on the held FIFO, and on how much of it one pass will drain. */
+const MAX_DEFERRED_ENQUEUES = 5_000;
+const DRAIN_PER_PASS = 500;
+/**
+ * Give up on a held enqueue after this long. Not a Redis-outage timer — six
+ * hours is far beyond any survivable outage — but a stop on an item that can
+ * never succeed (a client whose webhook_secret no longer decrypts, say) sitting
+ * in memory and in the logs forever.
+ */
+const DEFERRED_MAX_AGE_MS = 6 * 60 * 60 * 1_000;
+
+const deferredEnqueues: DeferredItem[] = [];
+let enqueueBlockedUntil = 0;
+
+/**
+ * Bound a promise that may never settle. The underlying promise is left running
+ * on purpose: if it is an ioredis command parked on the offline queue, it still
+ * lands when the connection comes back. Promise.race attaches its own handlers
+ * to it, so a late rejection is observed and cannot crash the process.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/** Hand one job to BullMQ, bounded. Throws on failure OR on timeout. */
+async function sendEnqueue(job: DeferredEnqueue): Promise<void> {
+  if (job.kind === 'webhook') {
+    await withTimeout(enqueueWebhook(job.ctx), ENQUEUE_TIMEOUT_MS, 'webhook enqueue');
+    return;
+  }
+  await withTimeout(
+    sweepQueue.add(
+      'sweep',
+      { paymentId: job.paymentId } as SweepJob,
+      { jobId: `sweep-${job.paymentId}` }, // dedupe by payment id (BullMQ forbids ':' in custom ids)
+    ),
+    ENQUEUE_TIMEOUT_MS,
+    'sweep enqueue',
+  );
+}
+
+function hold(job: DeferredEnqueue): void {
+  if (deferredEnqueues.length >= MAX_DEFERRED_ENQUEUES) {
+    logger.error(
+      { job, held: deferredEnqueues.length },
+      'deferred enqueue buffer full — dropping this enqueue. The payment row in ' +
+        'postgres is unaffected: the settle tick still re-drives sweeps from ' +
+        "status='confirmed', and an undelivered webhook still has its webhook_logs row",
+    );
+    return;
+  }
+  deferredEnqueues.push({ job, deferredAt: Date.now(), attempts: 0 });
+}
+
+/**
+ * Enqueue, or hold for a later pass. NEVER throws and never blocks longer than
+ * ENQUEUE_TIMEOUT_MS, so a caller in the chain path can await it safely.
+ *
+ * Holding while the FIFO is non-empty (rather than sending straight through) is
+ * what keeps events for one payment in order: a `payment.confirming` stuck in
+ * the queue must not be overtaken by the `payment.confirmed` that follows it.
+ */
+async function enqueueOrDefer(job: DeferredEnqueue): Promise<void> {
+  if (deferredEnqueues.length > 0 || Date.now() < enqueueBlockedUntil) {
+    hold(job);
+    return;
+  }
+  try {
+    await sendEnqueue(job);
+  } catch (err) {
+    enqueueBlockedUntil = Date.now() + ENQUEUE_BACKOFF_MS;
+    logger.error({ err, job }, 'enqueue failed or timed out — held for retry, chain pass continues');
+    hold(job);
+  }
+}
+
+/**
+ * Retry held enqueues, oldest first. Called once per reconciler pass, after the
+ * chain work, and never from the native loop — a single drainer means the shift
+ * below cannot race another and send the same job twice.
+ */
+async function drainDeferredEnqueues(): Promise<void> {
+  if (deferredEnqueues.length === 0 || Date.now() < enqueueBlockedUntil) return;
+
+  const held = deferredEnqueues.length;
+  let sent = 0;
+  while (deferredEnqueues.length > 0 && sent < DRAIN_PER_PASS) {
+    const item = deferredEnqueues[0];
+    if (Date.now() - item.deferredAt > DEFERRED_MAX_AGE_MS) {
+      deferredEnqueues.shift();
+      logger.error(
+        { job: item.job, attempts: item.attempts, ageMs: Date.now() - item.deferredAt },
+        'held enqueue abandoned after repeated failures — needs an operator; ' +
+          'the payment and webhook_logs rows in postgres still describe it',
+      );
+      continue;
+    }
+    try {
+      await sendEnqueue(item.job);
+    } catch (err) {
+      item.attempts += 1;
+      enqueueBlockedUntil = Date.now() + ENQUEUE_BACKOFF_MS;
+      // Nothing is discarded on failure. After a few attempts the item goes to
+      // the BACK instead of staying at the head, so one permanently-failing job
+      // cannot hold up every job behind it once Redis is healthy again.
+      if (item.attempts >= 3) deferredEnqueues.push(deferredEnqueues.shift()!);
+      logger.error(
+        { err, held: deferredEnqueues.length, attempts: item.attempts },
+        'held enqueue still failing; retrying on a later pass',
+      );
+      return;
+    }
+    deferredEnqueues.shift();
+    sent += 1;
+  }
+  logger.info({ sent, held, remaining: deferredEnqueues.length }, 'drained held enqueues');
+}
+
+/**
  * ============================ NATIVE (BNB) DETECTION =========================
  * A BNB transfer emits NOTHING. There is no contract, so there is no `Transfer`
  * log to filter — the entire log-based mechanism above is blind to it. The only
@@ -270,10 +489,15 @@ async function recordIncoming(params: {
 
   // Emit 'payment.confirming' exactly once — only when this incoming transfer
   // actually moved the payment out of 'waiting'.
+  //
+  // Not awaited, exactly as before — detection must not wait on a queue — but it
+  // now goes through enqueueOrDefer, so an unreachable Redis holds it for retry
+  // instead of parking it on an unbounded offline queue that never settles.
   if (payment.status === 'waiting') {
-    enqueueWebhook({ paymentId: payment.id, event: 'payment.confirming' }).catch(
-      (err) => logger.warn({ err, paymentId: payment.id }, 'confirming webhook enqueue failed'),
-    );
+    void enqueueOrDefer({
+      kind: 'webhook',
+      ctx: { paymentId: payment.id, event: 'payment.confirming' },
+    });
   }
 }
 
@@ -432,6 +656,23 @@ async function scanNativeTransfers(
 }
 
 /**
+ * Advance (or initialise) the TOKEN scanner's cursor for this chain.
+ *
+ * An upsert rather than a bare UPDATE, matching the native path. The seed rows
+ * in sql/schema.sql cover today's networks, but a chain added by a later
+ * migration that forgot its seed would make every write here affect zero rows —
+ * and a cursor that never advances rescans the same range forever while the
+ * head runs away from it.
+ */
+async function writeTokenCursor(block: number): Promise<void> {
+  await query(
+    `INSERT INTO chain_cursor (network, last_scanned_block) VALUES ($1, $2)
+     ON CONFLICT (network) DO UPDATE SET last_scanned_block = EXCLUDED.last_scanned_block`,
+    [cfg.network, block],
+  );
+}
+
+/**
  * Reconciler: scan a bounded range behind the head, update confirmations, promote
  * to confirmed, detect reorgs, and advance the cursor.
  */
@@ -443,7 +684,41 @@ async function reconcileOnce(): Promise<void> {
   const cursorRow = await queryOne<{ last_scanned_block: string }>(
     `SELECT last_scanned_block FROM chain_cursor WHERE network = '${cfg.network}'`,
   );
-  const lastScanned = Number(cursorRow?.last_scanned_block ?? 0);
+  let lastScanned = Number(cursorRow?.last_scanned_block ?? 0);
+
+  if (lastScanned <= 0) {
+    // A fresh deployment has no cursor, and 0 was being taken LITERALLY: the
+    // token scan started at block 1 and walked forward MAX_SCAN_RANGE per 5s
+    // pass — 400 blocks/s against a chain producing ~2/s. On a BSC deployment
+    // at block ~60M that is ~42 hours of scanning empty history while real
+    // payments land at the head, unseen; with BSC_WS_RPC unset (supported, see
+    // startWsSubscription) there is no other detection path at all.
+    //
+    // 0 means UNINITIALISED here, never "scanned to genesis" — chain_cursor
+    // seeds every network at 0 (sql/schema.sql) and no chain this gateway
+    // settles on has a payment in block 0. The native scanner below has always
+    // read it that way; the token scanner simply never got the same guard.
+    //
+    // Persisted IMMEDIATELY, before any scanning. If this pass then fails on a
+    // dead RPC or a rejected queryFilter, the next one resumes from the block
+    // we chose; re-deriving it from a head that has moved on would leave the
+    // blocks in between scanned by nobody.
+    lastScanned = Math.max(0, safeHead - FRESH_CURSOR_LOOKBACK);
+    await writeTokenCursor(lastScanned);
+    logger.warn(
+      { network: cfg.network, safeHead, startFrom: lastScanned + 1, lookback: FRESH_CURSOR_LOOKBACK },
+      'token scan cursor was uninitialised — starting near the chain head, not at genesis',
+    );
+  } else {
+    const behind = safeHead - lastScanned;
+    if (behind > CURSOR_LAG_WARN_BLOCKS && Date.now() - cursorLagWarnedAt > CURSOR_LAG_WARN_INTERVAL_MS) {
+      cursorLagWarnedAt = Date.now();
+      logger.warn(
+        { network: cfg.network, behind, lastScanned, safeHead },
+        'token scan cursor is far behind the chain head — deposits in the gap are not detected yet',
+      );
+    }
+  }
 
   // 1) Update confirmations + promote confirmed for all pending incoming txs.
   await updateConfirmationsAndPromote(head);
@@ -510,11 +785,11 @@ async function reconcileOnce(): Promise<void> {
 
   // Re-run promotion for anything just discovered, then advance the cursor.
   await updateConfirmationsAndPromote(head);
-  await query(
-    `UPDATE chain_cursor SET last_scanned_block = $1 WHERE network = '${cfg.network}'`,
-    [scanTo],
+  await writeTokenCursor(scanTo);
+  logger.debug(
+    { fromBlock, scanTo, head, behind: safeHead - scanTo },
+    'reconciler pass complete',
   );
-  logger.debug({ fromBlock, scanTo, head }, 'reconciler pass complete');
 }
 
 /**
@@ -599,7 +874,7 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
         AND bt.direction = 'incoming'
         AND bt.status = 'pending'
         AND bt.network = '${cfg.network}'
-        AND p.status = 'confirming'`,
+        AND p.status IN ('confirming', 'partial')`,
     [head],
   );
 
@@ -619,11 +894,26 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
   // comparison is exact rather than floating point, and "close enough" on the
   // amount a customer owes is a business decision for the operator to make
   // explicitly, not a default to inherit silently.
+  //
+  // `partial` IS SELECTED HERE, not just `confirming`, and that is what makes
+  // the underpayment hold recoverable rather than terminal. The first version of
+  // the amount gate matched `p.status = 'confirming'` alone, so once a payment
+  // was parked at `partial` nothing could ever select it again: the customer's
+  // top-up was recorded (recordIncoming accepts `partial`), amount_received grew
+  // past `amount`, and the payment still sat at `partial` forever — never
+  // promoted, never swept, never expired, showing on the merchant's balance
+  // strip as `pending` (payoutService getAllBalances) with no mechanism anywhere
+  // that could move it. That is a fully-paid invoice whose funds stay at the
+  // deposit address, which is worse than the underpayment bug it replaced.
+  //
+  // A settled `partial` costs nothing to re-check: the partial branch below
+  // marks its incoming rows `confirmed`, so a payment with no NEW money has no
+  // `pending` row left to join against and never reappears in this result.
   const ready = await query<{ id: string; tx_hash: string | null; fully_paid: boolean }>(
     `SELECT p.id, p.tx_hash, (p.amount_received >= p.amount) AS fully_paid
        FROM payments p
        JOIN blockchain_transactions bt ON bt.payment_id = p.id
-      WHERE p.status = 'confirming'
+      WHERE p.status IN ('confirming', 'partial')
         AND bt.direction = 'incoming'
         AND bt.status = 'pending'
         AND bt.network = '${cfg.network}'
@@ -637,11 +927,27 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
     // no sweep. It stays open, and recordIncoming already accepts `partial` in
     // its WHERE clause, so a top-up transfer to the same deposit address
     // re-enters this path and settles it properly once the balance is covered.
+    //
+    // Re-entrant on `partial` as well as `confirming`: a top-up that STILL does
+    // not cover the invoice lands here a second time, and the point of running
+    // the statement again is the blockchain_transactions update below — the new
+    // incoming row has to leave `pending`, or it would re-select this payment on
+    // every pass forever.
     if (!p.fully_paid) {
+      // `amount_received < amount` is re-tested HERE, inside the write, rather
+      // than trusted from the SELECT above. This listener records transfers from
+      // the live WS subscription as well as from the reconciler pass, so a
+      // top-up can land between the two statements: the SELECT reads underpaid,
+      // the WS handler credits the balance, and the write would then freeze a
+      // now fully-paid invoice as `partial`. Losing the race is harmless — zero
+      // rows means the payment is already covered, its transfer rows are still
+      // `pending`, and the next pass promotes it properly. Matched to the same
+      // guard in tronListener/bitcoinListener so all three behave identically.
       const marked = await query<{ id: string; amount: string; amount_received: string }>(
         `UPDATE payments
             SET status = 'partial'
-          WHERE id = $1 AND status = 'confirming'
+          WHERE id = $1 AND status IN ('confirming', 'partial')
+            AND amount_received < amount
           RETURNING id, amount, amount_received`,
         [p.id],
       );
@@ -670,11 +976,14 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
       continue;
     }
 
-    // Promote confirming -> confirmed (guarded so it fires exactly once).
+    // Promote confirming/partial -> confirmed (guarded so it fires exactly
+    // once). `partial` is included because that is precisely the topped-up case:
+    // the customer covered the shortfall, so the hold is released and the
+    // payment settles down the ordinary path from here — webhook, sweep, payout.
     const promoted = await query<{ id: string }>(
       `UPDATE payments
           SET status = 'confirmed', confirmed_at = now()
-        WHERE id = $1 AND status = 'confirming'
+        WHERE id = $1 AND status IN ('confirming', 'partial')
         RETURNING id`,
       [p.id],
     );
@@ -691,21 +1000,18 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
 
     logger.info({ paymentId: p.id }, 'payment confirmed');
 
-    // Side effects (idempotent enqueues): webhook + sweep.
-    try {
-      await enqueueWebhook({ paymentId: p.id, event: 'payment.confirmed' });
-    } catch (err) {
-      logger.error({ err, paymentId: p.id }, 'failed to enqueue confirmed webhook');
-    }
-    try {
-      await sweepQueue.add(
-        'sweep',
-        { paymentId: p.id } as SweepJob,
-        { jobId: `sweep-${p.id}` }, // dedupe by payment id (BullMQ forbids ':' in custom ids)
-      );
-    } catch (err) {
-      logger.error({ err, paymentId: p.id }, 'failed to enqueue sweep job');
-    }
+    // Side effects (idempotent enqueues): webhook + sweep, in that order.
+    //
+    // Both go through enqueueOrDefer. These two awaits were the wedge: they sat
+    // in front of reorg detection and the block scan, and an enqueue against an
+    // unreachable Redis never settles, so a Redis outage stopped this listener
+    // seeing new deposits. They are now bounded and, when Redis is down, held
+    // for a later pass rather than abandoned.
+    await enqueueOrDefer({
+      kind: 'webhook',
+      ctx: { paymentId: p.id, event: 'payment.confirmed' },
+    });
+    await enqueueOrDefer({ kind: 'sweep', paymentId: p.id });
   }
 }
 
@@ -774,15 +1080,58 @@ async function detectReorgs(head: number): Promise<void> {
             AND status IN ('confirmed','confirming')`,
         [c.payment_id],
       );
-      enqueueWebhook({
-        paymentId: c.payment_id,
-        event: 'payment.reverted',
-        overrides: { status: 'waiting', txHash: null },
-      }).catch((err) =>
-        logger.warn({ err, paymentId: c.payment_id }, 'reverted webhook enqueue failed'),
-      );
+      // Not awaited (reorg handling must not wait on a queue), but held rather
+      // than parked if Redis is unreachable — see enqueueOrDefer.
+      void enqueueOrDefer({
+        kind: 'webhook',
+        ctx: {
+          paymentId: c.payment_id,
+          event: 'payment.reverted',
+          overrides: { status: 'waiting', txHash: null },
+        },
+      });
     }
   }
+}
+
+/**
+ * Run `pass` on the reconcile interval, never overlapping, with a watchdog on
+ * the guard itself.
+ *
+ * The guard is cleared only in `finally`, so a pass that never settles used to
+ * silence the loop permanently: every later tick returned at `if (running)` and
+ * the process printed nothing — not an error, not a pass-complete line — while
+ * deposits went undetected. A guard that has been held far longer than any pass
+ * can legitimately take is that state, and the only honest reading of it is
+ * that this process can no longer make progress.
+ *
+ * So it exits rather than trying to force the guard: the wedged work is still
+ * out there holding whatever it holds, and the state it would have written is
+ * derived from Postgres on the next boot anyway.
+ */
+function startPassLoop(label: string, pass: () => Promise<void>): void {
+  let running = false;
+  let startedAt = 0;
+  setInterval(() => {
+    if (running) {
+      const stuckMs = Date.now() - startedAt;
+      if (stuckMs > PASS_WEDGE_LIMIT_MS) {
+        logger.fatal(
+          { label, stuckMs, chain: cfg.label, network: cfg.network },
+          'listener pass wedged — exiting so the supervisor restarts this process',
+        );
+        process.exit(1);
+      }
+      return;
+    }
+    running = true;
+    startedAt = Date.now();
+    pass()
+      .catch((err) => logger.error({ err }, `${label} pass failed`))
+      .finally(() => {
+        running = false;
+      });
+  }, RECONCILE_INTERVAL_MS);
 }
 
 /**
@@ -842,16 +1191,17 @@ export async function runEvmListener(chain: EvmChainConfig): Promise<void> {
   await startWsSubscription();
 
   // Reconciler loop (serialized: never overlap passes).
-  let running = false;
-  setInterval(() => {
-    if (running) return;
-    running = true;
-    reconcileOnce()
-      .catch((err) => logger.error({ err }, 'reconciler pass failed'))
-      .finally(() => {
-        running = false;
-      });
-  }, RECONCILE_INTERVAL_MS);
+  startPassLoop('reconciler', async () => {
+    try {
+      await reconcileOnce();
+    } finally {
+      // In a `finally` because the two failures are independent: a dead RPC
+      // must not also stop held webhooks and sweeps from going out once Redis
+      // is back. drainDeferredEnqueues swallows its own errors, so this cannot
+      // mask a reconcile failure.
+      await drainDeferredEnqueues();
+    }
+  });
 
   // Native loop, on its own timer and its own guard. Deliberately NOT chained to
   // the token pass: block scanning is the slower of the two, and running them in
@@ -863,20 +1213,21 @@ export async function runEvmListener(chain: EvmChainConfig): Promise<void> {
       { asset: native.symbol, chain: cfg.label, scanRange: cfg.nativeScanRange },
       'native coin accepted on this chain; block scanning enabled',
     );
-    let nativeRunning = false;
-    setInterval(() => {
-      if (nativeRunning) return;
-      nativeRunning = true;
-      reconcileNativeOnce()
-        .catch((err) => logger.error({ err }, 'native reconciler pass failed'))
-        .finally(() => {
-          nativeRunning = false;
-        });
-    }, RECONCILE_INTERVAL_MS);
+    startPassLoop('native reconciler', reconcileNativeOnce);
   }
 
   const shutdown = async (signal: string) => {
     logger.info({ signal, chain: cfg.label }, 'shutting down listener');
+    // Held enqueues live in memory and do not survive this. Say so on the way
+    // out rather than letting them disappear quietly — what recovers them is
+    // named here so nobody has to go looking for it.
+    if (deferredEnqueues.length > 0) {
+      logger.error(
+        { held: deferredEnqueues.length, chain: cfg.label },
+        'exiting with enqueues still held for redis — the settle tick re-drives sweeps ' +
+          "from payments.status='confirmed', and each undelivered webhook has a webhook_logs row",
+      );
+    }
     await pool.end().catch(() => undefined);
     process.exit(0);
   };

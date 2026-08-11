@@ -106,6 +106,15 @@ export interface Commission {
   // Present only when type === 'tiered'.
   tiers?: CommissionTier[] | null;
   feePayer: FeePayer;
+  /**
+   * Denomination of the AMOUNTS in this commission — the fixed value and every
+   * tier bound. Null on a percentage rate, which has none. Settlement now
+   * REFUSES an amount-denominated commission whose asset is not the one being
+   * settled, so this is the field that explains a skipped payout.
+   */
+  asset?: string | null;
+  /** Chain this commission is scoped to. Null = every chain. */
+  network?: string | null;
   note?: string;
   version?: number;
   createdAt?: string;
@@ -120,6 +129,14 @@ export interface SetCommissionInput {
   // Provide for tiered.
   tiers?: CommissionTier[];
   feePayer: FeePayer;
+  /**
+   * Denomination for a fixed/tiered commission. Omitted -> USDT, which is what
+   * a bare number always meant. On a deployment that does not settle USDT this
+   * must be set, or every amount-denominated fee is rejected at settlement.
+   */
+  asset?: string;
+  /** Restrict this commission to one chain. Omitted -> every chain. */
+  network?: string;
   note?: string;
 }
 
@@ -172,7 +189,16 @@ export interface Transaction {
 }
 
 // ---- Payouts ----
-export type PayoutStatus = 'queued' | 'processing' | 'sent' | 'failed';
+/**
+ * `unresolved` is passed through from the backend untouched (mapPayoutStatusAdmin
+ * only rewrites pending/confirmed). It means the broadcast threw and nobody
+ * knows whether the transaction landed: the merchant's balance stays reserved,
+ * no automation will touch the row again, and an operator must check the
+ * explorer and settle it by hand. Omitting it from this union did not hide the
+ * row — the API still returned it — it just left the one payout state that needs
+ * a person outside the type that describes payout states.
+ */
+export type PayoutStatus = 'queued' | 'processing' | 'sent' | 'failed' | 'unresolved';
 
 export interface Payout {
   id: string;
@@ -218,6 +244,12 @@ export interface WebhookLog {
 export interface CommissionBalance {
   /** Chain these figures pertain to. Commission is held per chain. */
   network?: string;
+  /**
+   * Asset these figures pertain to. A chain holds a SEPARATE pool per asset —
+   * BNB commission is not spendable as USDT — so (network, asset) is the unit,
+   * not network alone. Keyed on, labelled and withdrawn against as a pair.
+   */
+  asset?: string;
   accrued: string;
   withdrawn: string;
   available: string;
@@ -235,6 +267,8 @@ export interface AdminWithdrawal {
   toAddress: string;
   /** Chain this withdrawal settles on. */
   network?: string;
+  /** Asset withdrawn. A chain has one pool per asset; the chain alone is ambiguous. */
+  asset?: string;
   txHash: string | null;
   status: 'pending' | 'processing' | 'sent' | 'confirmed' | 'failed';
   error: string | null;

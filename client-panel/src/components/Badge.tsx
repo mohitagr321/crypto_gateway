@@ -133,6 +133,11 @@ const payoutTone: Record<PayoutStatus, Tone> = {
   processing: 'waiting',
   sent: 'waiting',
   confirmed: 'settled',
+  // `unresolved` is not `waiting`: nothing will move it on by itself. The
+  // transfer may or may not be on chain, the balance stays reserved either way,
+  // and it takes an operator to settle it — so it reads as needing attention
+  // rather than as something in flight.
+  unresolved: 'failed',
   failed: 'failed',
 };
 

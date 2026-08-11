@@ -399,9 +399,10 @@ router.get(
       value: string;
       tiers: unknown;
       network_fee_payer: string;
+      asset: string | null;
       created_at: string;
     }>(
-      `SELECT type, value, tiers, network_fee_payer, created_at
+      `SELECT type, value, tiers, network_fee_payer, asset, created_at
          FROM commissions
         WHERE client_id = $1 AND is_active = true
         ORDER BY created_at DESC
@@ -428,7 +429,14 @@ router.get(
       ...(isPercentage || isTiered ? {} : { fixedFee: row.value }),
       ...(isTiered ? { tiers: row.tiers ?? [] } : {}),
       networkFeePaidBy: row.network_fee_payer,
-      currency: 'USDT',
+      // The denomination the fee is actually written in, not a hardcoded 'USDT'.
+      // A fixed or tiered commission carries amounts and those amounts belong to
+      // one asset; telling a merchant on a BTC-denominated fee that it is in
+      // USDT is the same mistake that let the number be applied to whatever
+      // asset arrived. A percentage rate has no denomination — it applies to
+      // every asset — so it keeps reporting USDT, which is what this field has
+      // always meant for a percent and what the panel renders alongside it.
+      currency: isPercentage ? 'USDT' : (row.asset ?? 'USDT'),
       effectiveFrom: new Date(row.created_at).toISOString(),
     });
   }),

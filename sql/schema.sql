@@ -30,7 +30,13 @@ DO $$ BEGIN
   CREATE TYPE payment_status    AS ENUM ('waiting','confirming','confirmed','partial','failed','expired','swept');
   CREATE TYPE commission_type   AS ENUM ('percentage','fixed','tiered');
   CREATE TYPE fee_payer         AS ENUM ('client','admin');
-  CREATE TYPE payout_status     AS ENUM ('pending','processing','sent','confirmed','failed');
+  -- `unresolved` (migration 015): the broadcast threw, and we do not know
+  -- whether the transaction reached the chain. It is a LIVE status — it holds
+  -- the merchant's reservation exactly like `sent` — and it is terminal for
+  -- automation. `failed` is a RELEASE, and releasing on "unknown" is how the
+  -- same money got sent twice. Only a human, having checked the explorer, moves
+  -- an unresolved row on.
+  CREATE TYPE payout_status     AS ENUM ('pending','processing','sent','confirmed','failed','unresolved');
   CREATE TYPE payout_type       AS ENUM ('auto','manual');
   CREATE TYPE tx_direction      AS ENUM ('incoming','sweep','payout','gas_funding');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -357,6 +363,13 @@ CREATE INDEX idx_payments_client   ON payments(client_id);
 CREATE INDEX idx_payments_status   ON payments(status);
 CREATE INDEX idx_payments_address  ON payments(deposit_address);
 CREATE INDEX idx_payments_expires  ON payments(expires_at) WHERE status IN ('waiting','confirming');
+-- The settle tick's late-deposit reaper reads the on-chain balance of deposit
+-- addresses whose payment recently EXPIRED, so funds that arrive after expiry
+-- stop being invisible. idx_payments_expires deliberately excludes `expired`,
+-- and without this the reaper would walk every payment that ever expired, once
+-- a minute, forever.
+CREATE INDEX idx_payments_expired_recent
+  ON payments(expires_at DESC) WHERE status = 'expired';
 CREATE INDEX idx_payments_created  ON payments(created_at DESC);
 -- Each per-network listener scans its own (network, status) slice.
 CREATE INDEX idx_payments_network_status ON payments(network, status);
@@ -568,6 +581,12 @@ CREATE INDEX idx_btx_to      ON blockchain_transactions(to_address);
 CREATE INDEX idx_btx_block   ON blockchain_transactions(block_number);
 CREATE INDEX idx_btx_network ON blockchain_transactions(network);
 CREATE INDEX idx_btx_network_asset ON blockchain_transactions(network, asset);
+-- The operator's commission position is `collected sweeps - client owed`, read
+-- per (network, asset) on every admin dashboard load. This is the expensive leg:
+-- idx_btx_network_asset does not cover the direction/status predicate.
+CREATE INDEX idx_btx_sweep_network_asset
+  ON blockchain_transactions(network, asset)
+  WHERE direction = 'sweep' AND status = 'confirmed';
 
 -- ---------- unexpected_deposits (wrong-asset recovery) -----------------------
 -- A known asset that arrived at a deposit address expecting a DIFFERENT one.
@@ -616,7 +635,20 @@ CREATE TABLE commissions (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id      UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
   type           commission_type NOT NULL,         -- percentage | fixed | tiered
-  value          NUMERIC(38,18) NOT NULL,          -- percent (e.g. 1.5) or fixed USDT; 0 when tiered
+  value          NUMERIC(38,18) NOT NULL,          -- percent (e.g. 1.5) or a fixed amount in `asset`; 0 when tiered
+  -- Denomination of every AMOUNT in this row: the fixed `value`, and each tier's
+  -- bounds and fixed value (migration 015). NULL only for a pure percentage
+  -- rate, which genuinely has no denomination — 1% of a gross is 1% whatever the
+  -- gross is in. Without this column the number was applied verbatim to whatever
+  -- asset the payment arrived in, so a `fixed 1` meaning one dollar took one
+  -- whole Bitcoin off a BTC settlement. computeSplit refuses to apply an
+  -- amount-denominated commission to a settlement in a different asset; there is
+  -- no price oracle here and reinterpreting the number is the bug.
+  asset          TEXT,
+  -- Chain this commission applies to. NULL = every chain. getActiveCommission
+  -- picks the most specific active row: (network, asset), then network, then
+  -- asset, then client-wide.
+  network        TEXT,
   -- When type = 'tiered', this holds an ordered array of slabs, each:
   --   { "minAmount": "0", "maxAmount": "10", "type": "fixed", "value": "1" }
   --   { "minAmount": "10", "maxAmount": "1000", "type": "percentage", "value": "1" }
@@ -626,9 +658,16 @@ CREATE TABLE commissions (
   network_fee_payer fee_payer NOT NULL DEFAULT 'client',
   is_active      BOOLEAN NOT NULL DEFAULT true,
   created_by     UUID REFERENCES users(id),
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- An amount-denominated commission must say what it is in. A bare number is
+  -- what turned a one-dollar fee into one Bitcoin.
+  CONSTRAINT chk_commissions_denomination
+    CHECK (type = 'percentage' OR asset IS NOT NULL)
 );
 CREATE INDEX idx_commissions_client_active ON commissions(client_id) WHERE is_active;
+-- getActiveCommission filters on (client_id, network, asset) among active rows.
+CREATE INDEX idx_commissions_client_scope
+  ON commissions(client_id, network, asset) WHERE is_active;
 
 -- ---------- payouts / settlements --------------------------------------------
 CREATE TABLE payouts (
@@ -668,6 +707,26 @@ CREATE INDEX idx_payouts_client_network_status
   ON payouts(client_id, network, status);
 CREATE INDEX idx_payouts_status  ON payouts(status);
 CREATE INDEX idx_payouts_network ON payouts(network);
+CREATE INDEX idx_payouts_network_asset_status ON payouts(network, asset, status);
+
+-- One live payout per payment, enforced by the database (migration 015).
+--
+-- The settle tick recreates a payout when it sees none in a live status. When a
+-- broadcast payout was wrongly released as `failed`, that guard minted a SECOND
+-- payout with a fresh nonce and no stored signed bytes, so every re-broadcast
+-- defence in chainBroadcast.ts fell through vacuously and both transactions
+-- landed. This index is the backstop for a predicate that forgets a status.
+-- `failed` is excluded because a payout that provably never reached the wire is
+-- meant to be retried by creating a fresh row; manual payouts carry no
+-- payment_id and are unconstrained.
+CREATE UNIQUE INDEX uq_payouts_active_payment
+  ON payouts(payment_id)
+  WHERE payment_id IS NOT NULL AND status <> 'failed';
+
+-- The operator queue: "what is stuck and needs a human?", ordered by age.
+CREATE INDEX idx_payouts_needs_operator
+  ON payouts(created_at)
+  WHERE status IN ('unresolved', 'processing');
 
 COMMENT ON COLUMN payouts.asset IS
   'Asset settled. Balances are per (client, network, asset) — a USDC payout can '
@@ -702,6 +761,8 @@ CREATE TABLE admin_withdrawals (
   broadcast_at  TIMESTAMPTZ
 );
 CREATE INDEX idx_admin_withdrawals_status ON admin_withdrawals(status);
+CREATE INDEX idx_admin_withdrawals_network_asset_status
+  ON admin_withdrawals(network, asset, status);
 
 -- ---------- webhook_logs -----------------------------------------------------
 CREATE TABLE webhook_logs (

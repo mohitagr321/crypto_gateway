@@ -87,6 +87,13 @@ const STATUS_TONE: Record<string, Tone> = {
   queued: 'waiting',
   processing: 'waiting',
   sent: 'waiting',
+  // `unresolved`: the broadcast threw and we do not know whether the transaction
+  // reached the chain. Deliberately NOT 'waiting' — nothing automatic will ever
+  // move it on, and a row that looks like it is merely queued is a row nobody
+  // opens. It needs a human to check the explorer, so it gets the tone that
+  // demands attention. Falling through to 'neutral' would have made the one
+  // payout state that requires action the quietest thing on the screen.
+  unresolved: 'failed',
   // webhook / generic
   success: 'settled',
   true: 'settled',

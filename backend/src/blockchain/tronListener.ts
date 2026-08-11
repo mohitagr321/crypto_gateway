@@ -15,6 +15,20 @@
  *      omits it), record it, and drive the payment state machine identically to
  *      the BEP20 path: waiting -> confirming -> confirmed -> (sweep).
  *
+ * ============================ TWO TICKS, NOT ONE =============================
+ * Step 2 is O(watched addresses) HTTP requests and step 3's promotion half is
+ * pure SQL over rows step 2 already wrote. They used to be one sequential pass,
+ * which coupled them in the worst possible direction: with enough open payments
+ * the address scan overran its interval, and because promotion was the LAST
+ * statement of the pass, confirmations, `payment.confirmed` webhooks and sweep
+ * enqueues fell behind by exactly as much. They are now two independent
+ * intervals with independent guards, so settlement keeps advancing while a long
+ * scan is in flight — and a TronGrid outage on the block-head read no longer
+ * stops deposit DETECTION as well.
+ *
+ * The scan itself runs a bounded window of addresses in parallel against a
+ * per-pass deadline, least-recently-scanned first. See scanAddresses().
+ *
  * FINALITY / REORGS: `only_confirmed=true` returns transactions in *solidified*
  * blocks, which on Tron are irreversible. Combined with a healthy
  * TRON_REQUIRED_CONFIRMATIONS (~19), a recorded TRC20 deposit never needs the
@@ -55,6 +69,40 @@ const POLL_INTERVAL_MS = 5_000;
 const ADDRESS_REFRESH_MS = 30_000;
 
 /**
+ * Deadline on every outbound TronGrid call.
+ *
+ * These used to be bare `await fetch(...)`. undici applies no total-request
+ * timeout, so one socket that opened and then went quiet held the pass open
+ * forever; the in-flight guard on the tick then meant the listener simply stopped
+ * polling — silently, with no log line — while deposits kept arriving. This
+ * mirrors the 15s deadline bitcoin.ts has always had on Esplora.
+ */
+const HTTP_TIMEOUT_MS = 15_000;
+
+/**
+ * How many addresses are scanned concurrently.
+ *
+ * Deliberately a small window rather than a Promise.all over the whole watch
+ * set: TronGrid rate-limits hard, and firing thousands of requests at once earns
+ * a 429 storm that detects nothing at all. The free quota without an API key is
+ * small enough that even a modest window is too much, so the width is keyed off
+ * whether a key is configured.
+ */
+const SCAN_CONCURRENCY = config.tron.apiKey ? 8 : 3;
+
+/**
+ * How long one address-scan pass may run before it stops and hands over to the
+ * next tick.
+ *
+ * The deadline is what keeps the listener responsive when the watch set is
+ * larger than one pass can cover: rather than a single pass running for minutes
+ * (blocking every subsequent tick behind the `scanning` guard), each pass does a
+ * bounded amount of work and the NEXT one picks up where this one left off —
+ * see the least-recently-scanned ordering in scanAddresses().
+ */
+const PASS_DEADLINE_MS = POLL_INTERVAL_MS * 6;
+
+/**
  * How far back to ask TronGrid for transfers to a given address.
  *
  * A FIXED window is wrong here: if this process is down longer than the window,
@@ -72,6 +120,14 @@ const MAX_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000; // 30d
 
 /** Watched deposit addresses -> the epoch ms floor to query from. */
 const depositAddresses = new Map<string, number>();
+
+/**
+ * Address -> epoch ms of its last completed scan.
+ *
+ * Only used to order the next pass. Pruned to the watch set on every pass, so it
+ * cannot outgrow `depositAddresses`.
+ */
+const lastScannedAt = new Map<string, number>();
 
 interface TrongridTrc20Tx {
   transaction_id: string;
@@ -151,6 +207,55 @@ async function refreshDepositAddresses(): Promise<void> {
 }
 
 /**
+ * One TronGrid GET, aborted at HTTP_TIMEOUT_MS.
+ *
+ * The abort covers the body read as well as the headers, which matters: a
+ * response that starts and then stalls mid-stream is the same unbounded hang as
+ * one that never answers.
+ */
+async function trongrid<T>(url: string, what: string): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      headers: config.tron.apiKey ? { 'TRON-PRO-API-KEY': config.tron.apiKey } : {},
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      throw new Error(`TronGrid ${res.status} ${res.statusText} for ${what}`);
+    }
+    return (await res.json()) as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Bound a promise that cannot be aborted from the outside — tronweb builds its
+ * own HTTP client and exposes no signal.
+ *
+ * The underlying request is left to finish and its result discarded. That is
+ * accepted: the point is not to cancel the work, it is that one stuck call can
+ * no longer hold the whole pass open.
+ */
+async function withDeadline<T>(p: Promise<T>, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${what} exceeded ${HTTP_TIMEOUT_MS}ms`)),
+          HTTP_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * TronGrid REST call for inbound, solidified TRC20 transfers of ONE asset to one
  * address.
  *
@@ -171,13 +276,10 @@ async function fetchInboundTransfers(
     `?only_to=true&only_confirmed=true&limit=50&order_by=block_timestamp,desc` +
     `&contract_address=${asset.contract}&min_timestamp=${minTs}`;
 
-  const res = await fetch(url, {
-    headers: config.tron.apiKey ? { 'TRON-PRO-API-KEY': config.tron.apiKey } : {},
-  });
-  if (!res.ok) {
-    throw new Error(`TronGrid ${res.status} ${res.statusText} for ${address}`);
-  }
-  const body = (await res.json()) as { data?: TrongridTrc20Tx[]; success?: boolean };
+  const body = await trongrid<{ data?: TrongridTrc20Tx[]; success?: boolean }>(
+    url,
+    `${address} (${asset.symbol})`,
+  );
   return Array.isArray(body.data) ? body.data : [];
 }
 
@@ -201,13 +303,7 @@ async function fetchInboundNative(
     `?only_to=true&only_confirmed=true&limit=50&order_by=block_timestamp,desc` +
     `&min_timestamp=${minTs}`;
 
-  const res = await fetch(url, {
-    headers: config.tron.apiKey ? { 'TRON-PRO-API-KEY': config.tron.apiKey } : {},
-  });
-  if (!res.ok) {
-    throw new Error(`TronGrid ${res.status} ${res.statusText} for ${address} (native)`);
-  }
-  const body = (await res.json()) as { data?: TrongridNativeTx[] };
+  const body = await trongrid<{ data?: TrongridNativeTx[] }>(url, `${address} (native)`);
   const rows = Array.isArray(body.data) ? body.data : [];
 
   const out: NativeTransfer[] = [];
@@ -263,7 +359,10 @@ async function fetchInboundNative(
  */
 async function blockNumberOf(txHash: string): Promise<number | null> {
   try {
-    const info = (await tronClient().trx.getTransactionInfo(txHash)) as {
+    const info = (await withDeadline(
+      tronClient().trx.getTransactionInfo(txHash),
+      `getTransactionInfo(${txHash})`,
+    )) as {
       blockNumber?: number;
       receipt?: { result?: string };
     };
@@ -275,6 +374,56 @@ async function blockNumberOf(txHash: string): Promise<number | null> {
     logger.warn({ err, txHash }, 'tron: block lookup failed');
     return null;
   }
+}
+
+/**
+ * Of `txIds`, the ones already fully accounted for: a blockchain_transactions
+ * row exists for (tx, logIndex) AND its payment's `amount_received` already
+ * includes it.
+ *
+ * TronGrid keeps returning a deposit for as long as it falls inside the query
+ * window, so without this the pass paid one getTransactionInfo round trip per
+ * known transfer, every five seconds, for the entire life of the payment — for
+ * an answer that cannot change once a block is solidified.
+ *
+ * The `amount_received` term is not decoration. recordTransfer writes the
+ * transaction row and the payment total as two separate statements, so a crash
+ * between them leaves a recorded transfer the payment does not count. Skipping
+ * on the existence of the row alone would freeze that gap permanently and
+ * underpay the invoice for good; requiring the total to already match means such
+ * a payment is simply re-recorded on the next pass and heals itself.
+ *
+ * Scoped to `asset` as well. TRC20 rows all carry log_index 0, so without that
+ * term a recorded USDT transfer would answer for a USDC one sharing its txid —
+ * and the USDC leg would be skipped before recordTransfer could file it as an
+ * unexpected deposit, which is the only record an operator has of a wrong-asset
+ * arrival.
+ */
+async function settledTxIds(
+  txIds: string[],
+  logIndex: number,
+  asset: string,
+): Promise<Set<string>> {
+  if (txIds.length === 0) return new Set<string>();
+  const rows = await query<{ tx_hash: string }>(
+    `SELECT bt.tx_hash
+       FROM blockchain_transactions bt
+       JOIN payments p ON p.id = bt.payment_id
+      WHERE bt.network = 'TRC20'
+        AND bt.direction = 'incoming'
+        AND bt.log_index = $2
+        AND bt.asset = $3
+        AND bt.tx_hash = ANY($1::text[])
+        AND p.amount_received = COALESCE((
+              SELECT SUM(x.amount)
+                FROM blockchain_transactions x
+               WHERE x.payment_id = p.id
+                 AND x.direction = 'incoming'
+                 AND x.status <> 'reorged'
+            ), 0)`,
+    [txIds, logIndex, asset],
+  );
+  return new Set(rows.map((r) => r.tx_hash));
 }
 
 /**
@@ -423,7 +572,7 @@ async function updateConfirmationsAndPromote(nowBlock: number): Promise<void> {
         AND bt.direction = 'incoming'
         AND bt.status = 'pending'
         AND bt.network = 'TRC20'
-        AND p.status = 'confirming'`,
+        AND p.status IN ('confirming', 'partial')`,
     [nowBlock],
   );
 
@@ -431,11 +580,27 @@ async function updateConfirmationsAndPromote(nowBlock: number): Promise<void> {
   // questions, and this only ever asked the first — see the note in
   // evmListener.ts. Any nonzero TRC20 transfer that got deep enough confirmed
   // the whole invoice.
+  //
+  // `partial` IS SELECTED HERE, not `confirming` alone, and that is what makes
+  // the underpayment hold recoverable rather than terminal — same reasoning as
+  // evmListener.ts, and it has to be the same on every chain or a topped-up
+  // TRC20 invoice is stranded where a BEP20 one settles. recordTransfer accepts
+  // `partial` in its WHERE clause and files the top-up as a fresh `pending`
+  // transfer row, so the money arrives and amount_received grows past `amount` —
+  // but with `confirming` alone nothing could ever select the payment again. It
+  // would never be promoted, never swept, never expired (processExpiry only
+  // touches `waiting`), and would show on the merchant's balance strip as
+  // pending forever. A fully-paid invoice whose funds sit at the deposit address
+  // with nothing that can move them is worse than the underpayment it replaced.
+  //
+  // Re-checking a settled `partial` costs nothing: the partial branch below
+  // marks its incoming rows `confirmed`, so a payment with no NEW money has no
+  // `pending` row left to join against and never reappears here.
   const ready = await query<{ id: string; fully_paid: boolean }>(
     `SELECT p.id, (p.amount_received >= p.amount) AS fully_paid
        FROM payments p
        JOIN blockchain_transactions bt ON bt.payment_id = p.id
-      WHERE p.status = 'confirming'
+      WHERE p.status IN ('confirming', 'partial')
         AND bt.direction = 'incoming'
         AND bt.status = 'pending'
         AND bt.network = 'TRC20'
@@ -447,9 +612,18 @@ async function updateConfirmationsAndPromote(nowBlock: number): Promise<void> {
     // UNDERPAID: hold as `partial`. No payment.confirmed, no sweep. The payment
     // stays open for a top-up and is never expired out from under the funds.
     if (!p.fully_paid) {
+      // `amount_received < amount` is re-tested HERE, inside the write, and not
+      // merely trusted from the SELECT above. Promotion used to be the tail of
+      // the address scan, so nothing could record a transfer between the two;
+      // now that the two are separate ticks, a top-up landing in that window
+      // would be read as underpaid and the (by then fully paid) invoice would be
+      // frozen as `partial` — never confirmed, never swept. Losing this race is
+      // harmless: zero rows means the payment is already covered, its transfer
+      // rows are still `pending`, and the next tick promotes it properly.
       const marked = await query<{ id: string; amount: string; amount_received: string }>(
         `UPDATE payments SET status = 'partial'
-          WHERE id = $1 AND status = 'confirming'
+          WHERE id = $1 AND status IN ('confirming', 'partial')
+            AND amount_received < amount
           RETURNING id, amount, amount_received`,
         [p.id],
       );
@@ -469,9 +643,13 @@ async function updateConfirmationsAndPromote(nowBlock: number): Promise<void> {
       continue;
     }
 
+    // Promote confirming/partial -> confirmed, guarded so it fires exactly once.
+    // `partial` is included because that is precisely the topped-up case: the
+    // customer covered the shortfall, so the hold is released and the payment
+    // settles down the ordinary path — webhook, sweep, payout.
     const promoted = await query<{ id: string }>(
       `UPDATE payments SET status = 'confirmed', confirmed_at = now()
-        WHERE id = $1 AND status = 'confirming' RETURNING id`,
+        WHERE id = $1 AND status IN ('confirming', 'partial') RETURNING id`,
       [p.id],
     );
     if (promoted.length === 0) continue;
@@ -500,63 +678,177 @@ async function updateConfirmationsAndPromote(nowBlock: number): Promise<void> {
   }
 }
 
-async function pollOnce(): Promise<void> {
-  const block = await tronClient().trx.getCurrentBlock();
-  const nowBlock = Number(
-    (block as { block_header?: { raw_data?: { number?: number } } })?.block_header?.raw_data
-      ?.number ?? 0,
-  );
-  if (!nowBlock) {
-    logger.warn('tron: could not read current block; skipping pass');
-    return;
+/**
+ * Everything one watched address costs: the native feed plus one TRC20 feed per
+ * enabled token.
+ *
+ * Never throws. A single address that 429s, times out or returns garbage is
+ * logged and abandoned for this pass only; it still counts as scanned for the
+ * ordering, so it rotates to the back and is retried after the rest of the watch
+ * set. Deliberate: a permanently failing address must not be allowed to sit at
+ * the head of every pass and consume the deadline that healthy addresses need.
+ */
+async function scanAddress(
+  address: string,
+  sinceMs: number,
+  trcAssets: Asset[],
+  native: Asset | undefined,
+): Promise<void> {
+  // ---- Native TRX: one call per address, not per (address, asset) ----
+  // The plain transaction feed is not filtered by contract, so a single
+  // request covers it — and it carries blockNumber inline, so unlike the
+  // token path below there is no follow-up receipt lookup per transfer.
+  if (native) {
+    try {
+      const transfers = await fetchInboundNative(address, sinceMs);
+      const settled = await settledTxIds(
+        transfers.map((t) => t.txId),
+        -1,
+        native.symbol,
+      );
+      for (const t of transfers) {
+        if (settled.has(t.txId)) continue;
+        await recordIncomingNative(t, native);
+      }
+    } catch (err) {
+      logger.warn({ err, address }, 'tron: fetch inbound native transfers failed; will retry');
+    }
   }
+
+  for (const asset of trcAssets) {
+    try {
+      const transfers = (await fetchInboundTransfers(address, sinceMs, asset)).filter(
+        (t) => t.type === 'Transfer' && t.to === address, // the `to` test is defensive
+      );
+      const settled = await settledTxIds(
+        transfers.map((t) => t.transaction_id),
+        0,
+        asset.symbol,
+      );
+      for (const t of transfers) {
+        if (settled.has(t.transaction_id)) continue;
+        const blockNumber = await blockNumberOf(t.transaction_id);
+        if (blockNumber === null) continue; // not solidified yet, or reverted
+        await recordIncoming(t, blockNumber, asset);
+      }
+    } catch (err) {
+      // Skip only THIS asset for this address; the others still get scanned.
+      logger.warn(
+        { err, address, asset: asset.symbol },
+        'tron: fetch inbound transfers failed; will retry',
+      );
+    }
+  }
+}
+
+/**
+ * Run `work` over `items`, at most `limit` at a time, stopping once `deadline`
+ * has passed. Returns how many items were taken.
+ *
+ * A worker never propagates a failure: the whole purpose of the pool is that no
+ * one address can stall or abort the scan, and a rejected worker would abort the
+ * Promise.all and leave the remaining addresses unscanned.
+ */
+async function runPool<T>(
+  items: T[],
+  limit: number,
+  deadline: number,
+  work: (item: T) => Promise<void>,
+): Promise<number> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length && Date.now() < deadline) {
+      const item = items[cursor++];
+      try {
+        await work(item);
+      } catch (err) {
+        logger.warn({ err }, 'tron: address scan failed; will retry next pass');
+      }
+    }
+  });
+  await Promise.all(workers);
+  return cursor;
+}
+
+/**
+ * One address-scan pass over the watch set.
+ *
+ * This used to be a plain sequential `for (const [address] of depositAddresses)`
+ * with an `await` per address per asset. Pass duration therefore grew linearly
+ * with the number of open payments, and since the watch set is roughly
+ * creation-rate x PAYMENT_EXPIRY_MINUTES, at volume a pass took longer than the
+ * expiry window itself: the expiry worker flipped a payment to `expired` before
+ * this listener had ever polled its address, refreshDepositAddresses then
+ * dropped it, and a real deposit sitting at that address was never seen at all.
+ */
+async function scanAddresses(): Promise<void> {
+  const startedAt = Date.now();
+  const deadline = startedAt + PASS_DEADLINE_MS;
+
+  // Snapshot BEFORE any I/O. refreshDepositAddresses runs on its own 30s timer
+  // and does clear() + set(), and a Map being iterated across an await does not
+  // survive that cleanly — the iterator skips the emptied entries and walks into
+  // the newly appended ones instead. Any pass longer than the refresh interval
+  // was therefore scanning a garbled subset and could be extended without bound.
+  const snapshot = Array.from(depositAddresses.entries());
+
+  // Forget addresses that have left the watch set, then scan least-recently-
+  // scanned first. Under load a pass cannot get through every address before its
+  // deadline, and iterating in map order would restart at the head every time —
+  // starving the tail, which is precisely where the oldest payments (the ones
+  // closest to expiry) live. Ordering by last scan makes the pool round-robin.
+  for (const address of lastScannedAt.keys()) {
+    if (!depositAddresses.has(address)) lastScannedAt.delete(address);
+  }
+  snapshot.sort((a, b) => (lastScannedAt.get(a[0]) ?? 0) - (lastScannedAt.get(b[0]) ?? 0));
 
   // TronGrid's trc20 endpoint filters by a SINGLE contract, so this is one call
   // per (address, asset). That is O(addresses x assets) requests per pass, which
   // is why the asset list should stay short on Tron — TronGrid rate-limits hard
   // without an API key.
   const trcAssets = tokenAssetsFor('TRC20');
-  // Native TRX, when accepted. Undefined leaves this loop exactly as it was.
+  // Native TRX, when accepted. Undefined leaves the native branch inert.
   const native = nativeAssetFor('TRC20');
 
-  for (const [address, sinceMs] of depositAddresses) {
-    // ---- Native TRX: one call per address, not per (address, asset) ----
-    // The plain transaction feed is not filtered by contract, so a single
-    // request covers it — and it carries blockNumber inline, so unlike the
-    // token path below there is no follow-up receipt lookup per transfer.
-    if (native) {
-      try {
-        for (const t of await fetchInboundNative(address, sinceMs)) {
-          await recordIncomingNative(t, native);
-        }
-      } catch (err) {
-        logger.warn(
-          { err, address },
-          'tron: fetch inbound native transfers failed; will retry',
-        );
-      }
-    }
+  const scanned = await runPool(
+    snapshot,
+    SCAN_CONCURRENCY,
+    deadline,
+    async ([address, sinceMs]) => {
+      await scanAddress(address, sinceMs, trcAssets, native);
+      lastScannedAt.set(address, Date.now());
+    },
+  );
 
-    for (const asset of trcAssets) {
-      let transfers: TrongridTrc20Tx[];
-      try {
-        transfers = await fetchInboundTransfers(address, sinceMs, asset);
-      } catch (err) {
-        // Skip only THIS asset for this address; the others still get scanned.
-        logger.warn(
-          { err, address, asset: asset.symbol },
-          'tron: fetch inbound transfers failed; will retry',
-        );
-        continue;
-      }
-      for (const t of transfers) {
-        if (t.type !== 'Transfer') continue;
-        if (t.to !== address) continue; // defensive
-        const blockNumber = await blockNumberOf(t.transaction_id);
-        if (blockNumber === null) continue; // not solidified yet, or reverted
-        await recordIncoming(t, blockNumber, asset);
-      }
-    }
+  const passMs = Date.now() - startedAt;
+  // The ratio that predicts stranded deposits: once a full sweep of the watch
+  // set approaches the payment expiry window, deposits start expiring before
+  // they are ever polled. A quarter of the window is the alarm, not the limit.
+  const budgetMs = (config.paymentExpiryMinutes * 60_000) / 4;
+  const sweepMs = scanned > 0 ? (passMs * snapshot.length) / scanned : passMs;
+  if (scanned < snapshot.length || sweepMs > budgetMs) {
+    logger.error(
+      { passMs, sweepMs: Math.round(sweepMs), scanned, watching: snapshot.length, budgetMs },
+      'TRC20 address scan is falling behind — deposits may be detected late',
+    );
+  } else {
+    logger.debug({ passMs, watching: snapshot.length }, 'TRC20 address scan complete');
+  }
+}
+
+/**
+ * Confirmation + promotion tick. Reads the chain head itself rather than being
+ * handed one by the address scan, because it no longer runs inside it.
+ */
+async function promoteOnce(): Promise<void> {
+  const block = await withDeadline(tronClient().trx.getCurrentBlock(), 'getCurrentBlock');
+  const nowBlock = Number(
+    (block as { block_header?: { raw_data?: { number?: number } } })?.block_header?.raw_data
+      ?.number ?? 0,
+  );
+  if (!nowBlock) {
+    logger.warn('tron: could not read current block; skipping promotion tick');
+    return;
   }
 
   await updateConfirmationsAndPromote(nowBlock);
@@ -564,7 +856,7 @@ async function pollOnce(): Promise<void> {
     `UPDATE chain_cursor SET last_scanned_block = $1 WHERE network = 'TRC20'`,
     [nowBlock],
   );
-  logger.debug({ nowBlock, watching: depositAddresses.size }, 'TRC20 poll complete');
+  logger.debug({ nowBlock }, 'TRC20 promotion tick complete');
 }
 
 async function main(): Promise<void> {
@@ -591,14 +883,32 @@ async function main(): Promise<void> {
     );
   }, ADDRESS_REFRESH_MS);
 
-  let running = false;
+  let scanning = false;
   setInterval(() => {
-    if (running) return;
-    running = true;
-    pollOnce()
-      .catch((err) => logger.error({ err }, 'TRC20 poll pass failed'))
+    if (scanning) return;
+    scanning = true;
+    scanAddresses()
+      .catch((err) => logger.error({ err }, 'TRC20 address scan failed'))
       .finally(() => {
-        running = false;
+        scanning = false;
+      });
+  }, POLL_INTERVAL_MS);
+
+  // Promotion is its OWN tick with its OWN guard. It used to be the tail of the
+  // scan pass, which meant a scan that overran also delayed every confirmation
+  // update, every payment.confirmed webhook and every sweep enqueue behind it.
+  // Nothing in promotion depends on the current scan having finished — it reads
+  // rows earlier scans already committed — so decoupling them costs nothing and
+  // keeps settlement moving at a fixed cadence no matter how large the watch set
+  // grows.
+  let promoting = false;
+  setInterval(() => {
+    if (promoting) return;
+    promoting = true;
+    promoteOnce()
+      .catch((err) => logger.error({ err }, 'TRC20 promotion tick failed'))
+      .finally(() => {
+        promoting = false;
       });
   }, POLL_INTERVAL_MS);
 

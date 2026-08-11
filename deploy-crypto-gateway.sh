@@ -8,7 +8,9 @@
 #   • Creates its OWN Postgres database + role  ->  gateway / gateway
 #   • Uses an ISOLATED Redis logical DB (#1)    ->  Zaplo/others keep #0
 #   • Runs its API on port 4100                 ->  Zaplo keeps 4000
-#   • Runs api + worker + BSC listener + Tron listener under PM2 (cg-* names)
+#   • Runs api + worker + ALL FOUR chain listeners under PM2 (cg-* names):
+#     BSC, Ethereum, Tron, Bitcoin. Every listener idles while its chain is
+#     off, so the process set never has to change when a chain is enabled.
 #
 # HOW TO USE
 #   The code is pulled from GitHub (Ezulix/CryptoPay). Secrets are NEVER in the
@@ -27,6 +29,12 @@
 #        #   export GITHUB_TOKEN=ghp_xxx
 #        ./deploy-crypto-gateway.sh
 #
+#   3. The super_admin password is NOT in this file. On the run that creates the
+#      account the script mints a random one and prints it ONCE, at the end.
+#      To choose it yourself, export it out-of-band before running:
+#        export ADMIN_PASSWORD='...'      # never write it into this file
+#      (Same for the address: export ADMIN_EMAIL='ops@yourco.tld'.)
+#
 # Run as a NORMAL sudo-capable user (NOT via `sudo`). Root is also fine.
 ###############################################################################
 set -euo pipefail
@@ -38,8 +46,26 @@ API_DOMAIN="pay-api.ezulix.com"             # dedicated API hostname (merchants 
 LE_EMAIL="namit@ezulix.com"             # Let's Encrypt contact
 
 # First-login admin (idempotent — only created if it doesn't exist yet).
-ADMIN_EMAIL="admin@ezulix.com"
-ADMIN_PASSWORD="ChangeMe@12345"
+#
+# THE PASSWORD IS NOT HERE, AND MUST NEVER BE PUT HERE. This file is tracked in
+# the repo (unlike the .env it writes) and it already names the live hosts, so a
+# literal password in it is published. And this is not an ordinary account: a
+# super_admin can repoint any merchant's payout_wallet and then settle that
+# merchant's balance to it, and can broadcast a commission withdrawal from the
+# central wallet to an address it supplies. A literal used to sit on this line,
+# which made it a published key to other people's money — and it is NOT quoted
+# here, because repeating it in a comment publishes it just as thoroughly as
+# assigning it did. Treat that old value as BURNED: it is still in this repo's
+# git history, and removing it from this file changes no password that was
+# already set. Rotate the live super_admin by hand, then review audit_logs for
+# payout.*, client.update and commission-withdraw rows.
+# The password is now supplied out-of-band (export ADMIN_PASSWORD=...) or
+# generated in step 8, and it is printed exactly once — on the run that creates
+# the account, never again on a re-deploy.
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@ezulix.com}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
+ADMIN_CREATED=false      # set true in step 8 only if the seed really created it
+ADMIN_SEED_FAILED=false  # set true in step 8 if the seed ran and did not succeed
 # ────────────────────────────────────────────────────────────────────────────
 
 # Fixed settings (change only if you know why)
@@ -91,6 +117,11 @@ if [ ! -f "$APP_DIR/.env" ] && [ ! -f "$SOURCE_ENV" ]; then
 fi
 if [ ! -f "$APP_DIR/.env" ] && ! grep -q '^HD_WALLET_MNEMONIC=' "$SOURCE_ENV"; then
   die "$SOURCE_ENV is missing HD_WALLET_MNEMONIC — is it a complete production env?"
+fi
+# Checked here, not at step 8, so a bad value fails in the first seconds rather
+# than after a ten-minute build. Empty is fine — step 8 generates a strong one.
+if [ -n "$ADMIN_PASSWORD" ] && [ "${#ADMIN_PASSWORD}" -lt 12 ]; then
+  die "ADMIN_PASSWORD is set but is under 12 characters. This account can repoint merchant payout wallets and withdraw commission to an arbitrary address — give it a long random value, or unset ADMIN_PASSWORD and let this script generate one."
 fi
 
 ###############################################################################
@@ -271,9 +302,67 @@ for mig in "$APP_DIR"/sql/migrations/*.sql; do
 done
 echo "Migrations applied."
 
+# ── Seed the super_admin ─────────────────────────────────────────────────────
+# The seed is idempotent: it creates the account or reports that it exists, and
+# it NEVER changes an existing account's password. That is why we ask the DB
+# first. A re-deploy must not print a password — the one it would print is not
+# the one the account has, and a credential echoed on every deploy ends up in
+# every terminal scrollback and CI log on the way to production.
+#
+# psql has already proven itself above (the migration loop dies on failure), so
+# this lookup should always answer — but "should" is not good enough when the
+# answer decides whether we print a credential, so its failure is handled
+# explicitly below rather than being treated as "no such user".
 echo "Seeding super_admin (idempotent) ..."
-SEED_ADMIN_EMAIL="$ADMIN_EMAIL" SEED_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
-  node "$APP_DIR/backend/dist/seed.js" || warn "Seed reported a problem — check output above."
+ADMIN_LOOKUP_OK=true
+ADMIN_EXISTS="$(PGPASSWORD="$PG_PW" psql -h localhost -U "$PG_ROLE" -d "$PG_DB" \
+  -v em="$ADMIN_EMAIL" -tAc "SELECT 1 FROM users WHERE email = :'em'")" \
+  || ADMIN_LOOKUP_OK=false
+
+if [ "$ADMIN_LOOKUP_OK" != true ]; then
+  # This lookup is the ONLY thing that tells us whether a password we print is
+  # actually the account's. seed.js exits 0 whether it CREATED the user or found
+  # one already there, so a lookup that failed and fell through to the "create"
+  # branch would mint a password, watch the seed skip, and print that password
+  # as the first admin login — the exact wrong-credential-in-the-banner problem
+  # this block exists to remove, just quieter. A swallowed error is how that
+  # happens, so the failure is no longer swallowed (psql's own message is left
+  # on stderr) and we neither seed nor issue anything when we cannot ask.
+  ADMIN_PASSWORD=""
+  ADMIN_SEED_FAILED=true
+  warn "Could not ask the database whether ${ADMIN_EMAIL} exists (see the psql error above) — the admin seed was SKIPPED and no credentials were issued. Fix the database and re-run; the seed is idempotent."
+elif [ -n "$ADMIN_EXISTS" ]; then
+  echo "  super_admin ${ADMIN_EMAIL} already exists — password left untouched."
+  [ -n "$ADMIN_PASSWORD" ] && \
+    warn "ADMIN_PASSWORD was set but IGNORED: the seed never rewrites an existing account's password."
+else
+  if [ -n "$ADMIN_PASSWORD" ]; then
+    echo "  Creating ${ADMIN_EMAIL} with the password from \$ADMIN_PASSWORD."
+  else
+    # 144 random bits. `openssl rand -hex` yields only [0-9a-f], so the fixed
+    # tail guarantees an upper-case letter, a digit and a symbol — enough to
+    # satisfy any policy the change-password screen imposes later. The tail adds
+    # no entropy and is not meant to; the 36 hex characters carry all of it.
+    ADMIN_PASSWORD="$(openssl rand -hex 18)-Aa9!"
+    echo "  Creating ${ADMIN_EMAIL} with a generated password (printed once, at the end)."
+  fi
+  # Passed through the environment, never as argv — argv is world-readable in
+  # `ps` on a shared box, the environment of a process is not.
+  if SEED_ADMIN_EMAIL="$ADMIN_EMAIL" SEED_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+       node "$APP_DIR/backend/dist/seed.js"; then
+    ADMIN_CREATED=true
+  else
+    # Non-fatal, as before: the rest of the deploy is still worth completing and
+    # the seed is idempotent, so a re-run creates the admin once the DB is happy.
+    # But no credentials are issued for an account that does not exist, and the
+    # closing banner has to say that in as many words — an operator who is told
+    # nothing here would reasonably assume the admin is simply the one from last
+    # time, and only discover at the login screen that there is no admin at all.
+    ADMIN_PASSWORD=""
+    ADMIN_SEED_FAILED=true
+    warn "Seed reported a problem — check output above. NO admin was created and no password was issued; fix the DB and re-run this script."
+  fi
+fi
 
 ###############################################################################
 say "9/12  Build the two panels (API URL baked per-domain at build time)"
@@ -295,7 +384,7 @@ chmod -R a+rX "$APP_DIR/client-panel/dist" "$APP_DIR/admin-panel/dist"
 sudo chmod a+rX /var/www "$APP_DIR" "$APP_DIR/client-panel" "$APP_DIR/admin-panel"
 
 ###############################################################################
-say "10/12  Start api + worker + both listeners under PM2 (one instance each!)"
+say "10/12  Start api + worker + ALL FOUR listeners under PM2 (one instance each!)"
 ###############################################################################
 cat > "$APP_DIR/ecosystem.config.js" <<EOF
 module.exports = {
@@ -315,6 +404,20 @@ module.exports = {
     // idles without polling or constructing a Tron client. That way enabling
     // TRC20 later is an .env edit + restart, not a redeploy.
     { name: 'cg-listener-tron', cwd: '${APP_DIR}/backend', script: 'dist/blockchain/tronListener.js',
+      instances: 1, env: { NODE_ENV: 'production' }, max_memory_restart: '600M' },
+    // ERC20 (Ethereum) and BTC listeners. These were MISSING, and their absence
+    // was a silent way to lose customer money: ETH_ENABLED / BTC_ENABLED are a
+    // pure .env edit, isNetworkEnabled() then lets createPayment derive and
+    // persist a REAL deposit address on that chain, and the customer pays into
+    // an address no process on this box is watching. The deposit is never
+    // recorded, never confirmed, never swept — it just sits at an HD address
+    // nobody is looking at. Both entrypoints already exist in the build and
+    // both idle exactly like cg-listener-tron while their chain is off
+    // (ethListener.ts / bitcoinListener.ts), so there was never a reason to
+    // omit them. One instance each, for the same cursor reason as above.
+    { name: 'cg-listener-eth', cwd: '${APP_DIR}/backend', script: 'dist/blockchain/ethListener.js',
+      instances: 1, env: { NODE_ENV: 'production' }, max_memory_restart: '600M' },
+    { name: 'cg-listener-btc', cwd: '${APP_DIR}/backend', script: 'dist/blockchain/bitcoinListener.js',
       instances: 1, env: { NODE_ENV: 'production' }, max_memory_restart: '600M' },
   ],
 };
@@ -411,6 +514,34 @@ else
 fi
 
 ###############################################################################
+# The ONLY place the admin password is ever printed, and only on the run that
+# actually created the account. Built before the banner heredoc so the "already
+# exists" case can say so in words instead of echoing a password that is not the
+# account's — see the seeding block in step 8.
+if [ "$ADMIN_CREATED" = true ]; then
+  ADMIN_BANNER="  ⚠  FIRST ADMIN LOGIN — SHOWN ONCE. It is not stored anywhere and cannot be
+     reprinted. Copy it into your password manager NOW, then change it at
+     first login.
+
+       ${ADMIN_EMAIL}
+       ${ADMIN_PASSWORD}"
+elif [ "$ADMIN_SEED_FAILED" = true ]; then
+  # Covers both ways step 8 can decline to issue credentials: the seed ran and
+  # failed, or the DB could not be asked at all. Deliberately does not claim
+  # which — in the second case an admin may well exist from an earlier run, and
+  # the honest statement is that THIS run learnt nothing and gave you nothing.
+  ADMIN_BANNER="  ⚠  NO ADMIN CREDENTIALS WERE ISSUED. The seed did not complete (see step 8
+     above), so this run neither created an account nor learnt the password of
+     an existing one — do not assume you can log in to the admin panel.
+     Fix the database error and re-run this script; the seed is idempotent."
+else
+  ADMIN_BANNER="  Admin login : ${ADMIN_EMAIL}
+                (existing account — its password was NOT changed and is not
+                 shown. Lost it? Use the admin panel's forgot-password flow if
+                 SMTP is configured, or re-run this script with
+                 ADMIN_EMAIL=you@yourco.tld to seed a second super_admin.)"
+fi
+
 cat <<EOF
 
 ┌───────────────────────────────────────────────────────────────────────────┐
@@ -420,16 +551,17 @@ cat <<EOF
   Admin panel             : https://${ADMIN_DOMAIN}
   API (dedicated host)    : https://${API_DOMAIN}/api/v1   (health: https://${API_DOMAIN}/health)
 
-  First admin login (CHANGE THE PASSWORD after first login):
-    ${ADMIN_EMAIL}  /  ${ADMIN_PASSWORD}
+${ADMIN_BANNER}
 
   Isolation from your existing software:
     • Postgres DB/role : ${PG_DB} / ${PG_ROLE}   (its own DB — Zaplo untouched)
     • Redis logical DB : #${REDIS_DB}                    (others use #0)
     • API host port    : ${API_PORT}                 (Zaplo keeps 4000)
-    • PM2 processes    : cg-api, cg-worker, cg-listener, cg-listener-tron
+    • PM2 processes    : cg-api, cg-worker, cg-listener, cg-listener-tron,
+                         cg-listener-eth, cg-listener-btc
 
-  Networks:
+  Networks — every chain below has its own listener process installed, so a
+  chain can never be switched on with nothing watching it:
     • BEP20 (BSC)  : ALWAYS ON — the default for any payment created without
                      an explicit "network". Nothing about it changed.
     • TRC20 (Tron) : $(grep -qE '^TRON_ENABLED=true' "$ENV_FILE" && echo 'ENABLED' || echo 'off (TRON_ENABLED=false)')
@@ -437,10 +569,17 @@ cat <<EOF
                      idles and the API rejects network=TRC20.
                      To enable: docs/deployment.md §7b, then edit ${ENV_FILE}
                      and run: pm2 restart cg-api cg-worker cg-listener-tron
+    • ERC20 (Eth)  : $(grep -qE '^ETH_ENABLED=true' "$ENV_FILE" && echo 'ENABLED' || echo 'off (ETH_ENABLED not true)')
+                     Needs ETH_ENABLED=true AND ETH_HTTP_RPC — the API refuses
+                     network=ERC20 unless both are set. Then:
+                     pm2 restart cg-api cg-worker cg-listener-eth
+    • BTC          : $(grep -qE '^BTC_ENABLED=true' "$ENV_FILE" && echo 'ENABLED' || echo 'off (BTC_ENABLED not true)')
+                     Needs BTC_ENABLED=true. Then:
+                     pm2 restart cg-api cg-worker cg-listener-btc
 
   Secrets + wallet keys live in:  ${ENV_FILE}   (chmod 600)
     ⚠  Back up HD_WALLET_MNEMONIC OFFLINE — losing it loses all deposit funds.
-       The SAME mnemonic derives both BEP20 and TRC20 deposit addresses.
+       The SAME mnemonic derives BEP20, ERC20, TRC20 and BTC deposit addresses.
     ⚠  Keep the gas-station wallet funded with BNB or sweeps/payouts stall.
     ⚠  If TRC20 is on, keep the Tron wallet funded with TRX too — a TRC20
        transfer burns ~13-30 TRX without staked energy. Out of TRX = every
@@ -452,7 +591,9 @@ cat <<EOF
     pm2 logs cg-worker          # confirm / sweep / payout / webhook jobs
     pm2 logs cg-listener        # BSC chain listener (run ONLY one)
     pm2 logs cg-listener-tron   # Tron chain listener (run ONLY one)
-    pm2 restart cg-api cg-worker cg-listener cg-listener-tron
+    pm2 logs cg-listener-eth    # Ethereum chain listener (run ONLY one)
+    pm2 logs cg-listener-btc    # Bitcoin chain listener (run ONLY one)
+    pm2 restart cg-api cg-worker cg-listener cg-listener-tron cg-listener-eth cg-listener-btc
     sudo tail -f /var/log/apache2/cg-client_error.log
 
   Redeploy after pushing new commits to ${REPO_URL}:

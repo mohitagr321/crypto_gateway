@@ -29,6 +29,18 @@ const ADDRESS_RE: Record<string, RegExp> = {
 };
 
 /**
+ * The identity of a commission pool: chain AND asset, never the chain alone.
+ *
+ * The balance API returns one entry per (network, asset) because that is how the
+ * money is actually held — a BNB accrual and a USDT accrual sit in the same
+ * central wallet and are not interchangeable. Using the network as the key gave
+ * duplicate React keys, several identically-titled bands, and a withdraw form
+ * that resolved a chain to whichever asset came back first.
+ */
+const scopeKey = (b?: CommissionBalance): string =>
+  `${b?.network ?? 'BEP20'}:${b?.asset ?? b?.currency ?? 'USDT'}`;
+
+/**
  * THE GATEWAY'S OWN MONEY.
  *
  * One band per chain, and no pooled total anywhere on the page. Commission is
@@ -82,10 +94,17 @@ export default function Revenue() {
       header: 'Amount',
       numeric: true,
       sortValue: (w) => Number(w.amount ?? 0),
+      // The row's OWN asset, not the page's top-level currency. A chain now holds
+      // a pool per token, so a BEP20 withdrawal in this list may be USDT, USDC or
+      // BNB — labelling every row 'USDT' would misreport what actually left the
+      // wallet. Falls back to the page currency only for pre-asset history.
       render: (w) => (
         <span className="font-medium text-slate-900 dark:text-slate-100">
           {formatUsdt(w.amount)}
-          <span className="font-normal text-slate-500 dark:text-slate-400"> {currency}</span>
+          <span className="font-normal text-slate-500 dark:text-slate-400">
+            {' '}
+            {w.asset ?? currency}
+          </span>
         </span>
       ),
     },
@@ -177,16 +196,22 @@ export default function Revenue() {
       ) : (
         networkBalances.map((b) => {
           const net = b.network ?? 'BEP20';
+          // One band per (network, ASSET), not per network. A chain holds a
+          // separate pool for every token swept on it — BNB commission cannot
+          // be paid out as USDT — so keying on the chain alone rendered two
+          // bands with the same React key and the same heading, and an operator
+          // could not tell which number belonged to which coin.
+          const sym = b.asset ?? b.currency ?? 'USDT';
           return (
-            <section key={net} className="mb-10">
+            <section key={scopeKey(b)} className="mb-10">
               <BandHead
                 aside={
                   <span className="text-xs text-slate-500 dark:text-slate-400">
-                    held in the {net} central wallet
+                    {sym} held in the {net} central wallet
                   </span>
                 }
               >
-                {networkLabel(net)}
+                {networkLabel(net)} · {sym}
               </BandHead>
               <div className="mt-2 grid grid-cols-1 gap-x-8 gap-y-6 sm:grid-cols-3">
                 {/* Available first, because it is the only one of the three you
@@ -272,20 +297,37 @@ function WithdrawModal({
   onClose: () => void;
   onDone: () => void;
 }) {
-  const [network, setNetwork] = useState('BEP20');
+  // Scope, not network. Selecting a chain alone silently resolved to whichever
+  // asset happened to be first in the list, so an operator aiming at a BNB
+  // balance would have signed a USDT transfer — or been told they had funds
+  // they could not draw on. The pair is what identifies a pool.
+  const [scope, setScope] = useState(() => scopeKey(balances[0]));
   const [amount, setAmount] = useState('');
   const [toAddress, setToAddress] = useState('');
   const [fieldError, setFieldError] = useState<string | null>(null);
 
-  // Everything in this modal is scoped to the selected chain: the Max button,
-  // the address format, and which wallet actually pays.
-  const balance =
-    balances.find((b) => (b.network ?? 'BEP20') === network) ?? balances[0];
-  const currency = balance?.currency ?? 'USDT';
+  // Everything in this modal is scoped to the selected (chain, asset): the Max
+  // button, the address format, which wallet pays, and what it pays in.
+  //
+  // The modal is mounted once, before the balance query resolves, so the initial
+  // scope is a guess. Reconciling it against the loaded list keeps the <select>
+  // showing an option it actually has — a `value` with no matching <option>
+  // renders blank, which would leave the operator staring at an empty balance
+  // selector while the form quietly targeted the first pool.
+  const selected = balances.find((b) => scopeKey(b) === scope);
+  const balance = selected ?? balances[0];
+  const effectiveScope = selected ? scope : scopeKey(balances[0]);
+  const network = balance?.network ?? 'BEP20';
+  const asset = balance?.asset ?? balance?.currency ?? 'USDT';
+  const currency = balance?.currency ?? asset;
 
   const mutation = useMutation({
-    mutationFn: (input: { amount: string; toAddress: string; network: string }) =>
-      withdrawCommission(input),
+    mutationFn: (input: {
+      amount: string;
+      toAddress: string;
+      network: string;
+      asset: string;
+    }) => withdrawCommission(input),
     onSuccess: () => {
       setAmount('');
       setToAddress('');
@@ -299,10 +341,10 @@ function WithdrawModal({
     onClose();
   };
 
-  // Clearing the address on a network switch is deliberate: a leftover address
+  // Clearing the address on a scope switch is deliberate: a leftover address
   // from the other chain is exactly the paste error this guards against.
-  const onNetworkChange = (next: string) => {
-    setNetwork(next);
+  const onScopeChange = (next: string) => {
+    setScope(next);
     setToAddress('');
     setAmount('');
     setFieldError(null);
@@ -315,8 +357,14 @@ function WithdrawModal({
       setFieldError('Enter a valid amount greater than 0.');
       return;
     }
-    const re = ADDRESS_RE[network] ?? ADDRESS_RE.BEP20;
-    if (!re.test(addr)) {
+    // Only pre-check the chains whose format we actually know. Falling back to
+    // the BEP20 regex used to be harmless when BEP20 and TRC20 were the only
+    // pools; now that Bitcoin and Ethereum commission appears here it would
+    // reject a perfectly valid bech32 address before the request was ever made.
+    // The backend's adapter.isValidAddress is the authority either way, so an
+    // unknown chain is left to it rather than guessed at.
+    const re = ADDRESS_RE[network];
+    if (re && !re.test(addr)) {
       setFieldError(
         network === 'TRC20'
           ? 'Enter a valid TRC20 address (T + 33 base58 characters). A 0x address will not work on Tron.'
@@ -325,7 +373,7 @@ function WithdrawModal({
       return;
     }
     setFieldError(null);
-    mutation.mutate({ amount: amt, toAddress: addr, network });
+    mutation.mutate({ amount: amt, toAddress: addr, network, asset });
   };
 
   return (
@@ -365,24 +413,24 @@ function WithdrawModal({
         {balances.length > 1 && (
           <div>
             <label className="label" htmlFor="wd-network">
-              Network
+              Balance
             </label>
             <select
               id="wd-network"
               className="input"
-              value={network}
-              onChange={(e) => onNetworkChange(e.target.value)}
+              value={effectiveScope}
+              onChange={(e) => onScopeChange(e.target.value)}
             >
               {balances.map((b) => (
-                <option key={b.network ?? 'BEP20'} value={b.network ?? 'BEP20'}>
-                  {b.network === 'TRC20' ? 'TRC20 (Tron)' : 'BEP20 (BNB Smart Chain)'} —{' '}
-                  {formatUsdt(b.available)} {b.currency ?? 'USDT'} available
+                <option key={scopeKey(b)} value={scopeKey(b)}>
+                  {networkLabel(b.network)} · {b.asset ?? b.currency ?? 'USDT'} —{' '}
+                  {formatUsdt(b.available)} available
                 </option>
               ))}
             </select>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              Paid from the {network} central wallet. Commission is not
-              transferable between chains.
+              Paid in {asset} from the {network} central wallet. Commission is
+              transferable neither between chains nor between assets.
             </p>
           </div>
         )}

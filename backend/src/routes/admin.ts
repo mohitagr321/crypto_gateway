@@ -420,6 +420,15 @@ const CommissionSchema = z.object({
   value: z.string().optional(), // required for flat modes; ignored for tiered
   tiers: z.array(TierSchema).optional(), // required for tiered
   feePayer: z.enum(['client', 'admin']).default('client'),
+  // Scope. Without these the operator can only ever write a commission that
+  // means USDT (setCommission's default for an amount-denominated row), and on a
+  // deployment where USDT is not what merchants settle in — a BTC-only gateway,
+  // say — every fixed or tiered fee would be rejected at settlement with no way
+  // to configure a usable one. `asset` is the denomination of the amounts in the
+  // row; `network` optionally restricts it to one chain. Both are ignored for a
+  // percentage rate, which has no denomination and applies to every asset.
+  asset: z.string().min(1).optional(),
+  network: z.string().min(1).optional(),
   note: z.string().optional(),
 });
 
@@ -435,6 +444,8 @@ router.put(
       value: body.value,
       tiers: body.tiers,
       networkFeePayer: body.feePayer,
+      asset: body.asset,
+      network: body.network,
       note: body.note ?? null,
       createdByUserId: actor.userId,
       ip: req.ip,
@@ -952,6 +963,12 @@ const WithdrawSchema = z.object({
   amount: z.string().min(1),
   toAddress: z.string().min(1),
   network: z.string().optional(),
+  // The commission pool is per (network, ASSET) — a BNB accrual is not spendable
+  // as USDT. Without this field the balance screen could show BNB, USDC and BTC
+  // commission that no request could ever draw on, because the service falls
+  // back to the chain's default asset. Omitted still means that default, which
+  // is what every withdrawal made before the pool was split silently was.
+  asset: z.string().optional(),
 });
 router.post(
   '/commission-withdraw',
@@ -963,6 +980,7 @@ router.post(
       amount: body.amount,
       toAddress: body.toAddress,
       network: body.network,
+      asset: body.asset,
       triggeredByUserId: actor.userId,
       ip: req.ip,
     });
@@ -971,6 +989,9 @@ router.post(
       amount: w.amount,
       toAddress: w.to_address,
       network: w.network,
+      // Echoed back because the pool is per (network, asset): a response that
+      // names only the chain does not say what was actually withdrawn.
+      asset: w.asset,
       status: w.status,
     });
   }),
@@ -988,6 +1009,10 @@ router.get(
         amount: r.amount,
         toAddress: r.to_address,
         network: r.network,
+        // History that names only the chain is unreadable now that a chain holds
+        // several pools: two rows for BEP20 could be USDT and BNB, and a failed
+        // one would show an error with nothing to attribute it to.
+        asset: r.asset,
         txHash: r.tx_hash,
         status: r.status,
         error: r.error,

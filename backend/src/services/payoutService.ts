@@ -3,20 +3,30 @@
  *
  * requestPayout: create a `pending` payout row (auto or manual) after computing the
  *   commission split against the client's active commission. Enqueues a payout job.
- * executePayout: consumed by the worker. Signs + broadcasts a USDT transfer from
- *   the central wallet to the client's payout wallet, records tx_hash, transitions
- *   the payout row pending -> processing -> sent (-> confirmed by listener/worker).
+ * executePayout: consumed by the worker. Signs + broadcasts a transfer of the
+ *   row's asset from the central wallet to the client's payout wallet, records
+ *   tx_hash, transitions the payout row pending -> processing -> sent
+ *   (-> confirmed by listener/worker).
  *
  * All money math is BigInt in base units.
+ *
+ * TWO RULES THIS FILE EXISTS TO ENFORCE
+ * -------------------------------------
+ * 1. The AMOUNT is quantised to the SETTLEMENT ASSET, never to the ledger's
+ *    18-dp accounting scale and never to a per-chain default. See toAssetAmount.
+ * 2. `failed` means "we know this never reached the wire", and nothing else.
+ *    A payout that threw after a broadcast was attempted is `unresolved` and
+ *    keeps its reservation. See recordBroadcastFailure.
  */
 import { Job } from 'bullmq';
+import { formatUnits } from 'ethers';
 import { PoolClient } from 'pg';
 import { query, queryOne, withTransaction } from '../db/pool';
 import { logger } from '../config/logger';
 import { AppError } from '../utils/apiError';
-import { fromAccountingUnits, toAccountingUnits } from '../utils/money';
+import { ACCOUNTING_DECIMALS, fromAccountingUnits, toAccountingUnits } from '../utils/money';
 import { adapterFor, Network, parseNetwork } from '../blockchain/networks';
-import { parseAsset } from '../blockchain/assets';
+import { Asset, parseAsset } from '../blockchain/assets';
 import { broadcastTransferOnce } from './chainBroadcast';
 import { computeSplit, getActiveCommission } from './commissionService';
 import { writeAudit } from './auditService';
@@ -51,6 +61,76 @@ export interface PayoutRow {
  * any other advisory lock this database might grow later.
  */
 const PAYOUT_LOCK_NAMESPACE = 8123;
+
+/**
+ * Round a ledger amount DOWN to what the settlement asset can actually express,
+ * and render it the way the adapter expects to be handed it.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The ledger works at a fixed 18-dp accounting scale (utils/money.ts) and the
+ * columns are NUMERIC(38,18), which Postgres renders AT ITS DECLARED SCALE — a
+ * net of 0.001 BTC comes back as the string '0.001000000000000000'. Every
+ * adapter, meanwhile, parses `amountHuman` against the ASSET's own decimals: 8
+ * for BTC, 6 for USDT on Tron and Ethereum, 18 for USDT on BSC. Handing the raw
+ * column across that boundary broke two different ways:
+ *
+ *   * BTC rejected the string on its LENGTH, not its value — eighteen fractional
+ *     characters is more than eight, so every single Bitcoin payout threw before
+ *     anything was signed, forever, once a minute.
+ *   * A percentage commission on a 6-dp gross produces genuine digits past the
+ *     asset's precision (10.123456 at 1.5% nets 9.97160416), and parseUnits
+ *     rejects those outright.
+ *
+ * Both looked like a formatting nit and were actually a total settlement outage
+ * on three of the four chains, self-perpetuating because the settle tick recreates
+ * whatever it fails to settle.
+ *
+ * WHY DOWN
+ * --------
+ * The remainder is money the merchant is owed but that the chain cannot carry.
+ * Rounding it UP would pay out more than the balance guard reserved, which is an
+ * overdraw of the central wallet; rounding it down and accounting for the
+ * remainder as commission keeps `gross = commission + fee + net` exact and can
+ * never send more than was held. The remainder is at most one indivisible unit
+ * of the asset.
+ *
+ * The ASSET is the source of truth for this — never the network, and never a
+ * global. BSC USDT is 18 dp and Tron USDT is 6, and the same symbol on the same
+ * deployment must scale differently.
+ */
+interface AssetAmount {
+  /** The floored value in the ASSET's base units. */
+  units: bigint;
+  /** The floored value back in ledger accounting units, for the DB columns. */
+  ledgerUnits: bigint;
+  /** What the adapter is handed: a human string with no more digits than exist. */
+  human: string;
+  /** What flooring discarded, in ledger accounting units. Never negative. */
+  remainderUnits: bigint;
+}
+
+function toAssetAmount(amountHuman: string, asset: Asset): AssetAmount {
+  // assets.ts validates this at boot; asserting it here too because the shift
+  // below silently produces nonsense rather than throwing if it is ever false.
+  if (asset.decimals < 0 || asset.decimals > ACCOUNTING_DECIMALS) {
+    throw AppError.internal(
+      `Asset ${asset.network} ${asset.symbol} declares ${asset.decimals} decimals, ` +
+        `which the ${ACCOUNTING_DECIMALS}-dp accounting scale cannot represent`,
+    );
+  }
+  const scale = 10n ** BigInt(ACCOUNTING_DECIMALS - asset.decimals);
+  const amountUnits = toAccountingUnits(amountHuman);
+  // Payout amounts are never negative (computeSplit clamps at 0 and the balance
+  // guard rejects the rest), so BigInt's truncation toward zero IS a floor here.
+  const units = amountUnits / scale;
+  return {
+    units,
+    ledgerUnits: units * scale,
+    human: formatUnits(units, asset.decimals),
+    remainderUnits: amountUnits - units * scale,
+  };
+}
 
 export interface RequestPayoutInput {
   clientId: string;
@@ -132,17 +212,64 @@ export async function requestPayout(input: RequestPayoutInput): Promise<PayoutRo
     throw AppError.badRequest(`Configured ${network} payout wallet is not a valid address`);
   }
 
-  const commission = await getActiveCommission(input.clientId);
+  // The settlement scope is passed to BOTH calls, and that is the whole point of
+  // the denomination work — without it the guard is dead code.
+  //
+  // A commission of type `fixed` or `tiered` carries AMOUNTS: the flat value and
+  // every tier bound. Those numbers have always meant USDT (that is what the
+  // schema and this service both documented, and what migration 015 writes down)
+  // but nothing told computeSplit what asset the settlement was in, so the number
+  // was applied verbatim to whatever arrived. A `fixed 1` meaning one dollar took
+  // one whole BITCOIN off a BTC settlement, and a 0.05 BTC payment fell into a
+  // tier slab written as "0 – 10" meaning ten dollars.
+  //
+  // getActiveCommission treats the asset as a PREFERENCE, not a filter: a
+  // mismatched row is still returned, ranked last, so a misconfigured client
+  // fails loudly here rather than silently settling at zero commission.
+  // computeSplit then refuses to apply it — there is no price oracle in this
+  // gateway, and a thrown payout is recoverable by fixing the configuration
+  // whereas a 100% fee that reads as legitimate commission is not.
+  //
+  // A throw here happens BEFORE withTransaction and before any INSERT, so
+  // nothing is written: the payment stays `swept`, its funds stay in the central
+  // wallet counted as the merchant's, and the settle tick re-drives it every
+  // minute (logging `auto payout skipped` with this message) until an operator
+  // gives the client a commission denominated in the asset they actually settle
+  // in, or a percentage rate — which applies to any asset.
+  const commission = await getActiveCommission(input.clientId, network, asset.symbol);
   const split = computeSplit(
     input.amount,
     commission,
     input.estimatedNetworkFee ?? '0',
+    asset.symbol,
   );
 
-  // Guard: nothing to pay after commission — do not create a zero/negative payout.
-  if (toAccountingUnits(split.netAmount) <= 0n) {
+  // Quantise the split to the SETTLEMENT ASSET before any of it is persisted.
+  //
+  // computeSplit works at the ledger's 18-dp scale, which is right for the
+  // arithmetic and wrong for the wire: a percentage rate over a 6-dp gross
+  // produces a net with more digits than Tron or Ethereum can express, and the
+  // adapter throws when it tries to parse it. Doing this at creation means the
+  // number the merchant is shown, the number the ledger reserves and the number
+  // that goes on chain are all the same number.
+  //
+  // The discarded remainder is added to commission rather than dropped, so
+  // gross = commission + fee + net still holds exactly and nothing goes missing
+  // from the reconciliation. It is at most one indivisible unit of the asset.
+  const net = toAssetAmount(split.netAmount, asset);
+  const commissionAmount = fromAccountingUnits(
+    toAccountingUnits(split.commissionAmount) + net.remainderUnits,
+  );
+
+  // Guard: nothing to pay after commission — do not create a zero/negative
+  // payout. Checked AFTER quantising, because a net that is real at 18 dp but
+  // rounds to zero in the asset (sub-satoshi dust on BTC) is equally unpayable,
+  // and a zero-value transfer would burn a fee to move nothing.
+  if (net.units <= 0n) {
     throw AppError.badRequest(
-      `Net payout is zero after commission (gross ${input.amount}, commission ${split.commissionAmount}) — nothing to settle`,
+      `Net payout is zero after commission and ${asset.symbol} rounding ` +
+        `(gross ${input.amount}, commission ${commissionAmount}, ` +
+        `${asset.decimals} dp) — nothing to settle`,
     );
   }
 
@@ -186,26 +313,44 @@ export async function requestPayout(input: RequestPayoutInput): Promise<PayoutRo
       );
     }
 
-    const res = await tx.query<PayoutRow>(
-      `INSERT INTO payouts
-         (client_id, payment_id, gross_amount, commission_amount, network_fee,
-          net_amount, to_address, network, asset, status, type, triggered_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11)
-       RETURNING *`,
-      [
-        input.clientId,
-        input.paymentId ?? null,
-        input.amount,
-        split.commissionAmount,
-        split.networkFee,
-        split.netAmount,
-        toAddress,
-        network,
-        asset.symbol,
-        input.type,
-        input.triggeredByUserId ?? null,
-      ],
-    );
+    let res;
+    try {
+      res = await tx.query<PayoutRow>(
+        `INSERT INTO payouts
+           (client_id, payment_id, gross_amount, commission_amount, network_fee,
+            net_amount, to_address, network, asset, status, type, triggered_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11)
+         RETURNING *`,
+        [
+          input.clientId,
+          input.paymentId ?? null,
+          input.amount,
+          commissionAmount,
+          split.networkFee,
+          fromAccountingUnits(net.ledgerUnits),
+          toAddress,
+          network,
+          asset.symbol,
+          input.type,
+          input.triggeredByUserId ?? null,
+        ],
+      );
+    } catch (err) {
+      // uq_payouts_active_payment (migration 016): one live payout per payment.
+      // The advisory lock above already serialises this path, so hitting it means
+      // a payout for this payment exists that our own predicates think is dead —
+      // an `unresolved` one whose transaction may be on chain. Refusing is the
+      // whole point: creating a second row is how the merchant gets paid twice.
+      // Reported as a conflict so the settle tick logs a sentence rather than
+      // a 500, and an operator clicking Payout is told why.
+      if ((err as { code?: string } | null)?.code === '23505') {
+        throw AppError.conflict(
+          `Payment ${input.paymentId} already has a payout that has not been ` +
+            `resolved; settle or release that one before creating another`,
+        );
+      }
+      throw err;
+    }
     const payout = res.rows[0];
 
     await writeAudit(
@@ -217,8 +362,12 @@ export async function requestPayout(input: RequestPayoutInput): Promise<PayoutRo
         entityId: payout.id,
         metadata: {
           gross: input.amount,
-          net: split.netAmount,
-          commission: split.commissionAmount,
+          // The QUANTISED figures — the ones actually inserted above, and the
+          // ones the chain will carry. Logging computeSplit's raw 18-dp output
+          // here would leave the only immutable record of this payout disagreeing
+          // with both the ledger row and the transfer, by the rounding remainder.
+          net: fromAccountingUnits(net.ledgerUnits),
+          commission: commissionAmount,
           network,
           type: input.type,
         },
@@ -234,10 +383,13 @@ export async function requestPayout(input: RequestPayoutInput): Promise<PayoutRo
 }
 
 /**
- * Worker processor: broadcast the USDT transfer for a payout.
+ * Worker processor: broadcast the transfer for a payout, in the row's own asset.
  *
- * Idempotency: only processes rows still in 'pending'/'failed'. Once a tx_hash is
- * set and status advanced, re-runs are skipped.
+ * Idempotency: only processes rows still in 'pending'/'failed'/'unresolved'.
+ * Once a tx_hash is set and status advanced to 'sent'/'confirmed', re-runs are
+ * skipped. An 'unresolved' row is re-entered on purpose — chainBroadcast's happy
+ * retry path re-broadcasts the stored bytes, which is a no-op if the original
+ * landed, and refuses outright where it cannot prove that.
  */
 export async function executePayout(job: Job<PayoutJob>): Promise<void> {
   const { payoutId } = job.data;
@@ -257,8 +409,55 @@ export async function executePayout(job: Job<PayoutJob>): Promise<void> {
 
   const network = parseNetwork(payout.network);
   const adapter = adapterFor(network);
+  // The asset recorded on the row, not a default: it decides both which token
+  // moves and how many decimals the amount is allowed to carry.
+  const asset = parseAsset(network, payout.asset);
 
-  await query(`UPDATE payouts SET status = 'processing' WHERE id = $1`, [payoutId]);
+  // Re-derive the wire amount from the ASSET rather than trusting the column's
+  // rendering. `net_amount` is NUMERIC(38,18) and always comes back with
+  // eighteen fractional digits, which BTC's parser rejects on length alone; and
+  // rows created before payouts were quantised at request time may carry genuine
+  // digits past what the chain can express. Both are settled here, once, before
+  // anything is signed.
+  const wire = toAssetAmount(payout.net_amount, asset);
+  if (wire.units <= 0n) {
+    // Deliberately thrown BEFORE the row moves to 'processing', and deliberately
+    // not routed through recordBroadcastFailure: the row stays 'pending', which
+    // is a reserved status, so the funds are neither released nor re-settled by
+    // the tick. It sits in the admin payout list awaiting a human. Reaching here
+    // means a payout was created that is worth less than one unit of its own
+    // asset — impossible for new rows, which are guarded at request time.
+    throw new Error(
+      `payout ${payoutId} nets ${payout.net_amount} ${asset.symbol}, which rounds ` +
+        `to zero at ${asset.decimals} dp — refusing to broadcast a no-op transfer`,
+    );
+  }
+
+  // Fold the discarded remainder into commission so the ledger says what the
+  // chain did. Same statement as the status move, so a row is never briefly
+  // recorded as paying more than it will send.
+  //
+  // The remainder is derived from the row's OWN net_amount inside the UPDATE
+  // rather than from the value this worker read a moment ago. Postgres evaluates
+  // every SET expression against the pre-update row, so `net_amount - $2` IS the
+  // remainder — and it is zero the second time, whatever else has happened in
+  // between. Passing a pre-computed remainder instead would add it again on a
+  // BullMQ retry that raced another attempt, overstating commission and breaking
+  // gross = commission + fee + net for a payout nobody would think to re-check.
+  await query(
+    `UPDATE payouts
+        SET status = 'processing',
+            commission_amount = commission_amount + (net_amount - $2::numeric),
+            net_amount = $2::numeric
+      WHERE id = $1`,
+    [payoutId, fromAccountingUnits(wire.ledgerUnits)],
+  );
+  if (wire.remainderUnits > 0n) {
+    logger.warn(
+      { payoutId, from: payout.net_amount, to: wire.human, asset: asset.symbol },
+      'payout net rounded down to the asset precision; remainder booked as commission',
+    );
+  }
 
   let txHash: string;
   try {
@@ -266,7 +465,7 @@ export async function executePayout(job: Job<PayoutJob>): Promise<void> {
       adapter,
       network,
       to: payout.to_address,
-      amountHuman: payout.net_amount,
+      amountHuman: wire.human,
       // The asset recorded on the row, not a default: the amount was computed
       // against this asset's balance and must be sent in the same token.
       asset: payout.asset,
@@ -291,7 +490,15 @@ export async function executePayout(job: Job<PayoutJob>): Promise<void> {
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'payout transfer failed';
-    await markFailed(payoutId, msg);
+    try {
+      await recordBroadcastFailure(payoutId, msg);
+    } catch (bookErr) {
+      // The row keeps whatever status it had — 'processing', which reserves the
+      // balance exactly like 'sent'. Nothing is released, so the worst case is a
+      // payout an operator has to look at, never a duplicated one. Logged
+      // separately so this never masks the failure that actually mattered.
+      logger.error({ err: bookErr, payoutId }, 'could not record payout failure state');
+    }
     throw err; // let BullMQ retry per queue policy
   }
 
@@ -309,7 +516,12 @@ export async function executePayout(job: Job<PayoutJob>): Promise<void> {
     enqueueWebhook({
       paymentId: payout.payment_id,
       event: 'payout.completed',
-      overrides: { txHash, status: 'swept', amount: payout.net_amount },
+      // The amount that went ON THE WIRE, not the column read before it was
+      // quantised. `payout` was SELECTed above, so payout.net_amount is the
+      // pre-flooring value; telling the merchant a net their own explorer will
+      // not show is how a reconciliation dispute starts. Same number the ledger
+      // now holds, rendered at the asset's precision.
+      overrides: { txHash, status: 'swept', amount: wire.human },
     }).catch((err) =>
       logger.warn({ err, payoutId }, 'payout.completed webhook enqueue failed'),
     );
@@ -334,11 +546,66 @@ export async function executePayout(job: Job<PayoutJob>): Promise<void> {
   }
 }
 
-async function markFailed(payoutId: string, error: string): Promise<void> {
-  await query(
-    `UPDATE payouts SET status = 'failed', error = $2 WHERE id = $1`,
+/**
+ * Book a failed broadcast — as `failed` ONLY if we know nothing reached the wire.
+ *
+ * `failed` is not a neutral label on a payout. It is a RELEASE: every predicate
+ * that reserves a merchant's balance lists the live statuses and omits it, and
+ * the settle tick treats a payment with no live payout as one that still needs
+ * settling. So marking a payout failed says two things at once — "this did not
+ * happen" and "that money is spendable again".
+ *
+ * The old code said both on ANY throw. But a throw out of the broadcast does not
+ * mean nothing was sent: a socket reset after the node accepted the transaction
+ * throws, and a Tron send whose response was lost throws. On those paths the
+ * release dropped the gross out of `paidOut`, the settle tick created a SECOND
+ * payout with a fresh nonce, and both landed. The per-row protections in
+ * chainBroadcast could not help — they are keyed on THAT row's broadcast_at and
+ * signed_tx, and a brand-new row has neither.
+ *
+ * `broadcast_at` is what tells the two apart. It is stamped before anything
+ * reaches the wire — by markAttempted on chains that cannot pre-sign, by
+ * persistPrepared on chains that can — so:
+ *
+ *   NULL     -> we know this never left. Release it; a fresh attempt is correct.
+ *   NOT NULL -> we do not know. `unresolved`, which reserves exactly like `sent`.
+ *
+ * Unknown is deliberately treated as in-flight even where it is probably a
+ * rejection (a node refusing for insufficient gas also stamps broadcast_at). The
+ * asymmetry is the point: holding a reservation that turns out to be unnecessary
+ * costs a merchant a delay and an operator five minutes on an explorer, while
+ * releasing one that was needed sends someone else's money twice.
+ *
+ * `unresolved` is terminal for automation — only a human moves it on. It is
+ * carried in both reservation sums below and shows in the admin payout list
+ * verbatim (statusMap passes unknown statuses through).
+ */
+async function recordBroadcastFailure(payoutId: string, error: string): Promise<void> {
+  // One statement, so the branch reads broadcast_at from the row it is updating
+  // and cannot race the persistPrepared/markAttempted write it depends on.
+  const row = await queryOne<{ status: string; broadcast_at: string | null }>(
+    `UPDATE payouts
+        SET status = CASE WHEN broadcast_at IS NULL
+                          THEN 'failed'::payout_status
+                          ELSE 'unresolved'::payout_status END,
+            error = $2
+      WHERE id = $1
+      RETURNING status, broadcast_at`,
     [payoutId, error.slice(0, 1000)],
   );
+
+  if (row?.status === 'unresolved') {
+    // ERROR, not warn: this is money that may be on chain with nobody watching
+    // it, and the reservation it holds keeps the merchant from settling that
+    // balance until someone checks the explorer and resolves the row.
+    logger.error(
+      { payoutId, broadcastAt: row.broadcast_at, error },
+      'payout failed AFTER a broadcast was attempted; held `unresolved` — ' +
+        'check the explorer and settle it manually, funds stay reserved',
+    );
+  } else {
+    logger.warn({ payoutId, error }, 'payout failed before broadcast; balance released');
+  }
 }
 
 /**
@@ -393,9 +660,14 @@ export async function getAllBalances(
         WHERE client_id = $1 AND status IN ('waiting','confirming','partial')
         GROUP BY network, asset
      ), po AS (
+       -- Same reservation set as getBalanceWith below, including 'unresolved'
+       -- (a payout that may already be on chain). The two must not drift: this
+       -- one feeds the merchant's balance strip and that one feeds the guard
+       -- that decides whether a payout may be created at all.
        SELECT network, asset, SUM(gross_amount) AS total
          FROM payouts
-        WHERE client_id = $1 AND status IN ('pending','processing','sent','confirmed')
+        WHERE client_id = $1
+          AND status IN ('pending','processing','sent','confirmed','unresolved')
         GROUP BY network, asset
      )
      SELECT k.network, k.asset,
@@ -475,13 +747,20 @@ async function getBalanceWith(
        FROM payments
       WHERE client_id = $1 AND status IN ('waiting','confirming','partial')${netFilter}`,
   );
-  // 'failed' is deliberately excluded: a failed payout freed its funds. But note
-  // that a payout with broadcast_at set may have landed anyway, which is why
-  // executePayout refuses to blind-retry those rather than relying on this sum.
+  // 'failed' is the ONLY status that frees the funds, and it now means something
+  // narrow: we know the transfer never reached the wire. A payout that threw
+  // after a broadcast was attempted is 'unresolved' and is counted here, because
+  // it may be on chain — see recordBroadcastFailure. Releasing on "we don't
+  // know" is what let the settle tick create a second payout for the same money.
+  //
+  // This list is duplicated in getAllBalances above and in the settle tick's
+  // NOT EXISTS guard (workers/index.ts); all three describe the same set and any
+  // status added here belongs in all of them.
   const paidOut = await one(
     `SELECT COALESCE(SUM(gross_amount),0)::text AS total
        FROM payouts
-      WHERE client_id = $1 AND status IN ('pending','processing','sent','confirmed')${netFilter}`,
+      WHERE client_id = $1
+        AND status IN ('pending','processing','sent','confirmed','unresolved')${netFilter}`,
   );
 
   const availU = toAccountingUnits(confirmed) - toAccountingUnits(paidOut);

@@ -11,6 +11,21 @@
  *   3. Update confirmations from the tip and promote at the threshold, driving
  *      the payment state machine identically to every other chain.
  *
+ * ============================ TWO TICKS, NOT ONE =============================
+ * Esplora has no multi-address endpoint, so step 2 is irreducibly one HTTP
+ * request per watched address. What IS reducible is doing them one after
+ * another: a sequential pass grew linearly with the number of open payments
+ * until it outran the payment expiry window, at which point an address was
+ * expired and dropped from the watch set before it had ever been polled — with a
+ * real deposit sitting on it. The scan now runs a bounded window of addresses in
+ * parallel against a per-pass deadline, least-recently-scanned first, so no
+ * address can be starved and no single slow address can stall the pass.
+ *
+ * Step 3 is pure SQL over rows step 2 already wrote, and used to be the last
+ * statement of the same pass — so a slow scan delayed every confirmation update,
+ * every payment.confirmed webhook and every sweep enqueue by exactly as much.
+ * It is now an independent interval with its own guard.
+ *
  * ============================ NO REORG DANCE =================================
  * Unlike the BSC listener there is no reorg-revert path here, and that is a
  * considered choice rather than an omission. A Bitcoin reorg deeper than one or
@@ -55,8 +70,32 @@ const RECEIVED_SUM = `COALESCE((
 const POLL_INTERVAL_MS = 30_000;
 const ADDRESS_REFRESH_MS = 30_000;
 
+/**
+ * How many addresses are scanned concurrently.
+ *
+ * A small window, not a Promise.all over the whole watch set: the public Esplora
+ * instances (blockstream.info, mempool.space) rate-limit, and being throttled off
+ * the only API this listener has is a worse failure than being slow. Each
+ * request already carries its own 15s deadline inside bitcoin.ts, so the window
+ * bounds concurrency, not patience.
+ */
+const SCAN_CONCURRENCY = 6;
+
+/**
+ * How long one address-scan pass may run before it stops and hands over to the
+ * next tick. The next pass resumes with whatever this one did not reach — see
+ * the least-recently-scanned ordering in scanAddresses().
+ */
+const PASS_DEADLINE_MS = POLL_INTERVAL_MS * 6;
+
 /** Watched deposit addresses. */
 const depositAddresses = new Set<string>();
+
+/**
+ * Address -> epoch ms of its last completed scan. Only used to order the next
+ * pass; pruned to the watch set each pass, so it cannot outgrow it.
+ */
+const lastScannedAt = new Map<string, number>();
 
 async function refreshDepositAddresses(): Promise<void> {
   const rows = await query<{ address: string }>(
@@ -174,7 +213,7 @@ async function updateConfirmationsAndPromote(tip: number): Promise<void> {
         AND bt.direction = 'incoming'
         AND bt.status = 'pending'
         AND bt.network = 'BTC'
-        AND p.status = 'confirming'`,
+        AND p.status IN ('confirming', 'partial')`,
     [tip],
   );
 
@@ -182,11 +221,22 @@ async function updateConfirmationsAndPromote(tip: number): Promise<void> {
   // questions, and this only ever asked the first — see the note in
   // evmListener.ts. On Bitcoin the stakes are the same: any nonzero output to
   // the deposit address that got deep enough confirmed the whole invoice.
+  //
+  // `partial` IS SELECTED HERE, not `confirming` alone, for the same reason it
+  // is on the other two chains: recordIncoming accepts `partial` and files a
+  // top-up as a fresh `pending` row, so the money arrives and amount_received
+  // grows past `amount` — but matching `confirming` alone meant nothing could
+  // ever select the payment again. Never promoted, never swept, never expired
+  // (processExpiry only touches `waiting`), sitting on the merchant's pending
+  // balance forever with the coins at the deposit address and nothing anywhere
+  // that could move them. A settled `partial` costs nothing to re-check: the
+  // branch below marks its incoming rows `confirmed`, so a payment with no NEW
+  // money has no `pending` row left to join against.
   const ready = await query<{ id: string; fully_paid: boolean }>(
     `SELECT p.id, (p.amount_received >= p.amount) AS fully_paid
        FROM payments p
        JOIN blockchain_transactions bt ON bt.payment_id = p.id
-      WHERE p.status = 'confirming'
+      WHERE p.status IN ('confirming', 'partial')
         AND bt.direction = 'incoming'
         AND bt.status = 'pending'
         AND bt.network = 'BTC'
@@ -198,9 +248,18 @@ async function updateConfirmationsAndPromote(tip: number): Promise<void> {
     // UNDERPAID: hold as `partial`. No payment.confirmed, no sweep. The payment
     // stays open for a top-up and is never expired out from under the funds.
     if (!p.fully_paid) {
+      // `amount_received < amount` is re-tested HERE, inside the write, and not
+      // merely trusted from the SELECT above. Promotion used to be the tail of
+      // the address scan, so nothing could record an output between the two; now
+      // that the two are separate ticks, a top-up landing in that window would be
+      // read as underpaid and the (by then fully paid) invoice would be frozen as
+      // `partial` — never confirmed, never swept. Losing this race is harmless:
+      // zero rows means the payment is already covered, its transaction rows are
+      // still `pending`, and the next tick promotes it properly.
       const marked = await query<{ id: string; amount: string; amount_received: string }>(
         `UPDATE payments SET status = 'partial'
-          WHERE id = $1 AND status = 'confirming'
+          WHERE id = $1 AND status IN ('confirming', 'partial')
+            AND amount_received < amount
           RETURNING id, amount, amount_received`,
         [p.id],
       );
@@ -220,9 +279,13 @@ async function updateConfirmationsAndPromote(tip: number): Promise<void> {
       continue;
     }
 
+    // Promote confirming/partial -> confirmed, guarded so it fires exactly once.
+    // `partial` is included because that is the topped-up case: the shortfall is
+    // covered, so the hold is released and the payment settles down the ordinary
+    // path — webhook, sweep, payout.
     const promoted = await query<{ id: string }>(
       `UPDATE payments SET status = 'confirmed', confirmed_at = now()
-        WHERE id = $1 AND status = 'confirming' RETURNING id`,
+        WHERE id = $1 AND status IN ('confirming', 'partial') RETURNING id`,
       [p.id],
     );
     if (promoted.length === 0) continue;
@@ -251,46 +314,130 @@ async function updateConfirmationsAndPromote(tip: number): Promise<void> {
   }
 }
 
-async function pollOnce(): Promise<void> {
-  const tip = await tipHeight();
-  if (!tip) {
-    logger.warn('btc: could not read the chain tip; skipping pass');
+/**
+ * Everything one watched address costs: a single /address/{addr}/txs call and
+ * the credit of any confirmed output paying it.
+ *
+ * Never throws. An address that times out or 429s is logged and abandoned for
+ * this pass only; it still counts as scanned for the ordering, so it rotates to
+ * the back and is retried after the rest of the watch set. Deliberate: a
+ * permanently failing address must not be allowed to sit at the head of every
+ * pass and consume the deadline that healthy addresses need.
+ */
+async function scanAddress(address: string): Promise<void> {
+  let txs;
+  try {
+    txs = await addressTxs(address);
+  } catch (err) {
+    logger.warn({ err, address }, 'btc: address lookup failed; will retry');
     return;
   }
 
-  for (const address of depositAddresses) {
-    let txs;
-    try {
-      txs = await addressTxs(address);
-    } catch (err) {
-      // Skip only THIS address; the rest of the pass still runs.
-      logger.warn({ err, address }, 'btc: address lookup failed; will retry');
-      continue;
+  for (const tx of txs) {
+    // Only confirmed transactions are money — see the header note on reorgs.
+    if (!tx.status?.confirmed || !tx.status.block_height) continue;
+    for (let vout = 0; vout < tx.vout.length; vout++) {
+      const out = tx.vout[vout];
+      if (out.scriptpubkey_address !== address) continue;
+      if (!out.value || out.value <= 0) continue;
+      await recordIncoming({
+        txid: tx.txid,
+        vout,
+        address,
+        valueSats: BigInt(out.value),
+        blockHeight: tx.status.block_height,
+      });
     }
+  }
+}
 
-    for (const tx of txs) {
-      // Only confirmed transactions are money — see the header note on reorgs.
-      if (!tx.status?.confirmed || !tx.status.block_height) continue;
-      for (let vout = 0; vout < tx.vout.length; vout++) {
-        const out = tx.vout[vout];
-        if (out.scriptpubkey_address !== address) continue;
-        if (!out.value || out.value <= 0) continue;
-        await recordIncoming({
-          txid: tx.txid,
-          vout,
-          address,
-          valueSats: BigInt(out.value),
-          blockHeight: tx.status.block_height,
-        });
+/**
+ * Run `work` over `items`, at most `limit` at a time, stopping once `deadline`
+ * has passed. Returns how many items were taken.
+ *
+ * A worker never propagates a failure: the point of the pool is that no single
+ * address can abort the scan, and a rejected worker would abort the Promise.all
+ * and leave the rest of the watch set unscanned.
+ */
+async function runPool<T>(
+  items: T[],
+  limit: number,
+  deadline: number,
+  work: (item: T) => Promise<void>,
+): Promise<number> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length && Date.now() < deadline) {
+      const item = items[cursor++];
+      try {
+        await work(item);
+      } catch (err) {
+        logger.warn({ err }, 'btc: address scan failed; will retry next pass');
       }
     }
+  });
+  await Promise.all(workers);
+  return cursor;
+}
+
+/** One address-scan pass over the watch set. See the header note. */
+async function scanAddresses(): Promise<void> {
+  const startedAt = Date.now();
+  const deadline = startedAt + PASS_DEADLINE_MS;
+
+  // Snapshot BEFORE any I/O. refreshDepositAddresses runs on its own 30s timer
+  // and does clear() + add(), and a Set being iterated across an await does not
+  // survive that cleanly — the iterator skips the emptied entries and walks into
+  // the newly appended ones instead. Any pass longer than the refresh interval
+  // was therefore scanning a garbled subset and could be extended without bound.
+  const snapshot = Array.from(depositAddresses);
+
+  // Forget addresses that have left the watch set, then scan least-recently-
+  // scanned first: a pass that cannot cover everything before its deadline must
+  // not restart at the head each time, or the tail — where the oldest payments,
+  // the ones closest to expiry, live — would never be polled at all.
+  for (const address of lastScannedAt.keys()) {
+    if (!depositAddresses.has(address)) lastScannedAt.delete(address);
+  }
+  snapshot.sort((a, b) => (lastScannedAt.get(a) ?? 0) - (lastScannedAt.get(b) ?? 0));
+
+  const scanned = await runPool(snapshot, SCAN_CONCURRENCY, deadline, async (address) => {
+    await scanAddress(address);
+    lastScannedAt.set(address, Date.now());
+  });
+
+  const passMs = Date.now() - startedAt;
+  // The ratio that predicts stranded deposits: once a full sweep of the watch
+  // set approaches the payment expiry window, deposits start expiring before
+  // they are ever polled. A quarter of the window is the alarm, not the limit.
+  const budgetMs = (config.paymentExpiryMinutes * 60_000) / 4;
+  const sweepMs = scanned > 0 ? (passMs * snapshot.length) / scanned : passMs;
+  if (scanned < snapshot.length || sweepMs > budgetMs) {
+    logger.error(
+      { passMs, sweepMs: Math.round(sweepMs), scanned, watching: snapshot.length, budgetMs },
+      'BTC address scan is falling behind — deposits may be detected late',
+    );
+  } else {
+    logger.debug({ passMs, watching: snapshot.length }, 'BTC address scan complete');
+  }
+}
+
+/**
+ * Confirmation + promotion tick. Reads the tip itself rather than being handed
+ * one by the address scan, because it no longer runs inside it.
+ */
+async function promoteOnce(): Promise<void> {
+  const tip = await tipHeight();
+  if (!tip) {
+    logger.warn('btc: could not read the chain tip; skipping promotion tick');
+    return;
   }
 
   await updateConfirmationsAndPromote(tip);
   await query(`UPDATE chain_cursor SET last_scanned_block = $1 WHERE network = 'BTC'`, [
     tip,
   ]);
-  logger.debug({ tip, watching: depositAddresses.size }, 'BTC poll complete');
+  logger.debug({ tip }, 'BTC promotion tick complete');
 }
 
 async function main(): Promise<void> {
@@ -319,14 +466,31 @@ async function main(): Promise<void> {
     );
   }, ADDRESS_REFRESH_MS);
 
-  let running = false;
+  let scanning = false;
   setInterval(() => {
-    if (running) return;
-    running = true;
-    pollOnce()
-      .catch((err) => logger.error({ err }, 'BTC poll pass failed'))
+    if (scanning) return;
+    scanning = true;
+    scanAddresses()
+      .catch((err) => logger.error({ err }, 'BTC address scan failed'))
       .finally(() => {
-        running = false;
+        scanning = false;
+      });
+  }, POLL_INTERVAL_MS);
+
+  // Promotion is its OWN tick with its OWN guard. It used to be the tail of the
+  // scan pass, so a scan that overran also held back every confirmation update,
+  // every payment.confirmed webhook and every sweep enqueue behind it. Nothing
+  // in promotion depends on the current scan having finished — it reads rows
+  // earlier scans already committed — so settlement now advances at a fixed
+  // cadence however large the watch set grows.
+  let promoting = false;
+  setInterval(() => {
+    if (promoting) return;
+    promoting = true;
+    promoteOnce()
+      .catch((err) => logger.error({ err }, 'BTC promotion tick failed'))
+      .finally(() => {
+        promoting = false;
       });
   }, POLL_INTERVAL_MS);
 

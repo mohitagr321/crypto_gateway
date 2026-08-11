@@ -186,6 +186,12 @@ export async function withdrawCommission(input: {
   toAddress: string;
   /** Omitted -> BEP20. Decides which central wallet pays and how the address is validated. */
   network?: string;
+  /**
+   * Omitted -> the chain's default asset (USDT where it exists, BTC on Bitcoin).
+   * Commission accrued in any other asset can only be withdrawn by naming it:
+   * the pool is per (network, asset) and the balances are not fungible.
+   */
+  asset?: string;
 }): Promise<{ id: string; status: string }> {
   const { data } = await api.post<{ id: string; status: string }>(
     '/admin/commission-withdraw',

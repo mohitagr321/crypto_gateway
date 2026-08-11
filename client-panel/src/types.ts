@@ -400,6 +400,10 @@ export type PayoutStatus =
   | 'processing'
   | 'sent'
   | 'confirmed'
+  // The broadcast threw and it is unknown whether the transaction reached the
+  // chain. mapPayoutStatusClient passes it through, so a merchant can see it.
+  // It holds the reservation like `sent` and only an operator clears it.
+  | 'unresolved'
   | 'failed';
 
 export interface Payout {

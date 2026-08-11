@@ -74,6 +74,48 @@ services:
       redis: { condition: service_healthy }
     restart: unless-stopped
 
+  # ERC20 (Ethereum) and BTC listeners.
+  #
+  # These two were missing, and their absence was a silent way to lose customer
+  # money rather than a missing feature: ETH_ENABLED / BTC_ENABLED are a pure
+  # .env edit, after which isNetworkEnabled() lets createPayment derive and
+  # persist a REAL deposit address on that chain and hand it to a customer — on
+  # a chain no process in this file was watching. The deposit would never be
+  # recorded, never confirmed, never swept; the funds would simply sit at an HD
+  # address nobody was looking at, recoverable only by hand from the mnemonic.
+  #
+  # Both entrypoints already existed in the build and both idle exactly like
+  # listener-tron while their chain is off (ethListener.ts logs one line and
+  # sleeps unless ETH_ENABLED and ETH_HTTP_RPC are both set; bitcoinListener.ts
+  # does the same on BTC_ENABLED), so declaring them costs nothing when the
+  # chains are off and is the whole difference between seeing a deposit and not
+  # when they are on.
+  #
+  # ONE instance each, like the other two: each listener is the sole writer of
+  # its own chain_cursor row and the only thing that promotes payments and
+  # enqueues sweeps on its chain. Do not scale these with `--scale`.
+  listener-eth:
+    build: ./backend
+    command: node dist/blockchain/ethListener.js
+    env_file:
+      - .env
+      - .env.docker
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  listener-btc:
+    build: ./backend
+    command: node dist/blockchain/bitcoinListener.js
+    env_file:
+      - .env
+      - .env.docker
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
   admin-panel:
     build: ./admin-panel
     ports: ["5173:80"]

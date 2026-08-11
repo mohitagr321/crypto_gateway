@@ -21,6 +21,15 @@ export interface AdminCommission {
   value: string;
   tiers?: import('./commissionService').CommissionTier[] | null;
   feePayer: 'client' | 'admin';
+  /**
+   * Denomination of the amounts in this commission, and the chain it is scoped
+   * to. Surfaced because settlement now REFUSES an amount-denominated commission
+   * in an asset other than the one being settled — an operator who cannot see
+   * which asset the fee is written in cannot tell why a payout is being skipped.
+   * Both null on a percentage rate, which has no denomination.
+   */
+  asset: string | null;
+  network: string | null;
   createdAt?: string;
   createdBy?: string;
 }
@@ -73,6 +82,8 @@ interface ClientAggRow {
   c_value: string | null;
   c_tiers: import('./commissionService').CommissionTier[] | null;
   c_fee_payer: string | null;
+  c_asset: string | null;
+  c_network: string | null;
   c_created_at: string | null;
   c_created_by: string | null;
 }
@@ -101,6 +112,8 @@ const CLIENT_SELECT = `
     com.value::text AS c_value,
     com.tiers      AS c_tiers,
     com.network_fee_payer::text AS c_fee_payer,
+    com.asset      AS c_asset,
+    com.network    AS c_network,
     com.created_at AS c_created_at,
     com.created_by AS c_created_by
   FROM clients c
@@ -146,6 +159,8 @@ function toAdminClient(row: ClientAggRow): AdminClient {
           value: row.c_value,
           tiers: row.c_tiers ?? null,
           feePayer: (row.c_fee_payer as 'client' | 'admin') ?? 'client',
+          asset: row.c_asset ?? null,
+          network: row.c_network ?? null,
           createdAt: row.c_created_at
             ? new Date(row.c_created_at).toISOString()
             : undefined,

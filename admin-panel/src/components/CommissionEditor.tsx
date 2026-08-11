@@ -24,6 +24,18 @@ export interface CommissionDraft {
   type: CommissionType;
   value: string;
   feePayer: FeePayer;
+  /**
+   * Denomination of the AMOUNTS in a fixed or tiered commission — the flat value
+   * and every slab bound. Unused for a percentage, which has no denomination.
+   *
+   * This has to be part of the draft, not just the form, because settlement now
+   * REFUSES an amount-denominated commission whose asset is not the one being
+   * settled. If the editor did not carry the existing value, every save from
+   * this panel would stamp the backend's USDT default over a fee an operator had
+   * deliberately written in BTC — and the next payout on that chain would start
+   * throwing, with the panel showing a commission that looks untouched.
+   */
+  asset: string;
   tiers: TierDraft[];
 }
 
@@ -31,12 +43,19 @@ const emptyTier = (): TierDraft => ({ minAmount: '', maxAmount: '', type: 'perce
 
 export function draftFromCommission(commission?: Commission | null): CommissionDraft {
   if (!commission) {
-    return { type: 'percentage', value: '', feePayer: 'client', tiers: [emptyTier()] };
+    return {
+      type: 'percentage',
+      value: '',
+      feePayer: 'client',
+      asset: '',
+      tiers: [emptyTier()],
+    };
   }
   return {
     type: commission.type,
     value: commission.value ?? '',
     feePayer: commission.feePayer ?? 'client',
+    asset: commission.asset ?? '',
     tiers:
       commission.tiers && commission.tiers.length
         ? commission.tiers.map((t) => ({
@@ -73,6 +92,14 @@ export function buildCommissionInput(
         type: draft.type,
         value: draft.value,
         feePayer: draft.feePayer,
+        // Only sent for an amount-denominated commission, and only when set. A
+        // percentage carries no amounts, so pinning it to an asset would stop it
+        // applying to the others it correctly covers; an empty box means "leave
+        // it to the backend default", which is USDT — what a bare number always
+        // meant.
+        ...(draft.type !== 'percentage' && draft.asset.trim()
+          ? { asset: draft.asset.trim().toUpperCase() }
+          : {}),
         note,
       },
     };
@@ -123,7 +150,14 @@ export function buildCommissionInput(
   }));
 
   return {
-    input: { clientId, type: 'tiered', tiers, feePayer: draft.feePayer, note },
+    input: {
+      clientId,
+      type: 'tiered',
+      tiers,
+      feePayer: draft.feePayer,
+      ...(draft.asset.trim() ? { asset: draft.asset.trim().toUpperCase() } : {}),
+      note,
+    },
   };
 }
 
@@ -239,7 +273,7 @@ export default function CommissionEditor({
             onChange={(e) => set({ type: e.target.value as CommissionType })}
           >
             <option value="percentage">Percentage (%)</option>
-            <option value="fixed">Fixed (USDT)</option>
+            <option value="fixed">Fixed (flat amount)</option>
             <option value="tiered">Tiered (slab)</option>
           </select>
         </div>
@@ -257,9 +291,37 @@ export default function CommissionEditor({
         </div>
       </div>
 
+      {/* The denomination, shown only where there are amounts to denominate.
+          A fixed value and a slab bound are amounts OF something, and until this
+          field existed the number was applied to whatever asset the payment
+          happened to arrive in — so a "1" meaning one dollar took one whole
+          Bitcoin off a BTC settlement. Settlement now refuses that outright, so
+          this is also the only place an operator can make a fee usable on a
+          chain that does not settle USDT. */}
+      {draft.type !== 'percentage' && (
+        <div>
+          <label className="label">Denominated in</label>
+          <input
+            className="input"
+            disabled={disabled}
+            placeholder="USDT"
+            value={draft.asset}
+            onChange={(e) => set({ asset: e.target.value })}
+          />
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            The asset these amounts are in — the symbol as the gateway knows it
+            (USDT, USDC, BNB, BTC). Blank means USDT. A commission only applies
+            to settlements in this asset; use a percentage for a rate that should
+            apply to every asset.
+          </p>
+        </div>
+      )}
+
       {draft.type !== 'tiered' ? (
         <div>
-          <label className="label">Value {draft.type === 'percentage' ? '(%)' : '(USDT)'}</label>
+          <label className="label">
+            Value {draft.type === 'percentage' ? '(%)' : `(${draft.asset.trim().toUpperCase() || 'USDT'})`}
+          </label>
           <input
             className="input"
             disabled={disabled}

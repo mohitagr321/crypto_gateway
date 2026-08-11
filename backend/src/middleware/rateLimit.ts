@@ -1,31 +1,309 @@
 /**
- * Rate limiting via express-rate-limit, backed by Redis when available.
+ * Rate limiting via express-rate-limit, backed by Redis — with a deliberate,
+ * loud degraded mode for when Redis is not there.
  *
- * If the Redis store cannot be constructed for any reason we fall back to the
- * in-memory store so the API still boots (with a warning) rather than crashing.
+ * WHAT WAS WRONG. The comment that used to sit here claimed we "fall back to
+ * the in-memory store so the API still boots (with a warning) rather than
+ * crashing". It did not, and structurally could not: the try/catch below only
+ * ever wrapped the SYNCHRONOUS `new RedisStore(...)`, and that constructor does
+ * not throw when Redis is unreachable. It fires two `SCRIPT LOAD`s and parks
+ * the promises on the instance (`incrementScriptSha`, `getScriptSha`).
+ * `getScriptSha` is only ever awaited by `store.get()`, which this middleware
+ * never calls — it calls `increment` — so when ioredis gave up after
+ * `maxRetriesPerRequest` nothing anywhere held a handler for that rejection.
+ * Node's default for an unhandled rejection is to terminate, and the API
+ * registers no process-level handler, so the whole process died ~4s after boot,
+ * seven times over (one store per limiter, all built at module load). Under PM2
+ * that is a crash loop for the full duration of the outage, with /health
+ * unreachable rather than merely degraded — strictly worse than the 500s the
+ * old comment was worried about.
+ *
+ * WHAT WE DO INSTEAD, AND WHY. Rate limiting is a security control, so the two
+ * obvious answers are both wrong here:
+ *   - failing CLOSED turns a Redis blip into a total gateway outage. On-chain
+ *     money keeps being credited (the listener is a separate process and does
+ *     not touch these limiters), but no merchant can create a payment and no
+ *     checkout page can poll a status while a customer is mid-payment. For a
+ *     system that moves other people's money that is the worse failure.
+ *   - failing OPEN silently hands /auth/login a free window for credential
+ *     stuffing, and lets the public checkout write path burn the HD derivation
+ *     counter unthrottled, with nothing in the logs to say it happened.
+ *
+ * So we fail open ONTO A REAL LIMITER. Every store keeps a per-process
+ * MemoryStore in reserve and switches to it the moment a Redis command fails or
+ * times out. The ceiling is then per-process instead of per-cluster — N api
+ * instances make it N times looser than configured — which is worse than Redis
+ * and enormously better than nothing: one abusive IP still meets roughly the
+ * configured rate on whichever instance it lands on. Entering and leaving that
+ * mode is logged at ERROR with the store prefix, so the degradation shows up in
+ * the first second rather than being inferred later from an abuse report.
+ *
+ * NOTE: this file can only make the limiter survive a Redis outage. It cannot
+ * make the API survive one on its own — see the notes on `redis.ts` /
+ * `index.ts` in the audit (offline queue, command timeout, a process-level
+ * unhandledRejection handler, and a Redis probe on /health).
  */
-import rateLimit, { Options } from 'express-rate-limit';
+import rateLimit, { MemoryStore, Options, Store, ClientRateLimitInfo } from 'express-rate-limit';
 import { RedisStore } from 'rate-limit-redis';
 import { config } from '../config/env';
 import { logger } from '../config/logger';
 import { redis } from '../db/redis';
 
-function buildStore(prefix: string): Options['store'] | undefined {
-  try {
-    return new RedisStore({
-      // ioredis: use call() to send raw commands as rate-limit-redis expects.
-      sendCommand: (command: string, ...args: string[]) =>
-        redis.call(command, ...args) as Promise<never>,
-      prefix,
-    }) as unknown as Options['store'];
-  } catch (err) {
-    logger.warn({ err }, 'redis rate-limit store unavailable; falling back to memory');
-    return undefined;
+/**
+ * How long a single Redis command may hang before we treat it as failed.
+ *
+ * EVALSHA against a healthy Redis is sub-millisecond, so a second is enormously
+ * generous for the happy path. It exists for the UNhealthy path: ioredis queues
+ * commands while the connection is down, and without a ceiling every one of
+ * 1,000 concurrent requests parks on a queued command instead of being served
+ * by the fallback store.
+ */
+const REDIS_COMMAND_TIMEOUT_MS = 1_000;
+
+/**
+ * Once degraded, don't re-probe Redis on every request — at 1,000 concurrent
+ * that is 1,000 requests each paying the timeout above. One probe every few
+ * seconds is enough to notice recovery quickly while everything else goes
+ * straight to the local store.
+ */
+const REDIS_PROBE_INTERVAL_MS = 5_000;
+
+/** Ceiling on how often a store repeats its "still degraded" line. */
+const DEGRADED_LOG_INTERVAL_MS = 30_000;
+
+/**
+ * Send one raw command to the shared client, with a hard deadline.
+ *
+ * The loser of the race must not be left to reject on its own — that is exactly
+ * the unhandled rejection this whole file exists to stop — so the underlying
+ * promise gets a no-op handler attached before the race is set up.
+ */
+function sendCommand(command: string, ...args: string[]): Promise<never> {
+  // ioredis: use call() to send raw commands as rate-limit-redis expects.
+  const call = redis.call(command, ...args) as Promise<never>;
+  call.catch(() => {
+    /* handled by the race below, or discarded if the deadline won */
+  });
+
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`redis command ${command} exceeded ${REDIS_COMMAND_TIMEOUT_MS}ms`)),
+      REDIS_COMMAND_TIMEOUT_MS,
+    );
+    // Never hold the process open on a rate-limit command.
+    timer.unref?.();
+  });
+
+  return Promise.race([call, deadline]).finally(() => {
+    if (timer) clearTimeout(timer);
+  }) as Promise<never>;
+}
+
+/**
+ * A Redis-backed store that degrades to a per-process one instead of throwing.
+ *
+ * express-rate-limit's own `passOnStoreError` degradation is all-or-nothing:
+ * the request is waved through with no counting at all. This sits in front of
+ * that and keeps counting locally, so an outage costs us cluster-wide accuracy
+ * rather than the control itself.
+ */
+class ResilientStore implements Store {
+  /** Exposed because the ERR_ERL_DOUBLE_COUNT validation disambiguates stores by prefix. */
+  readonly prefix: string;
+
+  /** The steady state is Redis, which is shared across api instances. */
+  readonly localKeys = false;
+
+  private readonly redisStore: Store;
+
+  private options?: Options;
+
+  private memoryStore?: MemoryStore;
+
+  private degraded = false;
+
+  private probeAfter = 0;
+
+  private failuresSinceLog = 0;
+
+  private lastLogAt = 0;
+
+  constructor(redisStore: Store, prefix: string) {
+    this.redisStore = redisStore;
+    this.prefix = prefix;
+  }
+
+  init(options: Options): void {
+    this.options = options;
+    this.redisStore.init?.(options);
+    // The MemoryStore is built on first failure rather than here: it starts an
+    // interval timer, and there is no reason for seven of them to exist for the
+    // entire life of a process whose Redis is perfectly healthy.
+  }
+
+  async increment(key: string): Promise<ClientRateLimitInfo> {
+    if (this.skipRedis()) return this.memory().increment(key);
+    try {
+      const info = await this.redisStore.increment(key);
+      this.noteHealthy();
+      return info;
+    } catch (err) {
+      this.noteFailure(err);
+      return this.memory().increment(key);
+    }
+  }
+
+  async decrement(key: string): Promise<void> {
+    if (this.skipRedis()) {
+      await this.memory().decrement(key);
+      return;
+    }
+    try {
+      await this.redisStore.decrement(key);
+      this.noteHealthy();
+    } catch (err) {
+      this.noteFailure(err);
+      await this.memory().decrement(key);
+    }
+  }
+
+  async resetKey(key: string): Promise<void> {
+    if (this.skipRedis()) {
+      await this.memory().resetKey(key);
+      return;
+    }
+    try {
+      await this.redisStore.resetKey(key);
+      this.noteHealthy();
+    } catch (err) {
+      this.noteFailure(err);
+      await this.memory().resetKey(key);
+    }
+  }
+
+  /**
+   * Only reachable via `middleware.getKey`, which nothing in this codebase
+   * calls today. Kept so wrapping the store does not quietly remove a method
+   * the store used to have.
+   */
+  async get(key: string): Promise<ClientRateLimitInfo | undefined> {
+    if (this.skipRedis()) return this.memory().get(key);
+    try {
+      const info = await this.redisStore.get?.(key);
+      this.noteHealthy();
+      return info;
+    } catch (err) {
+      this.noteFailure(err);
+      return this.memory().get(key);
+    }
+  }
+
+  private skipRedis(): boolean {
+    return this.degraded && Date.now() < this.probeAfter;
+  }
+
+  private memory(): MemoryStore {
+    if (!this.memoryStore) {
+      const store = new MemoryStore();
+      // `init` is always called by express-rate-limit before any request
+      // reaches us; the fallback window is there so a MemoryStore can never end
+      // up with windowMs undefined and reset its counters on every single hit —
+      // that would be the silent fail-open this design is trying to avoid.
+      store.init(this.options ?? ({ windowMs: 60_000 } as Options));
+      this.memoryStore = store;
+    }
+    return this.memoryStore;
+  }
+
+  private noteFailure(err: unknown): void {
+    const now = Date.now();
+    const entering = !this.degraded;
+    this.degraded = true;
+    this.probeAfter = now + REDIS_PROBE_INTERVAL_MS;
+    this.failuresSinceLog += 1;
+
+    if (entering || now - this.lastLogAt >= DEGRADED_LOG_INTERVAL_MS) {
+      logger.error(
+        { err, prefix: this.prefix, failures: this.failuresSinceLog },
+        'rate limiter DEGRADED: redis unreachable, counting in this process only. ' +
+          'Limits are now per-api-process and therefore looser than configured.',
+      );
+      this.lastLogAt = now;
+      this.failuresSinceLog = 0;
+    }
+  }
+
+  private noteHealthy(): void {
+    if (!this.degraded) return;
+    this.degraded = false;
+    this.probeAfter = 0;
+    this.failuresSinceLog = 0;
+    // Warn, not error: this is the all-clear, and an operator alerting on ERROR
+    // should not be paged by a recovery. It is still logged, because "when did
+    // the window stop being cluster-wide" is the first question asked after an
+    // abuse report that lands during an outage.
+    logger.warn(
+      { prefix: this.prefix },
+      'rate limiter RECOVERED: redis reachable again, limits are cluster-wide once more',
+    );
+    // Drop the local counters. They cannot be merged into Redis, and holding
+    // them costs memory for a window that no longer means anything.
+    void this.memoryStore?.resetAll();
   }
 }
 
+function buildStore(prefix: string): Store {
+  try {
+    const store = new RedisStore({
+      sendCommand: (command: string, ...args: string[]) => sendCommand(command, ...args),
+      prefix,
+    });
+
+    // THE CRASH. rate-limit-redis fires both SCRIPT LOADs inside its
+    // constructor and keeps the promises as fields. Nothing awaits
+    // `getScriptSha` on this path, so with Redis down it rejects with no
+    // handler and takes the process out. Attaching a handler here defuses that
+    // without changing the store's behaviour: `retryableIncrement` reassigns
+    // `incrementScriptSha = loadIncrementScript(key)` in its own catch and
+    // awaits the new promise immediately, so the store still self-heals the
+    // moment Redis comes back.
+    store.incrementScriptSha.catch((err: unknown) =>
+      logger.error({ err, prefix }, 'rate limiter: redis SCRIPT LOAD failed at startup (increment)'),
+    );
+    store.getScriptSha.catch((err: unknown) =>
+      logger.error({ err, prefix }, 'rate limiter: redis SCRIPT LOAD failed at startup (get)'),
+    );
+
+    return new ResilientStore(store as unknown as Store, prefix);
+  } catch (err) {
+    // Only reachable on a malformed options object, not on an outage — but if
+    // it ever fires we still want a limiter rather than none, so return the
+    // per-process store directly and say so at ERROR, not warn.
+    logger.error(
+      { err, prefix },
+      'rate limiter: could not construct the redis store; using a per-process memory store for the life of this process',
+    );
+    return new MemoryStore();
+  }
+}
+
+/**
+ * Fail-open is the last line, below the ResilientStore.
+ *
+ * The store above should never throw — a Redis failure lands in the local
+ * MemoryStore instead. If something below it does throw anyway, express-rate-
+ * limit's default is to surface a 500 for the request, which for the global
+ * limiter means the entire API returns 500 including /health. Passing the
+ * request through unthrottled and logging it is the lesser harm for a payment
+ * gateway; it is set on every limiter deliberately, not selectively, so there
+ * is no route where an internal limiter error is a customer-visible outage.
+ */
+const failOpen = { passOnStoreError: true } as const;
+
 /** Global limiter applied to the whole API. */
 export const globalRateLimiter = rateLimit({
+  ...failOpen,
   windowMs: config.rateLimit.windowMs,
   max: config.rateLimit.max,
   standardHeaders: true,
@@ -36,6 +314,7 @@ export const globalRateLimiter = rateLimit({
 
 /** Tighter limiter for auth/login to blunt credential stuffing. */
 export const authRateLimiter = rateLimit({
+  ...failOpen,
   windowMs: config.rateLimit.windowMs,
   max: Math.max(5, Math.floor(config.rateLimit.max / 12)),
   standardHeaders: true,
@@ -53,6 +332,7 @@ export const authRateLimiter = rateLimit({
  * one) is what makes a handful of attempts a meaningful ceiling.
  */
 export const signupRateLimiter = rateLimit({
+  ...failOpen,
   windowMs: 60 * 60 * 1000,
   max: config.rateLimit.signupMax,
   standardHeaders: true,
@@ -73,6 +353,7 @@ export const signupRateLimiter = rateLimit({
  * page mid-payment, which is far worse than the abuse it would prevent.
  */
 export const checkoutReadLimiter = rateLimit({
+  ...failOpen,
   windowMs: 60_000,
   max: 120,
   standardHeaders: true,
@@ -89,6 +370,7 @@ export const checkoutReadLimiter = rateLimit({
  * from the open internet. A real customer starts one payment, occasionally two.
  */
 export const checkoutWriteLimiter = rateLimit({
+  ...failOpen,
   windowMs: 60_000,
   max: 10,
   standardHeaders: true,
@@ -114,6 +396,7 @@ export const checkoutWriteLimiter = rateLimit({
  * a relay would need.
  */
 export const invoiceSendLimiter = rateLimit({
+  ...failOpen,
   windowMs: 60 * 60 * 1000,
   max: 100,
   standardHeaders: true,
@@ -137,6 +420,7 @@ export const invoiceSendLimiter = rateLimit({
  * (dashboard JWT sessions) fall through to the global limiter untouched.
  */
 export const apiKeyRateLimiter = rateLimit({
+  ...failOpen,
   windowMs: config.rateLimit.windowMs,
   max: config.rateLimit.apiKeyMax,
   standardHeaders: true,
