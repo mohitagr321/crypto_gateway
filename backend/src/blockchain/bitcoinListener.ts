@@ -178,8 +178,12 @@ async function updateConfirmationsAndPromote(tip: number): Promise<void> {
     [tip],
   );
 
-  const ready = await query<{ id: string }>(
-    `SELECT p.id
+  // `fully_paid`: confirmation DEPTH and payment SUFFICIENCY are independent
+  // questions, and this only ever asked the first — see the note in
+  // evmListener.ts. On Bitcoin the stakes are the same: any nonzero output to
+  // the deposit address that got deep enough confirmed the whole invoice.
+  const ready = await query<{ id: string; fully_paid: boolean }>(
+    `SELECT p.id, (p.amount_received >= p.amount) AS fully_paid
        FROM payments p
        JOIN blockchain_transactions bt ON bt.payment_id = p.id
       WHERE p.status = 'confirming'
@@ -191,6 +195,31 @@ async function updateConfirmationsAndPromote(tip: number): Promise<void> {
   );
 
   for (const p of ready) {
+    // UNDERPAID: hold as `partial`. No payment.confirmed, no sweep. The payment
+    // stays open for a top-up and is never expired out from under the funds.
+    if (!p.fully_paid) {
+      const marked = await query<{ id: string; amount: string; amount_received: string }>(
+        `UPDATE payments SET status = 'partial'
+          WHERE id = $1 AND status = 'confirming'
+          RETURNING id, amount, amount_received`,
+        [p.id],
+      );
+      if (marked.length === 0) continue;
+
+      await query(
+        `UPDATE blockchain_transactions SET status = 'confirmed'
+          WHERE payment_id = $1 AND direction = 'incoming' AND status = 'pending'
+            AND network = 'BTC'`,
+        [p.id],
+      );
+
+      logger.warn(
+        { paymentId: p.id, expected: marked[0].amount, received: marked[0].amount_received },
+        'BTC payment underpaid — held as partial, not confirmed, not swept',
+      );
+      continue;
+    }
+
     const promoted = await query<{ id: string }>(
       `UPDATE payments SET status = 'confirmed', confirmed_at = now()
         WHERE id = $1 AND status = 'confirming' RETURNING id`,
