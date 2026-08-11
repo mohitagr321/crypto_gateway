@@ -2,8 +2,18 @@
  * Merchant payout routes.
  *
  * Auth: `clientAuth` (JWT merchant OR API key).
- *   GET  /payouts   list this merchant's payouts as client-panel Payout[]
+ *   GET  /payouts   paginated list of this merchant's payouts
  *   POST /payouts   request a payout to the configured payout wallet -> 202
+ *
+ * RESPONSE SHAPE CHANGE (GET /payouts): this used to return a BARE ARRAY of
+ * every payout row the merchant had ever had — no LIMIT, no pagination, sorted
+ * by created_at with no index to sort by. It now returns the same
+ * `{ data, page, total }` envelope that GET /payments and every admin list route
+ * already use. client-panel/src/lib/api.ts:443 already types the response as
+ * `Payout[] | Paginated<Payout>` and unwraps `data.data`, so the panel keeps
+ * working — but it sends no page/limit and has no pager, so it now renders the
+ * most recent page rather than the whole history. `total` is in the response so
+ * a pager can be added; older payouts are reachable today via ?page=N.
  *
  * SCOPE: creating a payout moves money out of the gateway, so it requires
  * `payouts:write`. Simple (bearer-token) keys are never issued that scope — see
@@ -63,6 +73,30 @@ router.get(
   requireScope(SCOPES.paymentsRead),
   asyncHandler(async (req, res) => {
     const client = req.client!;
+
+    // docs/openapi.yaml has ALWAYS documented `page` and `limit` on this route
+    // (limit default 20) — the handler simply never read them, so an integrator
+    // following the published contract silently received the entire history.
+    // The default matches the spec rather than the 25 used elsewhere in this
+    // codebase, because the spec is what clients were told. The 100 ceiling is
+    // the same one listPayments and the admin lists apply.
+    const page = Math.max(1, Number(req.query.page ?? 1) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit ?? 20) || 20));
+    const offset = (page - 1) * limit;
+
+    const totalRows = await query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM payouts WHERE client_id = $1`,
+      [client.clientId],
+    );
+    const total = Number(totalRows[0]?.count ?? '0');
+
+    // ORDER BY is (created_at DESC, id DESC), not created_at alone. created_at
+    // is not unique — the settle tick can create several payouts for one
+    // merchant inside the same millisecond — and with a non-deterministic tie
+    // break a row can appear on two pages or on none, which is precisely how a
+    // paginated list silently drops work. The id tiebreak makes the ordering
+    // total, so page N+1 resumes exactly where page N stopped.
+    // Backed by idx_payouts_client_created (migration 022).
     const rows = await query<{
       id: string;
       gross_amount: string;
@@ -76,10 +110,12 @@ router.get(
       `SELECT id, gross_amount, status, to_address, network, asset, tx_hash, created_at
          FROM payouts
         WHERE client_id = $1
-        ORDER BY created_at DESC`,
-      [client.clientId],
+        ORDER BY created_at DESC, id DESC
+        LIMIT $2 OFFSET $3`,
+      [client.clientId, limit, offset],
     );
-    res.status(200).json(rows.map(toClientPayout));
+
+    res.status(200).json({ data: rows.map(toClientPayout), page, total });
   }),
 );
 

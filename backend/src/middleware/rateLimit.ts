@@ -42,6 +42,24 @@
  * make the API survive one on its own — see the notes on `redis.ts` /
  * `index.ts` in the audit (offline queue, command timeout, a process-level
  * unhandledRejection handler, and a Redis probe on /health).
+ *
+ * WHERE THE COUNTERS LIVE. Confirmed, because it changes what every number in
+ * this file means: in the steady state every limiter below is REDIS-backed
+ * (`rate-limit-redis` over the single shared ioredis client in `db/redis.ts`),
+ * so a limit is a CLUSTER-wide budget no matter how many api processes are
+ * running. The per-process MemoryStore is reached only while `ResilientStore`
+ * is degraded, and while it is, each ceiling is effectively multiplied by the
+ * number of api processes — which is precisely why entering that mode is logged
+ * at ERROR rather than swallowed.
+ *
+ * WHAT THE GLOBAL LIMITER IS FOR. It is a coarse per-IP ABUSE ceiling and
+ * nothing else. It used to be the only limiter with real teeth (120/min/IP, in
+ * front of every route including /health) and that made it the first thing to
+ * reject legitimate traffic: the deliberate 600/min per-API-key budget was
+ * unreachable underneath a 120/min per-IP one, every merchant behind a single
+ * NAT egress shared one bucket, and a load balancer's health probe spent the
+ * same budget as customer traffic — so a busy instance could be probed into
+ * being declared dead. See `GLOBAL_ABUSE_CEILING` and `isHealthProbe` below.
  */
 import rateLimit, { MemoryStore, Options, Store, ClientRateLimitInfo } from 'express-rate-limit';
 import { RedisStore } from 'rate-limit-redis';
@@ -301,22 +319,134 @@ function buildStore(prefix: string): Store {
  */
 const failOpen = { passOnStoreError: true } as const;
 
-/** Global limiter applied to the whole API. */
+/**
+ * Liveness/readiness probes are never rate limited.
+ *
+ * An orchestrator or load balancer probes on a fixed schedule from a fixed
+ * address, and on a busy node that address is also carrying real traffic. If
+ * the probe shares a bucket with that traffic, the first thing a burst does is
+ * 429 the probe — and the balancer's answer to a 429 is to take a HEALTHY
+ * instance out of rotation, moving its load onto the remaining ones, which then
+ * burst harder. That is a self-amplifying outage caused entirely by the
+ * limiter. /health does no I/O (see index.ts), so there is nothing here worth
+ * protecting with a counter.
+ *
+ * index.ts also registers /health ABOVE this middleware, so in practice the
+ * predicate never fires. It is kept because "the limiter is in front of
+ * everything" is a one-line change away from being true again, and this is the
+ * cheap belt-and-braces half of the fix.
+ *
+ * Matched case-insensitively and with an optional trailing slash because
+ * Express routing is case-insensitive and strict routing is off by default, so
+ * `/Health/` reaches the same handler.
+ */
+function isHealthProbe(req: { path?: string; originalUrl?: string }): boolean {
+  const raw = (req.path ?? req.originalUrl ?? '').split('?')[0].toLowerCase();
+  const path = raw.length > 1 ? raw.replace(/\/+$/, '') : raw;
+  return path === '/health';
+}
+
+/**
+ * The global limiter's real ceiling — deliberately NOT `config.rateLimit.max`
+ * on its own.
+ *
+ * This limiter is keyed on the client IP (express-rate-limit's default key; no
+ * override, so IPv6 normalisation stays with the library). An IP key is the
+ * wrong shape for almost all of this system's traffic — merchant integrations
+ * arrive from one or two server addresses, and checkout customers arrive from
+ * carrier CGNAT — so it can only ever be an anti-abuse backstop. The per-caller
+ * policy is the job of the limiters that can actually see a principal:
+ * `apiKeyRateLimiter` (per API key), `invoiceSendLimiter` (per client),
+ * `authRateLimiter` / `signupRateLimiter` / `checkoutWriteLimiter` (tight, per
+ * route). Those run AFTER this one, and a later limiter can never loosen an
+ * earlier one — so if this ceiling sits below theirs, theirs are dead letters.
+ *
+ * Hence the floor: whatever RATE_LIMIT_MAX says, the global ceiling is at least
+ * five API keys' worth of the per-key budget in the same window. Five, so that
+ * a handful of merchants sharing one NAT egress can each still reach the
+ * per-key allowance the product sold them, and so the number moves with
+ * API_KEY_RATE_LIMIT_MAX instead of silently going stale next to it. A larger
+ * RATE_LIMIT_MAX is always honoured — the floor only ever raises.
+ *
+ * Deployed .env files still carry RATE_LIMIT_MAX=120 from when this was the
+ * only limiter in the system; at 120/min/IP the 600/min per-key budget is
+ * arithmetically unreachable and a single merchant integration is capped at 2
+ * req/s. Overriding config is not something to do quietly, so the override is
+ * logged at WARN at boot with the variable to set.
+ */
+const GLOBAL_ABUSE_CEILING = Math.max(
+  config.rateLimit.max,
+  Math.max(3000, config.rateLimit.apiKeyMax * 5),
+);
+
+if (GLOBAL_ABUSE_CEILING !== config.rateLimit.max) {
+  logger.warn(
+    {
+      configured: config.rateLimit.max,
+      applied: GLOBAL_ABUSE_CEILING,
+      windowMs: config.rateLimit.windowMs,
+      apiKeyMax: config.rateLimit.apiKeyMax,
+    },
+    'global rate limiter: RATE_LIMIT_MAX is below the per-IP abuse floor and would cap ' +
+      'API_KEY_RATE_LIMIT_MAX before it could ever apply; raising it for this process. ' +
+      'Set RATE_LIMIT_MAX at or above the applied value to silence this — it is a per-IP ' +
+      'anti-abuse ceiling, not the per-merchant budget.',
+  );
+}
+
+/**
+ * Global limiter applied to the whole API.
+ *
+ * Note what is deliberately NOT here: a `skip` for requests that merely CARRY
+ * an X-Api-Key or Authorization header. Skipping on the presence of a header
+ * would let any caller opt out of the only limiter that runs before
+ * authentication just by sending a junk credential, which turns this into a
+ * no-op for exactly the traffic it exists to stop and points unbounded 401s at
+ * the database. The header is not evidence of anything until `merchantAuth`
+ * has checked it, and that runs later. So every request is counted, and the
+ * ceiling is sized so that counting them costs legitimate traffic nothing.
+ */
 export const globalRateLimiter = rateLimit({
   ...failOpen,
   windowMs: config.rateLimit.windowMs,
-  max: config.rateLimit.max,
+  max: GLOBAL_ABUSE_CEILING,
   standardHeaders: true,
   legacyHeaders: false,
   store: buildStore('rl:global:'),
+  skip: (req) => isHealthProbe(req),
   message: { error: 'rate_limited', message: 'Too many requests' },
 });
+
+/**
+ * Login/refresh attempts allowed per IP per window.
+ *
+ * DELIBERATELY DECOUPLED FROM A RAISED `RATE_LIMIT_MAX`. This used to be a
+ * straight `floor(config.rateLimit.max / 12)`, which was harmless only because
+ * RATE_LIMIT_MAX was the global per-IP ceiling and therefore small (120 -> 10
+ * attempts/min). Now that the global limiter has its own abuse floor and warns
+ * the operator to raise RATE_LIMIT_MAX to match it, that divisor became a trap:
+ * following the boot warning and setting RATE_LIMIT_MAX=3000 would silently
+ * take the credential-stuffing ceiling from 10 attempts/min to 250 — a 25x
+ * weakening of a security control as a side effect of a throughput setting,
+ * with nothing in the logs to say it happened.
+ *
+ * So the divisor is applied to a fixed baseline, not to whatever the global
+ * ceiling has grown to. The one direction still honoured is TIGHTENING: an
+ * operator who lowers RATE_LIMIT_MAX below the baseline still lowers this
+ * (identical arithmetic to before for any value <= the baseline), because
+ * "turn everything down" must keep working. Raising it no longer moves this.
+ */
+const AUTH_LIMIT_BASE = 120;
+const AUTH_ATTEMPTS_PER_WINDOW = Math.max(
+  5,
+  Math.floor(Math.min(config.rateLimit.max, AUTH_LIMIT_BASE) / 12),
+);
 
 /** Tighter limiter for auth/login to blunt credential stuffing. */
 export const authRateLimiter = rateLimit({
   ...failOpen,
   windowMs: config.rateLimit.windowMs,
-  max: Math.max(5, Math.floor(config.rateLimit.max / 12)),
+  max: AUTH_ATTEMPTS_PER_WINDOW,
   standardHeaders: true,
   legacyHeaders: false,
   store: buildStore('rl:auth:'),

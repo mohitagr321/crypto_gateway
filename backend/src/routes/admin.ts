@@ -77,6 +77,65 @@ function parsePage(req: import('express').Request): { page: number; limit: numbe
   return { page, limit };
 }
 
+/**
+ * Below this many rows an exact COUNT(*) is cheap enough that nobody should get
+ * an approximate answer. Above it, an operator paging a dashboard is not worth a
+ * full-table scan on every page load.
+ */
+const EXACT_COUNT_CEILING = 50_000;
+
+/**
+ * Row count for an admin list page — exact when that is affordable, estimated
+ * when it is not.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * /admin/transactions, /admin/payouts and /admin/webhook-logs each ran
+ * `SELECT COUNT(*) FROM <table> WHERE 1=1` on every page load. With no filter
+ * that is a full scan of a table that grows forever and is never pruned, holding
+ * one of a 20-slot pool with no statement_timeout — and it is spent producing a
+ * page-count integer, not the rows themselves.
+ *
+ * The rule:
+ *   FILTERED  -> count exactly. The predicate is indexed and the work is
+ *                proportional to what the operator asked for.
+ *   UNFILTERED-> ask the planner's own statistics first (pg_class.reltuples,
+ *                an O(1) catalog lookup). If the table is genuinely small,
+ *                count it exactly anyway so small deployments — and a freshly
+ *                seeded database whose stats say 0 — still see true numbers.
+ *                Only a large table returns the estimate.
+ *
+ * NOTHING IS DROPPED BY THIS. `total` drives the panel's page count and nothing
+ * else; the rows themselves come from the LIMIT/OFFSET query, which is
+ * untouched. Callers surface `estimated` as `totalIsEstimate` so the UI can say
+ * "about" rather than quietly lying.
+ */
+async function listTotal(
+  table: 'payments' | 'payouts' | 'webhook_logs',
+  countSql: string,
+  args: unknown[],
+  filtered: boolean,
+): Promise<{ total: number; estimated: boolean }> {
+  const exact = async (): Promise<{ total: number; estimated: boolean }> => {
+    const rows = await query<{ count: string }>(countSql, args);
+    return { total: Number(rows[0]?.count ?? '0'), estimated: false };
+  };
+
+  if (filtered) return exact();
+
+  // reltuples is -1 on a table that has never been analyzed (PG14+) and can be
+  // stale after a bulk load; both cases fall through to the exact count.
+  const est = await query<{ est: string }>(
+    `SELECT reltuples::bigint AS est FROM pg_class WHERE oid = to_regclass($1)`,
+    [table],
+  );
+  const approx = Number(est[0]?.est ?? '-1');
+  if (!Number.isFinite(approx) || approx < 0 || approx <= EXACT_COUNT_CEILING) {
+    return exact();
+  }
+  return { total: approx, estimated: true };
+}
+
 // ---------- GET /admin/clients ----------
 // Registered BEFORE '/clients/:id' so the list route is not shadowed.
 
@@ -478,11 +537,12 @@ router.get(
     }
     const whereSql = where.join(' AND ');
 
-    const totalRows = await query<{ count: string }>(
+    const { total, estimated } = await listTotal(
+      'payments',
       `SELECT COUNT(*)::text AS count FROM payments p WHERE ${whereSql}`,
       args,
+      Boolean(status || clientId),
     );
-    const total = Number(totalRows[0]?.count ?? '0');
 
     const dataArgs = [...args, limit, offset];
     const rows = await query<{
@@ -504,7 +564,7 @@ router.get(
          FROM payments p
          JOIN clients c ON c.id = p.client_id
         WHERE ${whereSql}
-        ORDER BY p.created_at DESC
+        ORDER BY p.created_at DESC, p.id DESC
         LIMIT $${dataArgs.length - 1} OFFSET $${dataArgs.length}`,
       dataArgs,
     );
@@ -526,7 +586,7 @@ router.get(
       createdAt: new Date(r.created_at).toISOString(),
     }));
 
-    res.status(200).json({ data, page, total });
+    res.status(200).json({ data, page, total, totalIsEstimate: estimated });
   }),
 );
 
@@ -554,11 +614,12 @@ router.get(
     }
     const whereSql = where.join(' AND ');
 
-    const totalRows = await query<{ count: string }>(
+    const { total, estimated } = await listTotal(
+      'payouts',
       `SELECT COUNT(*)::text AS count FROM payouts po WHERE ${whereSql}`,
       args,
+      Boolean(status || clientId),
     );
-    const total = Number(totalRows[0]?.count ?? '0');
 
     const dataArgs = [...args, limit, offset];
     const rows = await query<{
@@ -578,7 +639,7 @@ router.get(
          FROM payouts po
          JOIN clients c ON c.id = po.client_id
         WHERE ${whereSql}
-        ORDER BY po.created_at DESC
+        ORDER BY po.created_at DESC, po.id DESC
         LIMIT $${dataArgs.length - 1} OFFSET $${dataArgs.length}`,
       dataArgs,
     );
@@ -602,7 +663,7 @@ router.get(
           : null,
     }));
 
-    res.status(200).json({ data, page, total });
+    res.status(200).json({ data, page, total, totalIsEstimate: estimated });
   }),
 );
 
@@ -683,23 +744,27 @@ router.get(
     }
     const whereSql = where.join(' AND ');
 
-    const totalRows = await query<{ count: string }>(
+    const { total, estimated } = await listTotal(
+      'webhook_logs',
       `SELECT COUNT(*)::text AS count FROM webhook_logs WHERE ${whereSql}`,
       args,
+      Boolean(clientId),
     );
-    const total = Number(totalRows[0]?.count ?? '0');
 
     const dataArgs = [...args, limit, offset];
+    // (created_at DESC, id DESC): webhook_logs rows for one delivery burst share
+    // a created_at, and an unstable tie break makes a row show on two pages or
+    // none as the operator pages through.
     const rows = await query(
       `SELECT id, client_id, payment_id, event, url, attempt, status_code,
               success, next_retry_at, created_at
          FROM webhook_logs
         WHERE ${whereSql}
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT $${dataArgs.length - 1} OFFSET $${dataArgs.length}`,
       dataArgs,
     );
-    res.status(200).json({ data: rows, page, total });
+    res.status(200).json({ data: rows, page, total, totalIsEstimate: estimated });
   }),
 );
 
@@ -718,6 +783,27 @@ async function walletBalancesHandler(
   // Client pending is per-network too: a merchant can have funds in flight on
   // both chains at once, and a single summed figure would hide which chain owes
   // them (and therefore which hot wallet has to cover it).
+  //
+  // The status restriction is in the WHERE, not only in a FILTER. It used to
+  // read `FROM clients c JOIN payments p ON …` with NO WHERE clause at all: a
+  // full scan and hash aggregate of the entire payments table — every payment
+  // ever taken, on both /admin/wallets and /admin/wallets/balances — to produce
+  // a figure about the handful that are still in flight. Pushing the predicate
+  // down lets idx_payments_expires serve it; that index is PARTIAL on exactly
+  // `status IN ('waiting','confirming')`, so the scan is now proportional to
+  // open payments rather than to lifetime history.
+  //
+  // NOTHING IS DROPPED. The FILTER already contributed 0 for every other status,
+  // so those rows could only ever produce a group whose sum was 0 — and the
+  // HAVING then discarded it. The output set is identical, and the HAVING is
+  // kept so a genuinely zero-amount group still cannot appear. Deliberately NOT
+  // date-bounded: a payment stuck in 'confirming' for months is exactly what an
+  // operator needs this screen to show, and the partial index already makes the
+  // query cheap without hiding it.
+  //
+  // The ORDER BY also stops sorting the ::text alias. `ORDER BY pending DESC`
+  // referred to the rendered string, so '9.5' ranked above '100' — the biggest
+  // exposure was not at the top of the list. It now sorts the numeric sum.
   const pendingRows = await query<{
     client_id: string;
     business_name: string;
@@ -725,12 +811,13 @@ async function walletBalancesHandler(
     pending: string;
   }>(
     `SELECT c.id AS client_id, c.business_name, p.network,
-            COALESCE(SUM(p.amount) FILTER (WHERE p.status IN ('waiting','confirming')),0)::text AS pending
+            COALESCE(SUM(p.amount),0)::text AS pending
        FROM clients c
        JOIN payments p ON p.client_id = c.id
+      WHERE p.status IN ('waiting','confirming')
       GROUP BY c.id, c.business_name, p.network
-      HAVING COALESCE(SUM(p.amount) FILTER (WHERE p.status IN ('waiting','confirming')),0) > 0
-      ORDER BY pending DESC`,
+      HAVING COALESCE(SUM(p.amount),0) > 0
+      ORDER BY COALESCE(SUM(p.amount),0) DESC`,
   );
 
   res.status(200).json({
@@ -774,159 +861,210 @@ router.get(
 
 // ---------- GET /admin/analytics ----------
 
+/**
+ * /admin/analytics is four passes over the full payments and payouts tables —
+ * seven unfiltered scalar subqueries, a 30-day timeseries, a per-client
+ * breakdown and a per-network breakdown. Several of those figures are LIFETIME
+ * totals ("total volume ever", "total commission ever"), so they cannot be
+ * date-bounded without changing what the number means, and the panel polls this
+ * route.
+ *
+ * So the lever is frequency, not scope: compute it at most once per
+ * ANALYTICS_TTL_MS per process and serve the cached payload in between. This is
+ * a dashboard, not a ledger — nothing here is used to decide whether money
+ * moves, and a figure up to a minute old is what a human reading a chart already
+ * assumes. Every number is still computed from the same unbounded queries, so
+ * nothing is dropped or approximated.
+ *
+ * `inFlight` coalesces concurrent requests: without it, N operators (or N poll
+ * ticks) landing on a cold cache each start their own full-table pass and take N
+ * of the 20 pool connections. With it they all await one.
+ *
+ * Per process, deliberately: no cross-instance cache to invalidate, and with
+ * `--scale api=4` the worst case is 4 computations per TTL instead of 4 per
+ * request. The real fix is a materialized view refreshed by the settle worker,
+ * which spans files this change does not touch.
+ */
+const ANALYTICS_TTL_MS = 60_000;
+let analyticsCache: { at: number; payload: unknown } | null = null;
+let analyticsInFlight: Promise<unknown> | null = null;
+
 router.get(
   '/analytics',
   requireRole('super_admin', 'ops'),
   asyncHandler(async (_req, res) => {
-    const totals = await queryOne<{
-      total_volume: string;
-      today_revenue: string;
-      total_revenue: string;
-      total_commission: string;
-      active_clients: string;
-      pending_payouts: string;
-      pending_payout_amount: string;
-    }>(
-      `SELECT
-         (SELECT COALESCE(SUM(amount_received),0) FROM payments
-            WHERE status IN ('confirmed','swept'))::text AS total_volume,
-         (SELECT COALESCE(SUM(commission_amount),0) FROM payouts
-            WHERE created_at >= date_trunc('day', now()))::text AS today_revenue,
-         (SELECT COALESCE(SUM(net_amount),0) FROM payouts
-            WHERE status IN ('sent','confirmed'))::text AS total_revenue,
-         (SELECT COALESCE(SUM(commission_amount),0) FROM payouts)::text AS total_commission,
-         (SELECT COUNT(*) FROM clients WHERE status = 'approved')::text AS active_clients,
-         (SELECT COUNT(*) FROM payouts WHERE status IN ('pending','processing'))::text AS pending_payouts,
-         (SELECT COALESCE(SUM(gross_amount),0) FROM payouts
-            WHERE status IN ('pending','processing'))::text AS pending_payout_amount`,
-    );
-
-    // Day axis via generate_series so empty days are 0.
-    const timeseries = await query<{
-      date: string;
-      volume: string;
-      revenue: string;
-      commission: string;
-      count: string;
-    }>(
-      `WITH days AS (
-         SELECT generate_series(
-                  date_trunc('day', now()) - interval '29 days',
-                  date_trunc('day', now()),
-                  interval '1 day'
-                ) AS d
-       ),
-       pay AS (
-         SELECT date_trunc('day', created_at) AS d,
-                COALESCE(SUM(amount_received),0) AS volume,
-                COUNT(*) AS cnt
-           FROM payments
-          WHERE status IN ('confirmed','swept')
-            AND created_at >= date_trunc('day', now()) - interval '29 days'
-          GROUP BY 1
-       ),
-       po AS (
-         SELECT date_trunc('day', created_at) AS d,
-                COALESCE(SUM(commission_amount),0) AS revenue,
-                COALESCE(SUM(commission_amount),0) AS commission
-           FROM payouts
-          WHERE created_at >= date_trunc('day', now()) - interval '29 days'
-          GROUP BY 1
-       )
-       SELECT to_char(days.d, 'YYYY-MM-DD') AS date,
-              COALESCE(pay.volume,0)::text AS volume,
-              COALESCE(po.revenue,0)::text AS revenue,
-              COALESCE(po.commission,0)::text AS commission,
-              COALESCE(pay.cnt,0)::text AS count
-         FROM days
-         LEFT JOIN pay ON pay.d = days.d
-         LEFT JOIN po  ON po.d  = days.d
-        ORDER BY days.d ASC`,
-    );
-
-    const breakdown = await query<{
-      client_id: string;
-      business_name: string;
-      volume: string;
-      commission: string;
-    }>(
-      `SELECT c.id AS client_id, c.business_name,
-              COALESCE(v.volume,0)::text AS volume,
-              COALESCE(cm.commission,0)::text AS commission
-         FROM clients c
-         LEFT JOIN (
-           SELECT client_id, SUM(amount_received) AS volume
-             FROM payments WHERE status IN ('confirmed','swept')
-            GROUP BY client_id
-         ) v ON v.client_id = c.id
-         LEFT JOIN (
-           SELECT client_id, SUM(commission_amount) AS commission
-             FROM payouts GROUP BY client_id
-         ) cm ON cm.client_id = c.id
-        ORDER BY COALESCE(v.volume,0) DESC
-        LIMIT 10`,
-    );
-
-    // Per-network split. The aggregates above deliberately stay chain-agnostic
-    // (total business volume is one number), but an operator also needs to know
-    // WHICH chain the volume landed on — that decides which hot wallet has to be
-    // funded and which one is accumulating. Payment volume and payout
-    // commission are counted separately because they key off different tables.
-    const byNetwork = await query<{
-      network: string;
-      volume: string;
-      count: string;
-      commission: string;
-    }>(
-      `SELECT n.network,
-              COALESCE(v.volume,0)::text     AS volume,
-              COALESCE(v.cnt,0)::text        AS count,
-              COALESCE(cm.commission,0)::text AS commission
-         FROM (SELECT unnest($1::text[]) AS network) n
-         LEFT JOIN (
-           SELECT network, SUM(amount_received) AS volume, COUNT(*) AS cnt
-             FROM payments WHERE status IN ('confirmed','swept')
-            GROUP BY network
-         ) v ON v.network = n.network
-         LEFT JOIN (
-           SELECT network, SUM(commission_amount) AS commission
-             FROM payouts GROUP BY network
-         ) cm ON cm.network = n.network
-        ORDER BY COALESCE(v.volume,0) DESC`,
-      [NETWORKS as unknown as string[]],
-    );
-
-    res.status(200).json({
-      totalVolume: totals?.total_volume ?? '0',
-      todayRevenue: totals?.today_revenue ?? '0',
-      totalRevenue: totals?.total_revenue ?? '0',
-      totalCommission: totals?.total_commission ?? '0',
-      activeClients: Number(totals?.active_clients ?? 0),
-      pendingPayouts: Number(totals?.pending_payouts ?? 0),
-      pendingPayoutAmount: totals?.pending_payout_amount ?? '0',
-      networkBreakdown: byNetwork.map((n) => ({
-        network: n.network,
-        volume: Number(n.volume),
-        count: Number(n.count),
-        commission: Number(n.commission),
-        enabled: (enabledNetworks() as string[]).includes(n.network),
-      })),
-      timeseries: timeseries.map((t) => ({
-        date: t.date,
-        volume: Number(t.volume),
-        revenue: Number(t.revenue),
-        commission: Number(t.commission),
-        count: Number(t.count),
-      })),
-      clientBreakdown: breakdown.map((b) => ({
-        clientId: b.client_id,
-        clientName: b.business_name,
-        volume: Number(b.volume),
-        commission: Number(b.commission),
-      })),
-    });
+    const now = Date.now();
+    if (analyticsCache && now - analyticsCache.at < ANALYTICS_TTL_MS) {
+      res.status(200).json(analyticsCache.payload);
+      return;
+    }
+    if (!analyticsInFlight) {
+      analyticsInFlight = computeAnalytics()
+        .then((payload) => {
+          analyticsCache = { at: Date.now(), payload };
+          return payload;
+        })
+        .finally(() => {
+          // Cleared whether it resolved or threw, so a failed pass does not wedge
+          // the route on a rejected promise forever.
+          analyticsInFlight = null;
+        });
+    }
+    res.status(200).json(await analyticsInFlight);
   }),
 );
+
+async function computeAnalytics(): Promise<unknown> {
+  const totals = await queryOne<{
+    total_volume: string;
+    today_revenue: string;
+    total_revenue: string;
+    total_commission: string;
+    active_clients: string;
+    pending_payouts: string;
+    pending_payout_amount: string;
+  }>(
+    `SELECT
+       (SELECT COALESCE(SUM(amount_received),0) FROM payments
+          WHERE status IN ('confirmed','swept'))::text AS total_volume,
+       (SELECT COALESCE(SUM(commission_amount),0) FROM payouts
+          WHERE created_at >= date_trunc('day', now()))::text AS today_revenue,
+       (SELECT COALESCE(SUM(net_amount),0) FROM payouts
+          WHERE status IN ('sent','confirmed'))::text AS total_revenue,
+       (SELECT COALESCE(SUM(commission_amount),0) FROM payouts)::text AS total_commission,
+       (SELECT COUNT(*) FROM clients WHERE status = 'approved')::text AS active_clients,
+       (SELECT COUNT(*) FROM payouts WHERE status IN ('pending','processing'))::text AS pending_payouts,
+       (SELECT COALESCE(SUM(gross_amount),0) FROM payouts
+          WHERE status IN ('pending','processing'))::text AS pending_payout_amount`,
+  );
+
+  // Day axis via generate_series so empty days are 0.
+  const timeseries = await query<{
+    date: string;
+    volume: string;
+    revenue: string;
+    commission: string;
+    count: string;
+  }>(
+    `WITH days AS (
+       SELECT generate_series(
+                date_trunc('day', now()) - interval '29 days',
+                date_trunc('day', now()),
+                interval '1 day'
+              ) AS d
+     ),
+     pay AS (
+       SELECT date_trunc('day', created_at) AS d,
+              COALESCE(SUM(amount_received),0) AS volume,
+              COUNT(*) AS cnt
+         FROM payments
+        WHERE status IN ('confirmed','swept')
+          AND created_at >= date_trunc('day', now()) - interval '29 days'
+        GROUP BY 1
+     ),
+     po AS (
+       SELECT date_trunc('day', created_at) AS d,
+              COALESCE(SUM(commission_amount),0) AS revenue,
+              COALESCE(SUM(commission_amount),0) AS commission
+         FROM payouts
+        WHERE created_at >= date_trunc('day', now()) - interval '29 days'
+        GROUP BY 1
+     )
+     SELECT to_char(days.d, 'YYYY-MM-DD') AS date,
+            COALESCE(pay.volume,0)::text AS volume,
+            COALESCE(po.revenue,0)::text AS revenue,
+            COALESCE(po.commission,0)::text AS commission,
+            COALESCE(pay.cnt,0)::text AS count
+       FROM days
+       LEFT JOIN pay ON pay.d = days.d
+       LEFT JOIN po  ON po.d  = days.d
+      ORDER BY days.d ASC`,
+  );
+
+  const breakdown = await query<{
+    client_id: string;
+    business_name: string;
+    volume: string;
+    commission: string;
+  }>(
+    `SELECT c.id AS client_id, c.business_name,
+            COALESCE(v.volume,0)::text AS volume,
+            COALESCE(cm.commission,0)::text AS commission
+       FROM clients c
+       LEFT JOIN (
+         SELECT client_id, SUM(amount_received) AS volume
+           FROM payments WHERE status IN ('confirmed','swept')
+          GROUP BY client_id
+       ) v ON v.client_id = c.id
+       LEFT JOIN (
+         SELECT client_id, SUM(commission_amount) AS commission
+           FROM payouts GROUP BY client_id
+       ) cm ON cm.client_id = c.id
+      ORDER BY COALESCE(v.volume,0) DESC
+      LIMIT 10`,
+  );
+
+  // Per-network split. The aggregates above deliberately stay chain-agnostic
+  // (total business volume is one number), but an operator also needs to know
+  // WHICH chain the volume landed on — that decides which hot wallet has to be
+  // funded and which one is accumulating. Payment volume and payout
+  // commission are counted separately because they key off different tables.
+  const byNetwork = await query<{
+    network: string;
+    volume: string;
+    count: string;
+    commission: string;
+  }>(
+    `SELECT n.network,
+            COALESCE(v.volume,0)::text     AS volume,
+            COALESCE(v.cnt,0)::text        AS count,
+            COALESCE(cm.commission,0)::text AS commission
+       FROM (SELECT unnest($1::text[]) AS network) n
+       LEFT JOIN (
+         SELECT network, SUM(amount_received) AS volume, COUNT(*) AS cnt
+           FROM payments WHERE status IN ('confirmed','swept')
+          GROUP BY network
+       ) v ON v.network = n.network
+       LEFT JOIN (
+         SELECT network, SUM(commission_amount) AS commission
+           FROM payouts GROUP BY network
+       ) cm ON cm.network = n.network
+      ORDER BY COALESCE(v.volume,0) DESC`,
+    [NETWORKS as unknown as string[]],
+  );
+
+  return {
+    totalVolume: totals?.total_volume ?? '0',
+    todayRevenue: totals?.today_revenue ?? '0',
+    totalRevenue: totals?.total_revenue ?? '0',
+    totalCommission: totals?.total_commission ?? '0',
+    activeClients: Number(totals?.active_clients ?? 0),
+    pendingPayouts: Number(totals?.pending_payouts ?? 0),
+    pendingPayoutAmount: totals?.pending_payout_amount ?? '0',
+    networkBreakdown: byNetwork.map((n) => ({
+      network: n.network,
+      volume: Number(n.volume),
+      count: Number(n.count),
+      commission: Number(n.commission),
+      // From config, which is read once at boot and never changes at runtime,
+      // so it is safe to carry in the cached payload.
+      enabled: (enabledNetworks() as string[]).includes(n.network),
+    })),
+    timeseries: timeseries.map((t) => ({
+      date: t.date,
+      volume: Number(t.volume),
+      revenue: Number(t.revenue),
+      commission: Number(t.commission),
+      count: Number(t.count),
+    })),
+    clientBreakdown: breakdown.map((b) => ({
+      clientId: b.client_id,
+      clientName: b.business_name,
+      volume: Number(b.volume),
+      commission: Number(b.commission),
+    })),
+  };
+}
 
 // ---------- Admin commission (accrual + withdrawal) ----------
 

@@ -14,17 +14,50 @@ Every merchant request sends three headers:
 |---------------|-------------------------------------------------------------------|
 | `X-Api-Key`   | Your public API key (e.g. `pk_live_...`)                           |
 | `X-Timestamp` | Current unix time **in seconds**                                  |
-| `X-Signature` | `hex( HMAC_SHA256( secret, f"{timestamp}.{raw_json_body}" ) )`     |
+| `X-Signature` | see the signed string below                                        |
+
+### Signed string
+
+Two schemes exist. Which ones your key accepts is `signature_version` on the key,
+which an operator sets: `1` (the default) accepts **v2 or v1**, `2` accepts
+**v2 only**.
+
+**v2 — use this.** It binds the verb and the exact path, so a signature captured
+from a status poll is not a signature for `POST /payouts`:
+
+```python
+body_hash = hashlib.sha256(raw_body.encode("utf-8")).hexdigest()
+signed    = f"{timestamp}.{method.upper()}.{path}.{body_hash}"
+signature = hmac.new(secret, signed.encode("utf-8"), hashlib.sha256).hexdigest()
+```
+
+- `path` is the request target **exactly as it goes on the wire**, including the
+  `/api/v1` prefix and the query string — e.g.
+  `/api/v1/payouts?page=2&limit=20`. The server signs the bytes it received, so
+  build the query string yourself and send that same string; do **not** pass
+  `params=` to `requests` and let it encode. The client below does this.
+- `hashlib.sha256(b"").hexdigest()` for a body-less request is
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+**v1 — legacy.** `hex( HMAC_SHA256( secret, f"{timestamp}.{raw_json_body}" ) )`.
+It binds neither method nor path, so a captured signature is replayable against
+any other body-less endpoint inside the 5-minute window. Still accepted while
+your key is at `signature_version = 1`, so upgrading the client and flipping the
+key are two independent steps.
 
 Rules:
 
 - Sign the **exact raw JSON string** you send. Serialize once, sign that string,
   and send that same string as the body — do not let `requests` re-serialize it
   (pass `data=`, not `json=`).
-- For GET requests with no body, the raw body is the **empty string** `""`, so
-  you sign `f"{timestamp}."`.
+- For GET requests with no body, the raw body is the **empty string** `""`.
 - Timestamps more than **5 minutes** (300 s) off the server clock are rejected
   (replay protection). Keep the clock NTP-synced.
+- **Signatures on writes are single-use.** Any non-`GET`/`HEAD`/`OPTIONS`
+  request burns its signature: resending the byte-identical request returns
+  `401 Signature already used`. Retry by re-signing with a fresh `X-Timestamp`
+  and the same `Idempotency-Key`. Reads are not burned, so concurrent polling is
+  unaffected.
 
 
 ## Two key modes
@@ -76,7 +109,7 @@ import hmac
 import hashlib
 import json
 import time
-from urllib.parse import quote
+from urllib.parse import quote, urlencode, urlsplit
 
 import requests
 
@@ -89,19 +122,33 @@ class GatewayClient:
         self.api_key = api_key
         self.api_secret = api_secret.encode("utf-8")
         self.base_url = base_url.rstrip("/")
+        # The server signs the FULL wire path, so the prefix baked into
+        # base_url (normally "/api/v1") is part of the signed string. Derived
+        # rather than hardcoded, so a gateway mounted under another prefix
+        # still signs correctly.
+        self.path_prefix = urlsplit(self.base_url).path
         self.timeout = timeout
         self.session = requests.Session()
 
-    def _sign(self, timestamp, raw_body):
-        """HMAC-SHA256 over '{timestamp}.{raw_body}' -> hex."""
-        msg = f"{timestamp}.{raw_body}".encode("utf-8")
+    def _sign(self, timestamp, method, path, raw_body):
+        """v2: HMAC-SHA256 over '{ts}.{METHOD}.{path}.{sha256(body)}' -> hex."""
+        body_hash = hashlib.sha256(raw_body.encode("utf-8")).hexdigest()
+        msg = f"{timestamp}.{method}.{path}.{body_hash}".encode("utf-8")
         return hmac.new(self.api_secret, msg, hashlib.sha256).hexdigest()
 
     def _request(self, method, path, body=None, query=None, extra_headers=None):
         # Serialize ONCE, sign that exact string, send that exact string.
         raw_body = "" if body is None else json.dumps(body, separators=(",", ":"))
         timestamp = str(int(time.time()))
-        signature = self._sign(timestamp, raw_body)
+
+        # Build the query string OURSELVES and sign the exact path we send. The
+        # server signs the request target verbatim, so letting `requests` encode
+        # `params=` would sign one string and send another.
+        qs = urlencode(query or {})
+        wire_path = f"{path}?{qs}" if qs else path
+        signature = self._sign(
+            timestamp, method.upper(), f"{self.path_prefix}{wire_path}", raw_body
+        )
 
         headers = {
             "Content-Type": "application/json",
@@ -114,8 +161,7 @@ class GatewayClient:
 
         resp = self.session.request(
             method,
-            f"{self.base_url}{path}",
-            params=query,
+            f"{self.base_url}{wire_path}",
             data=None if raw_body == "" else raw_body,  # send the signed string
             headers=headers,
             timeout=self.timeout,
@@ -255,9 +301,11 @@ Save as `snippet.py`, then
 
 ```python
 import hmac, hashlib, json, os, time
+from urllib.parse import urlsplit
 import requests
 
 BASE = os.environ.get("GATEWAY_BASE_URL", "http://localhost:4000/api/v1")
+PREFIX = urlsplit(BASE).path          # signed: the server sees the full path
 KEY = os.environ["GATEWAY_API_KEY"]
 SECRET = os.environ["GATEWAY_API_SECRET"].encode()
 
@@ -265,7 +313,10 @@ SECRET = os.environ["GATEWAY_API_SECRET"].encode()
 def create_payment(amount, order_id):
     raw = json.dumps({"amount": amount, "orderId": order_id}, separators=(",", ":"))
     ts = str(int(time.time()))
-    sig = hmac.new(SECRET, f"{ts}.{raw}".encode(), hashlib.sha256).hexdigest()
+    # v2 signed string: timestamp.METHOD.path.sha256(body)
+    body_hash = hashlib.sha256(raw.encode()).hexdigest()
+    signed = f"{ts}.POST.{PREFIX}/payments.{body_hash}"
+    sig = hmac.new(SECRET, signed.encode(), hashlib.sha256).hexdigest()
     r = requests.post(
         f"{BASE}/payments",
         data=raw,

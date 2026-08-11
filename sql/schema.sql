@@ -100,6 +100,40 @@ COMMENT ON TABLE user_tokens IS
   'Single-use, expiring tokens for email verification and password reset. '
   'token_hash = sha256(raw token); the raw token is never persisted.';
 
+-- ---------- refresh_tokens (revocable dashboard sessions) --------------------
+-- Mirrors sql/migrations/023_auth_hardening.sql. It is here as well as there
+-- because routes/auth.ts demotes to "refresh tokens untracked" on
+-- undefined_table: a deployment provisioned from schema.sql alone would run
+-- permanently without reuse detection, which is exactly the silent degraded
+-- mode this file exists to prevent.
+CREATE TABLE refresh_tokens (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  -- One login and every rotation descended from it. Revoking a family is how
+  -- reuse detection signs out the thief and the victim together.
+  family_id   UUID NOT NULL DEFAULT gen_random_uuid(),
+  -- sha256(refresh JWT). The token is never stored: the server only ever needs
+  -- to RECOGNISE it, exactly like user_tokens.token_hash.
+  token_hash  TEXT NOT NULL UNIQUE,
+  issued_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Mirrors the JWT's own exp, so JWT_REFRESH_EXPIRES_IN stays the one source
+  -- of truth for how long a session lives.
+  expires_at  TIMESTAMPTZ NOT NULL,
+  used_at     TIMESTAMPTZ,   -- set when rotated; a second use is reuse
+  revoked_at  TIMESTAMPTZ    -- set for the whole family on reuse / suspension
+);
+-- Family revocation must be one cheap UPDATE, not a scan.
+CREATE INDEX idx_refresh_tokens_family  ON refresh_tokens(family_id);
+-- Per-user pruning on rotation, and "sign this user out everywhere" by hand.
+CREATE INDEX idx_refresh_tokens_user    ON refresh_tokens(user_id);
+-- The operator sweep for users who never come back.
+CREATE INDEX idx_refresh_tokens_expires ON refresh_tokens(expires_at);
+
+COMMENT ON TABLE refresh_tokens IS
+  'Issued dashboard refresh tokens (hash only), so a session can actually be '
+  'revoked. Rotation: presenting a token consumes it and issues a replacement '
+  'in the same family_id; presenting a consumed one revokes the family.';
+
 -- ---------- clients (merchants) ----------------------------------------------
 CREATE TABLE clients (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -213,6 +247,12 @@ CREATE TABLE api_keys (
   last_used_at   TIMESTAMPTZ,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   revoked_at     TIMESTAMPTZ,
+  -- Which merchant request-signing scheme this key is held to (migration
+  -- 023_auth_hardening). Mirrored here so a database provisioned from
+  -- schema.sql alone is not permanently stuck on the legacy scheme:
+  -- middleware/auth.ts demotes to "every key is v1" on undefined_column.
+  signature_version SMALLINT NOT NULL DEFAULT 1
+                   CHECK (signature_version IN (1, 2)),
   -- Each mode must carry its own credential material.
   CONSTRAINT api_keys_mode_material_check CHECK (
     (auth_mode = 'hmac'   AND api_secret_hash IS NOT NULL) OR
@@ -232,6 +272,13 @@ COMMENT ON COLUMN api_keys.token_hash IS
 COMMENT ON COLUMN api_keys.scopes IS
   'Permitted operations. Simple-mode keys are issued WITHOUT payouts:write so a '
   'leaked bearer token cannot initiate a settlement.';
+COMMENT ON COLUMN api_keys.signature_version IS
+  'Merchant request signing scheme this key is held to. '
+  '1 = accept v2 (timestamp.METHOD.path.sha256(body)) OR legacy v1 '
+  '(timestamp.body) — the deprecation window. '
+  '2 = v2 only; legacy v1 signatures are rejected. '
+  'v1 bound neither method nor path, so a captured signature was replayable '
+  'against any other body-less endpoint inside the 5-minute skew window.';
 
 -- ---------- wallets ----------------------------------------------------------
 -- Deposit addresses are HD-derived (BIP-44). Private keys are NEVER stored raw:
@@ -260,6 +307,29 @@ CREATE TABLE hd_counter (
   next_index   BIGINT NOT NULL DEFAULT 0
 );
 INSERT INTO hd_counter (id, next_index) VALUES (1, 0) ON CONFLICT DO NOTHING;
+
+-- The allocator the application ACTUALLY uses (migration 019_hd_index_sequence).
+-- hd_counter above is kept as the seed of record and as the pre-migration
+-- fallback utils/hdwallet.ts drops to on undefined_table.
+--
+-- A sequence rather than the counter row because `UPDATE hd_counter ...` holds a
+-- row lock until COMMIT, serialising every payment creation in the fleet behind
+-- one row for the whole of the derivation and both INSERTs. nextval() takes no
+-- transactional lock. Gaps from a rolled-back creation are expected and
+-- harmless: nothing scans derivation indexes densely, and idx_wallets_deriv
+-- above is still the uniqueness backstop.
+--
+-- Starts at 0 here because a database built from this file has issued no
+-- addresses. Migration 019 only seeds (1,000,000 above the counter) when it has
+-- to CREATE the sequence, so applying it afterwards on a fresh install is a
+-- no-op rather than a reseed.
+CREATE SEQUENCE hd_deposit_index AS BIGINT MINVALUE 0 START WITH 0;
+
+COMMENT ON SEQUENCE hd_deposit_index IS
+  'Monotonic BIP-44 child index for deposit addresses, shared by every network '
+  '(BEP20 m/44''/60''/0''/0/<i>, TRC20 m/44''/195''/0''/0/<i>, BTC likewise), so '
+  'an index is never reused across chains. Gaps are expected and harmless. '
+  'Replaces hd_counter, which is kept only as the seed of record.';
 
 -- ---------- payment_links (hosted checkout) ----------------------------------
 -- A shareable URL a merchant sends to a customer: open it, pick a coin, pay.
@@ -308,9 +378,15 @@ COMMENT ON COLUMN payment_links.fiat_amount IS
   'Price in fiat. The crypto amount is computed when the CUSTOMER starts a '
   'payment, not when the link is created — so an invoice left unpaid for days '
   'is still settled at the price current when it is actually paid.';
+-- (migration 021) Not a raw counter: a checkout that is STARTED and abandoned
+-- must not burn the link, or one refresh makes an invoice unpayable forever.
 COMMENT ON COLUMN payment_links.use_count IS
-  'Incremented in the SAME transaction that creates a payment, under a row lock, '
-  'so a single-use link cannot be spent twice by concurrent opens.';
+  'Uses actually TAKEN, derived from this link''s payments and reconciled onto '
+  'the row inside the claim transaction, under the link''s row lock — so a '
+  'single-use link still cannot be claimed twice by concurrent opens. A payment '
+  'that expired or failed having received nothing does NOT count: an abandoned '
+  'checkout must not burn the link. Anything live, or that ever received funds, '
+  'counts permanently.';
 
 -- ---------- payments ---------------------------------------------------------
 CREATE TABLE payments (
@@ -351,6 +427,14 @@ CREATE TABLE payments (
   fiat_rate             NUMERIC(38,18),            -- price of 1 `asset` in `fiat_currency`
   rate_source           TEXT,                      -- e.g. 'coingecko', 'coingecko:stale'
   rate_locked_at        TIMESTAMPTZ,               -- when the rate was FETCHED upstream
+  -- ---- Settle-tick bookkeeping (migration 024_settle_tick_bounds) ----
+  -- Neither is a money figure and neither is ever summed into one; both exist
+  -- only so the settle tick can bound its own scans. Mirrored here because the
+  -- worker's steps are individually try/caught, so on a database missing these
+  -- columns the sweep re-drive, the payout re-drive and the webhook reaper all
+  -- throw and are swallowed — the whole safety net off, silently.
+  settle_attempts       INT NOT NULL DEFAULT 0,
+  settle_done_at        TIMESTAMPTZ,
   UNIQUE (client_id, order_id),
   -- Fully priced in fiat or not at all: a half-populated quote cannot be audited.
   CONSTRAINT payments_fiat_complete_check CHECK (
@@ -360,7 +444,12 @@ CREATE TABLE payments (
   )
 );
 CREATE INDEX idx_payments_client   ON payments(client_id);
-CREATE INDEX idx_payments_status   ON payments(status);
+-- NOTE: there is deliberately NO plain index on `status` alone (migration 020
+-- drops the one that used to be here). It is a 7-value enum whose terminal
+-- state 'swept' covers nearly every successful payment, so it is not selective
+-- enough to be chosen, and it is pure write amplification on the hottest table
+-- in the system. Every status-only predicate in the codebase is served by one
+-- of the PARTIAL indexes below instead.
 CREATE INDEX idx_payments_address  ON payments(deposit_address);
 CREATE INDEX idx_payments_expires  ON payments(expires_at) WHERE status IN ('waiting','confirming');
 -- The settle tick's late-deposit reaper reads the on-chain balance of deposit
@@ -378,11 +467,64 @@ CREATE INDEX idx_payments_client_created ON payments(client_id, created_at DESC)
 -- Backs the per-asset balance guard, which runs inside the payout advisory lock.
 CREATE INDEX idx_payments_client_network_asset_status
   ON payments(client_id, network, asset, status);
+-- (migration 022) The same key with the summed columns in INCLUDE, so the
+-- single-statement balance read inside the payout advisory lock is index-only
+-- and never visits the heap. network+asset stay in the KEY: balances are
+-- per (network, asset) and are never summed across a pair.
+CREATE INDEX idx_payments_bal
+  ON payments (client_id, network, asset, status)
+  INCLUDE (amount_received, amount);
 -- Keeps the balance read inside the payout advisory lock cheap (migration 005).
 CREATE INDEX idx_payments_client_network_status
   ON payments(client_id, network, status);
+-- Also serves the hosted checkout's "has this link actually been used?" count,
+-- which is derived from the link's payments on every claim (migration 021).
 CREATE INDEX idx_payments_link ON payments(payment_link_id)
   WHERE payment_link_id IS NOT NULL;
+
+-- ---- migration 020: hot-path predicates that had no supporting index --------
+-- The merchant payment list filters (client_id, status) and sorts created_at
+-- DESC. idx_payments_client_created cannot filter on status without reading the
+-- client's whole history; the (client_id, network, asset, status) index cannot
+-- serve the sort.
+CREATE INDEX idx_payments_client_status_created
+  ON payments(client_id, status, created_at DESC);
+-- The settle tick drains the sweep backlog with
+--   status = 'confirmed' ORDER BY confirmed_at ASC NULLS FIRST LIMIT n
+-- every minute, and its 15-minute stall alarm reads the same slice. Built
+-- NULLS FIRST so it matches that ORDER BY exactly and can be read in order.
+CREATE INDEX idx_payments_confirmed
+  ON payments(confirmed_at NULLS FIRST)
+  WHERE status = 'confirmed';
+-- The payout-recovery pass and the held-payout alarm both start from the swept
+-- slice, oldest first.
+CREATE INDEX idx_payments_swept
+  ON payments(updated_at)
+  WHERE status = 'swept';
+
+-- ---- migration 024: the settle tick's two driving queries -------------------
+-- NULLS FIRST is part of the definition on purpose — the queries say
+-- `ORDER BY settle_attempts ASC, confirmed_at ASC NULLS FIRST`, and an index
+-- built with the default NULLS LAST cannot supply that ordering. Leading with
+-- settle_attempts is what makes the per-pass LIMIT a round-robin rather than a
+-- queue whose head a permanently unsettleable row occupies forever.
+CREATE INDEX idx_payments_settle_confirmed
+  ON payments (settle_attempts, confirmed_at ASC NULLS FIRST)
+  WHERE status = 'confirmed';
+CREATE INDEX idx_payments_settle_pending
+  ON payments (settle_attempts, confirmed_at ASC NULLS FIRST)
+  WHERE status = 'swept' AND settle_done_at IS NULL;
+
+COMMENT ON COLUMN payments.settle_attempts IS
+  'How many settle-tick passes have SELECTED this payment, whatever the outcome. '
+  'Ordering by it makes the tick''s per-pass cap a round-robin instead of a queue '
+  'whose head a permanently unsettleable row can occupy forever. Not a money '
+  'figure and never summed into one.';
+COMMENT ON COLUMN payments.settle_done_at IS
+  'Set once a payout for this payment has reached a state nothing moves it back '
+  'out of (sent/confirmed/unresolved, or broadcast_at stamped). Purely a scan '
+  'bound for the settle tick: the full anti-join still runs over every row this '
+  'does not exclude, so no payment can be stranded by it being wrong-but-NULL.';
 
 COMMENT ON COLUMN payments.asset IS
   'Token symbol, scoped to this row''s network: (network, asset) identifies one '
@@ -587,6 +729,14 @@ CREATE INDEX idx_btx_network_asset ON blockchain_transactions(network, asset);
 CREATE INDEX idx_btx_sweep_network_asset
   ON blockchain_transactions(network, asset)
   WHERE direction = 'sweep' AND status = 'confirmed';
+-- (migrations 018 + 020, same definition in both) The confirmation-count sweep
+-- every listener runs on every
+-- pass. The set of still-pending incoming transfers is tiny and permanently
+-- hot; the table it lives in only grows. idx_btx_network does not cover the
+-- direction/status predicate, and the index above is partial on the OTHER pair.
+CREATE INDEX idx_btx_pending_incoming
+  ON blockchain_transactions(network, block_number)
+  WHERE direction = 'incoming' AND status = 'pending';
 
 -- ---------- unexpected_deposits (wrong-asset recovery) -----------------------
 -- A known asset that arrived at a deposit address expecting a DIFFERENT one.
@@ -619,6 +769,12 @@ CREATE TABLE unexpected_deposits (
   UNIQUE (tx_hash, log_index)
 );
 CREATE INDEX idx_unexpected_client ON unexpected_deposits(client_id, created_at DESC);
+-- (migration 025) The hosted checkout asks "did money ever turn up at this dead
+-- payment's address?" before it releases a payment link's single use. A LATE
+-- payment leaves no other trace: no listener credits an expired payment, so
+-- amount_received stays 0 and this row is the only evidence the funds exist.
+CREATE INDEX idx_unexpected_payment ON unexpected_deposits(payment_id)
+  WHERE payment_id IS NOT NULL;
 CREATE INDEX idx_unexpected_status ON unexpected_deposits(status)
   WHERE status IN ('detected','sweeping','converting');
 
@@ -708,6 +864,24 @@ CREATE INDEX idx_payouts_client_network_status
 CREATE INDEX idx_payouts_status  ON payouts(status);
 CREATE INDEX idx_payouts_network ON payouts(network);
 CREATE INDEX idx_payouts_network_asset_status ON payouts(network, asset, status);
+-- (migration 022) The reservation subquery of the single-statement balance read,
+-- with the summed column in INCLUDE so it is answered index-only inside the
+-- payout advisory lock.
+CREATE INDEX idx_payouts_bal
+  ON payouts (client_id, network, asset, status)
+  INCLUDE (gross_amount);
+
+-- ---- migration 020: hot-path predicates that had no supporting index --------
+-- The merchant settlements list. `id DESC` is a deterministic tie-break so
+-- pagination over payouts created in the same millisecond cannot repeat or skip.
+CREATE INDEX idx_payouts_client_created ON payouts(client_id, created_at DESC, id DESC);
+-- The admin payout list, which has no client filter to lead with.
+CREATE INDEX idx_payouts_created ON payouts(created_at DESC);
+-- The settle tick's once-a-minute anti-join ("swept payments with no live
+-- payout") and its stalled-payout alarm both look payouts up BY PAYMENT.
+-- uq_payouts_active_payment below cannot serve them: it is partial on
+-- status <> 'failed', and these predicates deliberately include failed rows.
+CREATE INDEX idx_payouts_payment ON payouts(payment_id) WHERE payment_id IS NOT NULL;
 
 -- One live payout per payment, enforced by the database (migration 015).
 --
@@ -778,10 +952,31 @@ CREATE TABLE webhook_logs (
   success        BOOLEAN NOT NULL DEFAULT false,
   response_body  TEXT,
   next_retry_at  TIMESTAMPTZ,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- (migration 024_settle_tick_bounds) When this row was re-queued after the
+  -- queue had abandoned it, or never received it.
+  redelivered_at TIMESTAMPTZ
 );
 CREATE INDEX idx_webhook_logs_payment ON webhook_logs(payment_id);
 CREATE INDEX idx_webhook_logs_client  ON webhook_logs(client_id, created_at DESC);
+-- (migration 020) The ADMIN webhook log has no client to lead with, so the
+-- index above cannot serve its sort.
+CREATE INDEX idx_webhook_logs_created ON webhook_logs(created_at DESC);
+-- (migration 024) The abandoned-webhook reaper's driving predicate.
+CREATE INDEX idx_webhook_logs_redeliver
+  ON webhook_logs (created_at)
+  WHERE success = false AND redelivered_at IS NULL AND payment_id IS NOT NULL;
+-- Its "newest row of this (payment, event) group, and none of them succeeded"
+-- test. idx_webhook_logs_payment is on payment_id alone and cannot serve it — a
+-- merchant with a dead endpoint accumulates one row per attempt.
+CREATE INDEX idx_webhook_logs_group
+  ON webhook_logs (payment_id, event, created_at DESC);
+
+COMMENT ON COLUMN webhook_logs.redelivered_at IS
+  'When this row was re-queued for delivery after the queue had abandoned it (or '
+  'never received it). Stamped by the settle tick and by operator/merchant '
+  '"resend" actions, so a row cannot be re-driven again on the next tick sixty '
+  'seconds later, before its own new attempt rows exist.';
 
 -- ---------- audit_logs -------------------------------------------------------
 CREATE TABLE audit_logs (

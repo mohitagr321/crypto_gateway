@@ -39,14 +39,37 @@ components:
     # 1. HMAC-signed: ApiKey carries the PUBLIC id (pk_live_…), and Signature +
     #    Timestamp must accompany it. The secret never crosses the wire.
     #
-    #    X-Timestamp is unix SECONDS. The signed string is the timestamp, a
-    #    literal ".", then the exact raw request body:
+    #    X-Timestamp is unix SECONDS. Requests more than 300 s from server time
+    #    are rejected as replays. Two signed-string schemes exist; which ones a
+    #    key accepts is `api_keys.signature_version`, settable per key.
+    #
+    #    v2 (current). Binds the verb and the exact path, so a signature
+    #    captured from a GET poll is not a signature for POST /payouts:
+    #        signed = "${X-Timestamp}.${METHOD}.${path}.${sha256_hex(rawBody)}"
+    #        X-Signature = hex( HMAC_SHA256( apiSecret, signed ) )
+    #    METHOD is upper-case. `path` is the request target EXACTLY as sent on
+    #    the wire, including the /api/v1 prefix and the query string if any —
+    #    e.g. "/api/v1/payouts?page=2&limit=20". Byte-for-byte: the server signs
+    #    what it received, so your client must sign the same serialization it is
+    #    about to send (build the query string yourself rather than letting an
+    #    HTTP library re-encode it). sha256_hex("") is the well-known
+    #    e3b0c442…b855 for a body-less request.
+    #
+    #    v1 (legacy, accepted while signature_version = 1 — the default):
     #        X-Signature = hex( HMAC_SHA256( apiSecret, "${X-Timestamp}.${rawBody}" ) )
-    #    For a request with no body (any GET) the raw body is "", so the signed
-    #    string is "${X-Timestamp}.". Serialize the body once and send those
-    #    exact bytes — re-serializing changes them and invalidates the
-    #    signature. Requests more than 300 s from server time are rejected as
-    #    replays. Verified against backend/src/middleware/auth.ts.
+    #    v1 binds neither method nor path, so a captured signature is replayable
+    #    against any other body-less endpoint inside the skew window. Migrate to
+    #    v2, then ask the operator to set signature_version = 2 on the key.
+    #
+    #    SINGLE USE ON WRITES. A signature presented on a non-GET/HEAD/OPTIONS
+    #    request is burned: replaying the byte-identical request returns 401
+    #    "Signature already used". Retries must re-sign with a fresh
+    #    X-Timestamp; Idempotency-Key still prevents double execution. Reads are
+    #    not burned.
+    #
+    #    Serialize the body once and send those exact bytes — re-serializing
+    #    changes them and invalidates the signature.
+    #    Verified against backend/src/middleware/auth.ts.
     ApiKey:      { type: apiKey, in: header, name: X-Api-Key }
     Signature:   { type: apiKey, in: header, name: X-Signature }
     Timestamp:   { type: apiKey, in: header, name: X-Timestamp }

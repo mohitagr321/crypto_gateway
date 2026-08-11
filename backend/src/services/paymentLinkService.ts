@@ -17,11 +17,53 @@
  *     via the API has `payment_link_id IS NULL` and stays private.
  *
  * ============================ SINGLE-USE MEANS SINGLE-USE =====================
- * `use_count` is incremented inside the same transaction that creates the
- * payment, under `SELECT … FOR UPDATE` on the link row. Two customers opening a
- * one-use link simultaneously therefore cannot both get a deposit address: the
- * second blocks on the row lock, re-reads the incremented count, and is refused.
- * Checking the count outside the transaction would let both through.
+ * A use is claimed inside the same transaction that creates the payment, under
+ * `SELECT … FOR UPDATE` on the link row. Two customers opening a one-use link
+ * simultaneously therefore cannot both get a deposit address: the second blocks
+ * on the row lock, re-reads the count, and is refused. Checking the count
+ * outside the transaction would let both through.
+ *
+ * ============================ …BUT STARTING IS NOT USING ======================
+ * `use_count` used to be a monotonic counter bumped at payment CREATION and
+ * decremented by nothing, anywhere. So the single most common checkout outcome —
+ * the customer clicks Continue, sees the address, and never pays — burned the
+ * link FOREVER. Every invoice mints a `max_uses = 1` link, so one abandoned
+ * checkout made that invoice permanently unpayable, recoverable only by voiding
+ * and re-issuing it (and not even that for a subscription cycle, which cannot be
+ * re-billed). Anyone holding the URL could do it deliberately with one
+ * unauthenticated request.
+ *
+ * A use is now derived from the payments the link actually produced, and only a
+ * payment that is DEAD AND EMPTY releases it:
+ *
+ *     consumed  =  payments on the link
+ *                  MINUS those that are (expired OR failed)
+ *                        AND received 0
+ *                        AND have no unexpected_deposits row
+ *
+ * Anything that is still live (`waiting`, `confirming`, `partial`) or that ever
+ * received a single unit of the asset holds the use permanently.
+ *
+ * THE THIRD TERM IS NOT DECORATION — IT IS THE LATE-PAYMENT CASE. `amount_received`
+ * is only ever written by a listener, and every listener's UPDATE is guarded on
+ * `status IN ('waiting','confirming','partial')`; `reapLateDeposits` states
+ * outright that it does NOT credit the payment. So money arriving AFTER expiry
+ * leaves `amount_received = 0` on that payment forever and shows up only as an
+ * `unexpected_deposits` row. Releasing the use on `amount_received = 0` alone
+ * therefore re-opened a link the customer had already paid — and on Bitcoin that
+ * is routine, not exotic: the listener counts only CONFIRMED outputs, so anyone
+ * who broadcasts in the last minutes of the window and is mined after it expires
+ * lands exactly here. They would then see a live checkout and pay a second time.
+ * Keying on the deposit ledger closes it: the use re-consumes itself the moment
+ * the reaper can see the funds, which is the earliest moment anything in this
+ * system knows they exist.
+ *
+ * Nothing that touched money is ever released, so a link can never be paid
+ * twice; an abandoned checkout releases itself when the payment expires, with no
+ * worker involved.
+ *
+ * `use_count` is now that derived number, reconciled onto the row whenever a use
+ * is claimed. It is still the merchant-visible "how many times was this used".
  */
 import { PoolClient } from 'pg';
 import { query, queryOne, withTransaction } from '../db/pool';
@@ -122,7 +164,61 @@ export interface PublicLink {
   unusableReason: string | null;
 }
 
-function toMerchantLink(r: PaymentLinkRow): MerchantLink {
+/**
+ * A link row plus its DERIVED use count.
+ *
+ * `consumed_uses` is NULL for a link with no `max_uses`, where the count gates
+ * nothing and the subquery is not worth running on every read; callers fall back
+ * to the stored `use_count` there, which for an unlimited link is exactly what
+ * it has always been — a lifetime tally.
+ */
+interface CountedLinkRow extends PaymentLinkRow {
+  consumed_uses: string | null;
+}
+
+/**
+ * A dead checkout at which no money ever turned up — the ONLY thing that
+ * releases a use. Written once, used by every count in this file, because the
+ * checkout's gate and the numbers shown to the merchant and the customer
+ * disagreeing is how the original bug stayed invisible.
+ *
+ * `p` is the payments alias in the enclosing query. See the file header for why
+ * the unexpected_deposits term is load-bearing rather than belt-and-braces: it
+ * is the only evidence a late payment leaves behind.
+ */
+const RELEASED_PAYMENT_SQL = `
+  p.status IN ('expired','failed')
+  AND p.amount_received = 0
+  AND NOT EXISTS (
+    SELECT 1 FROM unexpected_deposits ud WHERE ud.payment_id = p.id
+  )`;
+
+/**
+ * The one definition of "this link has been used", as a SQL scalar subquery over
+ * `payments`. `$alias` is the payment_links alias in the enclosing query.
+ *
+ * A payment that is `expired` or `failed`, received nothing and left nothing in
+ * the deposit ledger never took the link's use: the customer opened the checkout
+ * and walked away. Everything else — live, confirmed, swept, or dead-but-funded
+ * — holds it forever. Cheap: served by idx_payments_link, the row count per link
+ * is bounded by max_uses plus however many times the link was abandoned, and the
+ * inner EXISTS is served by idx_unexpected_payment (migration 025).
+ */
+function consumedUsesSql(alias: string): string {
+  return `CASE WHEN ${alias}.max_uses IS NULL THEN NULL ELSE (
+            SELECT count(*)
+              FROM payments p
+             WHERE p.payment_link_id = ${alias}.id
+               AND NOT (${RELEASED_PAYMENT_SQL})
+          ) END`;
+}
+
+/** Derived use count for a row, falling back to the stored tally. */
+function consumedUses(r: CountedLinkRow): number {
+  return r.consumed_uses === null ? r.use_count : Number(r.consumed_uses);
+}
+
+function toMerchantLink(r: PaymentLinkRow, useCount: number = r.use_count): MerchantLink {
   return {
     id: r.id,
     token: r.token,
@@ -135,25 +231,50 @@ function toMerchantLink(r: PaymentLinkRow): MerchantLink {
     network: r.network,
     reusable: r.reusable,
     maxUses: r.max_uses,
-    useCount: r.use_count,
+    useCount,
     expiresAt: r.expires_at ? new Date(r.expires_at).toISOString() : null,
     status: r.status,
     createdAt: new Date(r.created_at).toISOString(),
   };
 }
 
+/** Shown when the link's uses are genuinely spent — money was taken. */
+const REASON_USED = 'This payment link has already been used.';
+/**
+ * Shown instead when the uses are held by a payment that is still LIVE. The
+ * distinction is the whole customer-facing point of the fix: "already used" is a
+ * dead end, this one tells the customer their own checkout is still open and
+ * will free itself.
+ */
+const REASON_IN_PROGRESS =
+  'A payment for this link is already in progress. Finish paying it, or wait for it to expire before starting a new one.';
+/**
+ * Shown when the use is held by a checkout that expired BEFORE the funds sent to
+ * it became visible — the late-payment case (see the file header). Deliberately
+ * not "already used" and deliberately not an invitation to pay again: a customer
+ * in this state has already sent money, it is sitting in `unexpected_deposits`
+ * waiting on the merchant's one-click recovery, and the one thing that must not
+ * happen is them paying a second time.
+ */
+const REASON_FUNDS_RECEIVED_LATE =
+  'A payment for this link arrived after its window closed and is being processed. ' +
+  'Do not pay again — contact the merchant to have it applied.';
+
 /**
  * Why a link cannot be paid, or null when it can. Returned to the public page so
  * it can say "this link has expired" instead of a bare 404 — a dead end the
  * customer understands is better than one that looks broken.
+ *
+ * `uses` is the DERIVED count (see consumedUsesSql), never the raw column, so an
+ * abandoned checkout does not render a live link as spent.
  */
-function unusableReason(r: PaymentLinkRow): string | null {
+function unusableReason(r: PaymentLinkRow, uses: number): string | null {
   if (r.status !== 'active') return 'This payment link has been disabled.';
   if (r.expires_at && new Date(r.expires_at).getTime() < Date.now()) {
     return 'This payment link has expired.';
   }
-  if (r.max_uses !== null && r.use_count >= r.max_uses) {
-    return 'This payment link has already been used.';
+  if (r.max_uses !== null && uses >= r.max_uses) {
+    return REASON_USED;
   }
   return null;
 }
@@ -252,11 +373,17 @@ export async function createLink(input: CreateLinkInput): Promise<MerchantLink> 
 }
 
 export async function listLinks(clientId: string): Promise<MerchantLink[]> {
-  const rows = await query<PaymentLinkRow>(
-    `SELECT * FROM payment_links WHERE client_id = $1 ORDER BY created_at DESC LIMIT 200`,
+  const rows = await query<CountedLinkRow>(
+    `SELECT l.*, ${consumedUsesSql('l')} AS consumed_uses
+       FROM payment_links l
+      WHERE l.client_id = $1
+      ORDER BY l.created_at DESC
+      LIMIT 200`,
     [clientId],
   );
-  return rows.map(toMerchantLink);
+  // The dashboard's "2 of 1 used" is the merchant's only window onto this, so it
+  // reports the same derived number the checkout enforces.
+  return rows.map((r) => toMerchantLink(r, consumedUses(r)));
 }
 
 /** Disable (never delete): the link may already be in a customer's inbox. */
@@ -265,21 +392,21 @@ export async function setLinkStatus(
   id: string,
   status: 'active' | 'disabled',
 ): Promise<MerchantLink> {
-  const row = await queryOne<PaymentLinkRow>(
+  const row = await queryOne<CountedLinkRow>(
     `UPDATE payment_links SET status = $3, updated_at = now()
       WHERE id = $1 AND client_id = $2
-      RETURNING *`,
+      RETURNING *, ${consumedUsesSql('payment_links')} AS consumed_uses`,
     [id, clientId, status],
   );
   if (!row) throw AppError.notFound('Payment link not found');
-  return toMerchantLink(row);
+  return toMerchantLink(row, consumedUses(row));
 }
 
 // ---------------------------------------------------------------------------
 // Public side
 // ---------------------------------------------------------------------------
 
-interface PublicRow extends PaymentLinkRow {
+interface PublicRow extends CountedLinkRow {
   business_name: string;
   client_status: string;
   has_invoice: boolean;
@@ -288,7 +415,8 @@ interface PublicRow extends PaymentLinkRow {
 async function findByToken(token: string): Promise<PublicRow | null> {
   return queryOne<PublicRow>(
     `SELECT l.*, c.business_name, c.status::text AS client_status,
-            EXISTS (SELECT 1 FROM invoices i WHERE i.payment_link_id = l.id) AS has_invoice
+            EXISTS (SELECT 1 FROM invoices i WHERE i.payment_link_id = l.id) AS has_invoice,
+            ${consumedUsesSql('l')} AS consumed_uses
        FROM payment_links l
        JOIN clients c ON c.id = l.client_id
       WHERE l.token = $1`,
@@ -316,7 +444,7 @@ export async function getPublicLink(token: string): Promise<PublicLink> {
       isNative: a.isNative,
     }));
 
-  const reason = unusableReason(row);
+  const reason = unusableReason(row, consumedUses(row));
   return {
     token: row.token,
     title: row.title,
@@ -343,17 +471,28 @@ export async function getPublicLink(token: string): Promise<PublicLink> {
  * Claim one use of a link, atomically, and return everything the caller needs to
  * create the payment.
  *
- * The row lock is the whole point: the usability check and the increment happen
+ * The row lock is the whole point: the usability check and the claim happen
  * together, so a single-use link cannot be claimed twice by concurrent opens.
  * The caller creates the payment inside the SAME transaction (`tx`), so a
- * failure there rolls the increment back too — a link is never burned by a
- * payment that was not created.
+ * failure there rolls the claim back too — a link is never burned by a payment
+ * that was not created.
+ *
+ * The count is RE-DERIVED from `payments` here rather than read off the row (see
+ * the header): that is what releases a use abandoned at a dead checkout, and it
+ * is what makes the concurrency argument still hold. The second claimant blocks
+ * on the row lock; by the time it runs, the first transaction has committed its
+ * payment, so the recount sees it (READ COMMITTED takes a fresh snapshot per
+ * statement) and refuses. The recount runs only for links that actually cap
+ * uses — an unlimited link gates on nothing and keeps the cheap increment.
  */
 export async function claimLinkUse(
   tx: PoolClient,
   token: string,
 ): Promise<{ link: PaymentLinkRow; clientId: string; businessName: string }> {
-  const res = await tx.query<PublicRow>(
+  // Deliberately NOT PublicRow: this query selects neither has_invoice nor the
+  // derived consumed_uses (it recomputes the count itself, below, alongside the
+  // live count). Typing it as PublicRow would claim fields that are not there.
+  const res = await tx.query<PaymentLinkRow & { business_name: string; client_status: string }>(
     `SELECT l.*, c.business_name, c.status::text AS client_status
        FROM payment_links l
        JOIN clients c ON c.id = l.client_id
@@ -366,14 +505,58 @@ export async function claimLinkUse(
     throw AppError.notFound('This payment link does not exist.');
   }
 
-  const reason = unusableReason(row);
-  if (reason) throw AppError.badRequest(reason);
+  // Capped links only. `live` and `late` are carried alongside so a refused
+  // claim can tell the customer WHICH kind of refusal it is — and in the `late`
+  // case, tell them not to pay again.
+  let uses = row.use_count;
+  let live = 0;
+  let late = 0;
+  if (row.max_uses !== null) {
+    const usage = await tx.query<{ consumed: string; live: string; late: string }>(
+      `SELECT
+         count(*) FILTER (
+           WHERE NOT (${RELEASED_PAYMENT_SQL})
+         )::text AS consumed,
+         count(*) FILTER (
+           WHERE p.status IN ('waiting','confirming','partial')
+         )::text AS live,
+         count(*) FILTER (
+           WHERE p.status IN ('expired','failed')
+             AND p.amount_received = 0
+             AND EXISTS (
+               SELECT 1 FROM unexpected_deposits ud WHERE ud.payment_id = p.id
+             )
+         )::text AS late
+       FROM payments p
+      WHERE p.payment_link_id = $1`,
+      [row.id],
+    );
+    uses = Number(usage.rows[0]?.consumed ?? 0);
+    live = Number(usage.rows[0]?.live ?? 0);
+    late = Number(usage.rows[0]?.late ?? 0);
+  }
 
+  const reason = unusableReason(row, uses);
+  if (reason) {
+    // Same refusal, honest wording. Ordered live-first: a customer with a
+    // checkout still open should finish that one, and only if nothing is open is
+    // the late-funds message the accurate description of why they are blocked.
+    if (reason === REASON_USED && live > 0) throw AppError.badRequest(REASON_IN_PROGRESS);
+    if (reason === REASON_USED && late > 0) throw AppError.badRequest(REASON_FUNDS_RECEIVED_LATE);
+    throw AppError.badRequest(reason);
+  }
+
+  // Written as an absolute value, not `use_count + 1`, so the stored column is
+  // reconciled to the derived truth on every claim — including downwards, when a
+  // previously counted checkout has since expired unpaid. Safe under
+  // concurrency: nobody reaches this line without the link's row lock.
+  const claimed = uses + 1;
   await tx.query(
-    `UPDATE payment_links SET use_count = use_count + 1, updated_at = now()
+    `UPDATE payment_links SET use_count = $2, updated_at = now()
       WHERE id = $1`,
-    [row.id],
+    [row.id, claimed],
   );
+  row.use_count = claimed;
 
   return { link: row, clientId: row.client_id, businessName: row.business_name };
 }

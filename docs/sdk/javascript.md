@@ -13,13 +13,51 @@ Every merchant request sends three headers:
 |---------------|-------------------------------------------------------------------|
 | `X-Api-Key`   | Your public API key (e.g. `pk_live_...`)                           |
 | `X-Timestamp` | Current unix time **in seconds**                                   |
-| `X-Signature` | `hex( HMAC_SHA256( secret, "${timestamp}.${rawJsonBody}" ) )`      |
+| `X-Signature` | see the signed string below                                        |
+
+### Signed string
+
+There are two schemes. Which ones your key accepts is `signature_version` on the
+key, which an operator sets:
+
+| `signature_version` | Accepts |
+|---------------------|---------|
+| `1` (default)       | **v2** or **v1** — the migration window |
+| `2`                 | **v2** only |
+
+**v2 — use this.** It binds the verb and the exact path, so a signature captured
+from a status poll is not a signature for `POST /payouts`:
+
+```
+signed  = `${timestamp}.${METHOD}.${path}.${sha256hex(rawBody)}`
+X-Signature = hex( HMAC_SHA256( secret, signed ) )
+```
+
+- `METHOD` is upper-case (`GET`, `POST`, `PUT`).
+- `path` is the request target **exactly as it goes on the wire**, including the
+  `/api/v1` prefix and the query string — e.g. `/api/v1/payouts?page=2&limit=20`.
+  The server signs the bytes it received, so build the query string yourself and
+  send that same string; do **not** hand a params object to an HTTP library and
+  let it re-encode. The example client below does this.
+- `sha256hex("")` for a body-less request is
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+**v1 — legacy.** `hex( HMAC_SHA256( secret, `${timestamp}.${rawJsonBody}` ) )`.
+It binds neither method nor path, so a captured signature can be replayed
+against any other body-less endpoint inside the 5-minute window. Still accepted
+while your key is at `signature_version = 1`, so you can upgrade your client and
+flip the key as two separate steps.
 
 Rules:
 
 - The signature is computed over the **exact raw JSON string** that is sent on the wire. Serialize the body **once** and reuse that exact string for both signing and sending — do not re-`JSON.stringify` it.
-- For requests with no body (GET), the raw body is the **empty string** `""`, so you sign `"${timestamp}."`.
+- For requests with no body (GET), the raw body is the **empty string** `""`.
 - Requests whose timestamp is more than **5 minutes** (300 s) off the server clock are rejected (replay protection). Keep your clock in sync (NTP).
+- **Signatures on writes are single-use.** Any non-`GET`/`HEAD`/`OPTIONS` request
+  burns its signature: resending the byte-identical request returns
+  `401 Signature already used`. Retry by re-signing with a fresh `X-Timestamp`,
+  and keep the same `Idempotency-Key` so the retry cannot execute twice. Reads
+  are not burned, so concurrent polling is unaffected.
 - Send `Content-Type: application/json`.
 
 
@@ -84,13 +122,19 @@ class GatewayClient {
     this.apiKey = apiKey;
     this.apiSecret = apiSecret;
     this.http = axios.create({ baseURL: baseUrl, timeout });
+    // The server signs the FULL wire path, so the prefix baked into baseUrl
+    // (normally "/api/v1") is part of the signed string. Derive it rather than
+    // hardcoding it, so a gateway mounted under a different prefix still signs
+    // correctly. Trailing slash stripped: "/api/v1/" + "/payments" is not a path.
+    this.pathPrefix = new URL(baseUrl).pathname.replace(/\/+$/, '');
   }
 
-  /** Sign "${timestamp}.${rawBody}" with the API secret -> hex. */
-  _sign(timestamp, rawBody) {
+  /** v2: sign "${timestamp}.${METHOD}.${path}.${sha256(rawBody)}" -> hex. */
+  _sign(timestamp, method, path, rawBody) {
+    const bodyHash = crypto.createHash('sha256').update(rawBody).digest('hex');
     return crypto
       .createHmac('sha256', this.apiSecret)
-      .update(`${timestamp}.${rawBody}`)
+      .update(`${timestamp}.${method}.${path}.${bodyHash}`)
       .digest('hex');
   }
 
@@ -106,12 +150,19 @@ class GatewayClient {
   async _request(method, path, { body, query, headers = {} } = {}) {
     const rawBody = body === undefined ? '' : JSON.stringify(body);
     const timestamp = Math.floor(Date.now() / 1000).toString();
-    const signature = this._sign(timestamp, rawBody);
+
+    // Build the query string OURSELVES and sign the exact path we send. The
+    // server signs `req.originalUrl` verbatim, so handing `query` to axios and
+    // letting it encode would sign one string and send another.
+    const qs = new URLSearchParams(query ?? {}).toString();
+    const wirePath = qs ? `${path}?${qs}` : path;
+    // The baseURL prefix is part of what the server signs.
+    const signedPath = `${this.pathPrefix}${wirePath}`;
+    const signature = this._sign(timestamp, method.toUpperCase(), signedPath, rawBody);
 
     const res = await this.http.request({
       method,
-      url: path,
-      params: query,
+      url: wirePath,
       // send the SAME string we signed; disable axios re-serialization
       data: rawBody === '' ? undefined : rawBody,
       headers: {

@@ -14,16 +14,49 @@ Every merchant request sends three headers:
 |---------------|-------------------------------------------------------------------|
 | `X-Api-Key`   | Your public API key (e.g. `pk_live_...`)                           |
 | `X-Timestamp` | Current unix time **in seconds**                                  |
-| `X-Signature` | `hash_hmac('sha256', "{$timestamp}.{$rawJsonBody}", $secret)`      |
+| `X-Signature` | see the signed string below                                        |
+
+### Signed string
+
+Two schemes exist. Which ones your key accepts is `signature_version` on the key,
+which an operator sets: `1` (the default) accepts **v2 or v1**, `2` accepts
+**v2 only**.
+
+**v2 — use this.** It binds the verb and the exact path, so a signature captured
+from a status poll is not a signature for `POST /payouts`:
+
+```php
+$bodyHash  = hash('sha256', $rawBody);
+$signed    = "{$timestamp}." . strtoupper($method) . ".{$path}.{$bodyHash}";
+$signature = hash_hmac('sha256', $signed, $secret);
+```
+
+- `$path` is the request target **exactly as it goes on the wire**, including
+  the `/api/v1` prefix and the query string — e.g.
+  `/api/v1/payouts?page=2&limit=20`. The server signs the bytes it received, so
+  build the query string once and sign and send the same string. The client
+  below does this.
+- `hash('sha256', '')` for a body-less request is
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+**v1 — legacy.** `hash_hmac('sha256', "{$timestamp}.{$rawJsonBody}", $secret)`.
+It binds neither method nor path, so a captured signature is replayable against
+any other body-less endpoint inside the 5-minute window. Still accepted while
+your key is at `signature_version = 1`, so upgrading the client and flipping the
+key are two independent steps.
 
 Rules:
 
 - Sign the **exact raw JSON string** you send. Build the body string once, sign
   it, and `POST` that same string.
-- For GET requests with no body, the raw body is the **empty string** `''`, so
-  you sign `"{$timestamp}."`.
+- For GET requests with no body, the raw body is the **empty string** `''`.
 - Timestamps more than **5 minutes** (300 s) off the server clock are rejected
   (replay protection). Keep the clock NTP-synced.
+- **Signatures on writes are single-use.** Any non-`GET`/`HEAD`/`OPTIONS`
+  request burns its signature: resending the byte-identical request returns
+  `401 Signature already used`. Retry by re-signing with a fresh `X-Timestamp`
+  and the same `Idempotency-Key`. Reads are not burned, so concurrent polling is
+  unaffected.
 
 ## Two key modes
 
@@ -72,6 +105,7 @@ class GatewayClient
     private string $apiKey;
     private string $apiSecret;
     private string $baseUrl;
+    private string $pathPrefix;
     private int $timeout;
 
     public function __construct(
@@ -86,13 +120,24 @@ class GatewayClient
         $this->apiKey    = $apiKey;
         $this->apiSecret = $apiSecret;
         $this->baseUrl   = rtrim($baseUrl, '/');
+        // The server signs the FULL wire path, so the prefix baked into
+        // $baseUrl (normally "/api/v1") is part of the signed string. Derived
+        // rather than hardcoded, so a gateway mounted under another prefix
+        // still signs correctly.
+        $this->pathPrefix = (string) parse_url($this->baseUrl, PHP_URL_PATH);
         $this->timeout   = $timeout;
     }
 
-    /** HMAC-SHA256 over "{timestamp}.{rawBody}" -> hex. */
-    private function sign(string $timestamp, string $rawBody): string
-    {
-        return hash_hmac('sha256', $timestamp . '.' . $rawBody, $this->apiSecret);
+    /** v2: HMAC-SHA256 over "{ts}.{METHOD}.{path}.{sha256(body)}" -> hex. */
+    private function sign(
+        string $timestamp,
+        string $method,
+        string $path,
+        string $rawBody
+    ): string {
+        $bodyHash = hash('sha256', $rawBody);
+        $signed = $timestamp . '.' . $method . '.' . $path . '.' . $bodyHash;
+        return hash_hmac('sha256', $signed, $this->apiSecret);
     }
 
     /**
@@ -112,12 +157,19 @@ class GatewayClient
         // Serialize ONCE, sign that exact string, send that exact string.
         $rawBody = $body === null ? '' : json_encode($body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $timestamp = (string) time();
-        $signature = $this->sign($timestamp, $rawBody);
 
-        $url = $this->baseUrl . $path;
+        // Build the query string ONCE, then sign and send that exact path.
+        $wirePath = $path;
         if (!empty($query)) {
-            $url .= '?' . http_build_query($query);
+            $wirePath .= '?' . http_build_query($query);
         }
+        $url = $this->baseUrl . $wirePath;
+        $signature = $this->sign(
+            $timestamp,
+            strtoupper($method),
+            $this->pathPrefix . $wirePath,
+            $rawBody
+        );
 
         $headers = [
             'Content-Type: application/json',

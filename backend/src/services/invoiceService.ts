@@ -467,18 +467,30 @@ export async function createInvoice(input: CreateInvoiceInput): Promise<Invoice>
 // Reads
 // ---------------------------------------------------------------------------
 
-async function loadItems(invoiceId: string): Promise<InvoiceItem[]> {
-  const rows = await query<{
+/**
+ * `tx` is not optional decoration. voidInvoice calls this from INSIDE its own
+ * transaction, and going to the pool there makes the request hold one
+ * connection while waiting for a second — with DB_POOL_MAX concurrent voids in
+ * a process, every connection is held by a transaction waiting on a connection
+ * only it can release, and they all fail at connectionTimeoutMillis (2s since
+ * db/pool.ts was retuned, so it surfaces sooner than it used to). Read-only, so
+ * borrowing the caller's connection changes nothing else: same rows, same
+ * order, and a failure aborts a transaction that was about to be rolled back by
+ * the same error anyway.
+ */
+async function loadItems(invoiceId: string, tx?: PoolClient): Promise<InvoiceItem[]> {
+  const sql = `SELECT id, description, quantity, unit_price, amount
+       FROM invoice_items WHERE invoice_id = $1 ORDER BY sort_order, created_at`;
+  type ItemRow = {
     id: string;
     description: string;
     quantity: string;
     unit_price: string;
     amount: string;
-  }>(
-    `SELECT id, description, quantity, unit_price, amount
-       FROM invoice_items WHERE invoice_id = $1 ORDER BY sort_order, created_at`,
-    [invoiceId],
-  );
+  };
+  const rows = tx
+    ? (await tx.query<ItemRow>(sql, [invoiceId])).rows
+    : await query<ItemRow>(sql, [invoiceId]);
   return rows.map((r) => ({
     id: r.id,
     description: r.description,
@@ -610,7 +622,7 @@ export async function voidInvoice(clientId: string, id: string): Promise<Invoice
       );
     }
     if (row.status === 'void') {
-      return toInvoice(row, await loadItems(row.id), null);
+      return toInvoice(row, await loadItems(row.id, tx), null);
     }
 
     if (row.payment_link_id) {
@@ -623,7 +635,7 @@ export async function voidInvoice(clientId: string, id: string): Promise<Invoice
       `UPDATE invoices SET status = 'void' WHERE id = $1 RETURNING *`,
       [id],
     );
-    return toInvoice(updated.rows[0], await loadItems(id), null);
+    return toInvoice(updated.rows[0], await loadItems(id, tx), null);
   });
 }
 

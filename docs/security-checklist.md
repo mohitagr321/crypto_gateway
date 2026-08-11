@@ -133,8 +133,13 @@ should mean removing the mode.
 
 - [ ] **Deposit private keys are NEVER persisted** — reconstructed on demand from
       mnemonic + `derivation_index`; nothing to steal from the DB.
-- [ ] **HD derivation index is monotonic (`hd_counter`) and race-safe** —
-      prevents address reuse and cross-payment collisions.
+- [ ] **HD derivation index is monotonic (the `hd_deposit_index` SEQUENCE, with
+      the legacy `hd_counter` row as the pre-migration fallback) and race-safe**
+      — `nextval()` never returns a value twice, and the UNIQUE
+      `idx_wallets_deriv` on `wallets(derivation_index) WHERE type='deposit'` is
+      the backstop that makes two payments sharing a deposit address impossible
+      even if an allocator were wrong. Gaps are expected and harmless: nothing
+      reads derivation indexes densely.
 - [ ] **Master mnemonic read once at boot, encrypted, then cleared from memory**
       — minimizes the window it exists in plaintext.
 - [ ] **Hot/cold split: only sweep-necessary balance stays hot** — central/gas

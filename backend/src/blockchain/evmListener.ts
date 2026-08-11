@@ -30,7 +30,12 @@
  *       - updates confirmations = head - block_number,
  *       - promotes payments to `confirmed` at >= required_confirmations and
  *         enqueues the confirmed webhook + a sweep job (idempotently),
- *       - advances chain_cursor.last_scanned_block only up to the safe head.
+ *       - advances chain_cursor.last_scanned_block only up to the safe head,
+ *         and only over a range it actually finished scanning with an address
+ *         set that already contained every address those blocks could have
+ *         been paying (see the ordering note in reconcileOnce — nothing ever
+ *         re-scans a block behind the cursor, so that ordering is the only
+ *         thing standing between a mid-pass payment and a lost deposit).
  *
  *  REORG SAFETY: we only treat blocks older than REORG_DEPTH as final, and we
  *  re-scan a rolling window behind the head. If a previously-recorded tx is no
@@ -94,9 +99,52 @@ const RECEIVED_SUM = `COALESCE((
             ), 0)`;
 
 const RECONCILE_INTERVAL_MS = 5_000;
+/**
+ * Backstop refresh of the watch set.
+ *
+ * The load-bearing refresh is now the one at the top of every pass (see
+ * reconcileOnce / reconcileNativeOnce): the set MUST be at least as new as the
+ * head we are about to scan up to, or the cursor advances over blocks that were
+ * filtered by an address set which did not yet contain a freshly-minted deposit
+ * address. This timer only keeps the WS fast path's set from going stale while
+ * the reconciler itself is failing (a dead RPC makes every pass throw before it
+ * reaches the refresh).
+ */
 const ADDRESS_REFRESH_MS = 30_000;
 // How many blocks to scan per reconciler pass (bounded to respect RPC limits).
 const MAX_SCAN_RANGE = 2_000;
+/**
+ * Floor for the ADAPTIVE scan range. A provider that rejects a 2,000-block
+ * eth_getLogs ("query returned more than N results", "rate limit") used to be
+ * fatal: the identical oversized request was reissued every 5 s forever and the
+ * cursor never moved. The range now halves on every failed pass down to this
+ * floor and doubles back up after a clean one, so the reconciler negotiates a
+ * range the endpoint will actually serve instead of wedging on one it will not.
+ */
+const MIN_SCAN_RANGE = 10;
+let scanRange = MAX_SCAN_RANGE;
+
+/**
+ * How many watched addresses go into ONE eth_getLogs topic filter.
+ *
+ * The watch set is unbounded — it is every deposit address with a live payment
+ * — and it is serialised into the request body as a topic OR-list. At a few
+ * thousand concurrent payments that body exceeds what public endpoints accept
+ * and the call fails wholesale, taking the whole asset's scan with it. Chunking
+ * keeps each request bounded; the chunks cover the same address set and the
+ * same block range, so nothing is skipped. A chunk that fails only suppresses
+ * the cursor advance (see `allOk` below) — the range is then rescanned next
+ * pass, and every write on this path is idempotent.
+ */
+const ADDRESS_FILTER_CHUNK = 200;
+
+/**
+ * Consecutive passes that ended without advancing the cursor. A wedged
+ * reconciler and a single transient RPC blip produce the same one-line error
+ * today; this is what tells them apart.
+ */
+let stalePasses = 0;
+const STALE_PASS_ALARM = 12; // ~1 minute at RECONCILE_INTERVAL_MS
 
 /**
  * Where a deployment with no cursor starts the TOKEN scan: this many blocks
@@ -368,9 +416,23 @@ async function refreshDepositAddresses(): Promise<void> {
   );
   // Also include any deposit wallet with an active-ish payment; the query above
   // is the practical set we must watch.
+  //
+  // clear()+fill is atomic with respect to the rest of this process: everything
+  // after the await above is synchronous, so no handler can ever observe the
+  // empty set even though two loops call this.
+  const before = depositAddresses.size;
   depositAddresses.clear();
   for (const r of rows) depositAddresses.add(r.address.toLowerCase());
-  logger.info({ count: depositAddresses.size }, 'refreshed deposit address watch set');
+  // Runs on every pass now (every ~5s), so a per-call info line would be pure
+  // noise. Only a change in the set is worth saying out loud.
+  if (depositAddresses.size !== before) {
+    logger.info(
+      { count: depositAddresses.size, previous: before },
+      'refreshed deposit address watch set',
+    );
+  } else {
+    logger.debug({ count: depositAddresses.size }, 'refreshed deposit address watch set');
+  }
 }
 
 /**
@@ -627,6 +689,15 @@ async function scanNativeTransfers(
   asset: Asset,
   fromBlock: number,
   toBlock: number,
+  /**
+   * A SNAPSHOT of the watch set, taken by the caller after it read the head —
+   * deliberately NOT the live `depositAddresses`. See the note in
+   * reconcileNativeOnce: the token loop refreshes the same shared set on its own
+   * 5s timer, and reading it live mid-scan lets an address disappear between the
+   * block being fetched and its transactions being examined, which silently
+   * drops a deposit out of a block the cursor is about to move past.
+   */
+  watched: ReadonlySet<string>,
 ): Promise<void> {
   for (let n = fromBlock; n <= toBlock; n++) {
     // `true` prefetches full transaction objects — the whole point here, since
@@ -640,7 +711,7 @@ async function scanNativeTransfers(
     for (const tx of block.prefetchedTransactions) {
       // A zero-value transaction is a contract call, not a payment.
       if (!tx.to || tx.value <= 0n) continue;
-      if (!depositAddresses.has(tx.to.toLowerCase())) continue;
+      if (!watched.has(tx.to.toLowerCase())) continue;
 
       await recordIncoming({
         txHash: tx.hash,
@@ -681,6 +752,26 @@ async function reconcileOnce(): Promise<void> {
   const safeHead = head - cfg.reorgDepth;
   if (safeHead <= 0) return;
 
+  // ===================== ORDERING IS THE CORRECTNESS ARGUMENT ================
+  // The watch set is refreshed HERE — after the head is read, and before the
+  // range derived from that head is scanned. That order is what makes the
+  // cursor advance safe, and it is not interchangeable:
+  //
+  //   Every block <= `head` was already mined when getBlockNumber() returned.
+  //   A deposit address that is missing from the set refreshed AFTER that
+  //   moment therefore did not exist when the address's payment was created —
+  //   the payment is younger than `head`, so any transfer to it can only be
+  //   mined in a block ABOVE `head`, which is above `scanTo` and will be
+  //   scanned by a later pass with a set that does contain it.
+  //
+  // With the refresh on its own independent 30 s timer (what this replaced) the
+  // opposite could happen: a payment created mid-pass had its address absent
+  // from the filter, its deposit produced no logs, and the cursor still moved
+  // past the block it was in. Nothing rescans a block behind the cursor, so
+  // that deposit was never seen again — no row, no log, no unexpected_deposits
+  // entry, the payment simply expired.
+  await refreshDepositAddresses();
+
   const cursorRow = await queryOne<{ last_scanned_block: string }>(
     `SELECT last_scanned_block FROM chain_cursor WHERE network = '${cfg.network}'`,
   );
@@ -720,71 +811,137 @@ async function reconcileOnce(): Promise<void> {
     }
   }
 
-  // 1) Update confirmations + promote confirmed for all pending incoming txs.
-  await updateConfirmationsAndPromote(head);
-
-  // 2) Detect reorgs among recently-recorded (not-yet-final) incoming txs.
+  // 1) Detect reorgs among recently-recorded (not-yet-final) incoming txs.
+  //    Ahead of promotion so a transfer that has just fallen off the canonical
+  //    chain is not promoted and then immediately reverted in the same pass.
   await detectReorgs(head);
 
-  // 3) Scan for missed events in (lastScanned, scanTo].
+  // 2) Scan for missed events in (lastScanned, scanTo].
   const fromBlock = lastScanned + 1;
-  const scanTo = Math.min(safeHead, fromBlock + MAX_SCAN_RANGE - 1);
-  if (scanTo < fromBlock) {
-    // Nothing new safe to scan yet.
-    return;
-  }
+  const scanTo = Math.min(safeHead, fromBlock + scanRange - 1);
+  const nothingToScan = scanTo < fromBlock;
+
+  // Every queryFilter of this pass succeeded. The cursor may ONLY advance when
+  // this is still true — a failed chunk means blocks in (fromBlock, scanTo]
+  // were not fully examined, and nothing behind the cursor is ever rescanned.
+  let allOk = true;
 
   // Only scan if we're actually watching addresses. Filtering the `to` topic by
   // our deposit set is ESSENTIAL: an unfiltered Transfer scan on BSC returns
   // millions of logs and public RPCs reject it ("more than N results"). With no
   // active addresses there is nothing to find, so we just advance the cursor.
-  if (depositAddresses.size > 0) {
+  if (!nothingToScan && depositAddresses.size > 0) {
     // One queryFilter per enabled asset. Kept per-contract rather than one merged
     // filter because ethers resolves the event topic from the contract instance,
     // and — more importantly — a failure on one token must not silently drop the
     // others' logs while the cursor advances past them.
+    //
+    // SNAPSHOT, and every later membership test in this pass is against the
+    // SNAPSHOT — not against the live `depositAddresses`. The set is shared with
+    // the native loop, which refreshes it on its own timer every ~5s, and this
+    // block awaits a queryFilter per (asset, chunk) plus a recordIncoming per
+    // log, so a refresh lands in the middle of it routinely. With the live set,
+    // a payment that settled or expired mid-pass had its address removed and the
+    // defensive re-check below then DROPPED a log the RPC had already returned —
+    // while `allOk` stayed true and the cursor moved past the block it was in.
+    // That is the silent-loss shape this whole ordering rule exists to prevent:
+    // recordIncoming is never reached, so there is not even an
+    // unexpected_deposits row to find it by.
     const watched = Array.from(depositAddresses);
+    const watchedSet = new Set(watched);
     for (const asset of tokenAssetsFor(cfg.network)) {
       const token = tokenContract(httpRpc, asset);
-      // Transfer(from, to): filter on the indexed `to` topic by our watch set (OR).
-      const filter = token.filters.Transfer(null, watched);
-      let logs: Log[] = [];
-      try {
-        logs = (await token.queryFilter(filter, fromBlock, scanTo)) as unknown as Log[];
-      } catch (err) {
-        logger.error(
-          { err, fromBlock, scanTo, asset: asset.symbol },
-          'queryFilter failed; will retry next pass',
-        );
-        return; // do NOT advance the cursor — retry the whole range next pass
-      }
+      // Chunked so one request never carries an unbounded topic list. Every
+      // chunk covers the SAME block range, so the union is the whole range for
+      // the whole watch set.
+      for (let i = 0; i < watched.length; i += ADDRESS_FILTER_CHUNK) {
+        const batch = watched.slice(i, i + ADDRESS_FILTER_CHUNK);
+        // Transfer(from, to): filter on the indexed `to` topic by this chunk (OR).
+        const filter = token.filters.Transfer(null, batch);
+        let logs: Log[] = [];
+        try {
+          logs = (await token.queryFilter(filter, fromBlock, scanTo)) as unknown as Log[];
+        } catch (err) {
+          // Do NOT return. A `return` here used to abandon every REMAINING
+          // asset's scan as well, so one rate-limited token silently starved the
+          // others. Carry on, and let `allOk` hold the cursor back instead.
+          allOk = false;
+          logger.error(
+            {
+              err,
+              fromBlock,
+              scanTo,
+              scanRange,
+              asset: asset.symbol,
+              batchStart: i,
+              batchSize: batch.length,
+            },
+            'queryFilter failed; cursor held, range narrowed, retrying next pass',
+          );
+          continue;
+        }
 
-      for (const raw of logs) {
-        // queryFilter returns EventLog with parsed args in v6.
-        const evt = raw as unknown as {
-          args?: { from: string; to: string; value: bigint };
-          transactionHash: string;
-          index: number;
-          blockNumber: number;
-        };
-        if (!evt.args) continue;
-        const to = evt.args.to;
-        if (!depositAddresses.has(to.toLowerCase())) continue; // defensive
-        await recordIncoming({
-          txHash: evt.transactionHash,
-          logIndex: evt.index,
-          from: evt.args.from,
-          to,
-          value: evt.args.value,
-          blockNumber: evt.blockNumber,
-          asset,
-        });
+        for (const raw of logs) {
+          // queryFilter returns EventLog with parsed args in v6.
+          const evt = raw as unknown as {
+            args?: { from: string; to: string; value: bigint };
+            transactionHash: string;
+            index: number;
+            blockNumber: number;
+          };
+          if (!evt.args) continue;
+          const to = evt.args.to;
+          // Defensive: the RPC must only ever return logs for addresses this
+          // pass actually asked about. Tested against the pass's own snapshot so
+          // a concurrent refresh cannot turn it into a silent drop.
+          if (!watchedSet.has(to.toLowerCase())) continue;
+          await recordIncoming({
+            txHash: evt.transactionHash,
+            logIndex: evt.index,
+            from: evt.args.from,
+            to,
+            value: evt.args.value,
+            blockNumber: evt.blockNumber,
+            asset,
+          });
+        }
       }
     }
   }
 
-  // Re-run promotion for anything just discovered, then advance the cursor.
+  // 3) Confirmations + promotion, ONCE per pass, and AFTER the scan so it also
+  //    covers whatever the scan just discovered. It deliberately sits before
+  //    every early return below: a pass whose scan failed must still advance
+  //    confirmations, promote what has reached depth, and fire the confirmed
+  //    webhook + sweep. Only DISCOVERY stalls on an RPC failure, never
+  //    settlement of what is already recorded.
   await updateConfirmationsAndPromote(head);
+
+  if (nothingToScan) {
+    // Caught up to the safe head — there is no unscanned range being held back.
+    stalePasses = 0;
+    return;
+  }
+
+  if (!allOk) {
+    stalePasses += 1;
+    if (stalePasses === STALE_PASS_ALARM || stalePasses % (STALE_PASS_ALARM * 10) === 0) {
+      logger.error(
+        { network: cfg.network, stalePasses, fromBlock, scanTo, scanRange, behind: safeHead - lastScanned },
+        'reconciler has not advanced its cursor for many consecutive passes — ' +
+          'deposits in the unscanned range are NOT being detected; check the RPC endpoint',
+      );
+    }
+    // Narrow the window we ask for. A provider that refuses 2,000 blocks will
+    // usually serve 1,000, and the floor keeps this from collapsing to nothing.
+    scanRange = Math.max(MIN_SCAN_RANGE, Math.floor(scanRange / 2));
+    return; // do NOT advance the cursor — retry the same range next pass
+  }
+
+  // Clean pass: widen back towards the budget so a one-off blip does not pin the
+  // scanner at a narrow range forever (which would make catch-up take hours).
+  scanRange = Math.min(MAX_SCAN_RANGE, scanRange * 2);
+  stalePasses = 0;
   await writeTokenCursor(scanTo);
   logger.debug(
     { fromBlock, scanTo, head, behind: safeHead - scanTo },
@@ -808,6 +965,12 @@ async function reconcileNativeOnce(): Promise<void> {
   const safeHead = head - cfg.reorgDepth;
   if (safeHead <= 0) return;
 
+  // Same ordering rule as the token pass, for the same reason: the watch set
+  // must be at least as new as the head whose blocks this pass will mark as
+  // scanned. See the note in reconcileOnce. This loop has its OWN cursor, so it
+  // cannot lean on the token pass's refresh — the two advance independently.
+  await refreshDepositAddresses();
+
   const cursorRow = await queryOne<{ last_scanned_block: string }>(
     `SELECT last_scanned_block FROM chain_cursor WHERE network = $1`,
     [nativeCursorKey()],
@@ -821,11 +984,27 @@ async function reconcileNativeOnce(): Promise<void> {
   const scanTo = Math.min(safeHead, fromBlock + cfg.nativeScanRange - 1);
   if (scanTo < fromBlock) return;
 
+  // SNAPSHOT the watch set for the whole scan, rather than reading the shared
+  // set live inside it. `depositAddresses` is shared with the token loop, which
+  // refreshes it on its own pass every ~5s; this scan walks blocks one RPC call
+  // at a time and can easily still be running across several of those. Reading
+  // it live meant a payment that settled or expired mid-scan had its address
+  // removed underneath us, and a native transfer to it in an ALREADY-FETCHED
+  // block was then skipped — with the cursor advancing past that block anyway.
+  // Nothing rescans behind the cursor, so that deposit became invisible: no
+  // blockchain_transactions row and, because recordIncoming was never reached,
+  // no unexpected_deposits row either.
+  //
+  // The snapshot cannot miss the opposite way. It is taken after the head was
+  // read, so by the ordering argument above it already contains every address
+  // that any block <= scanTo could have been paying.
+  const watched = new Set(depositAddresses);
+
   // Nothing to look for. Advance the cursor anyway so an idle period does not
   // build a backlog that has to be walked block by block when a payment appears.
-  if (depositAddresses.size > 0) {
+  if (watched.size > 0) {
     try {
-      await scanNativeTransfers(asset, fromBlock, scanTo);
+      await scanNativeTransfers(asset, fromBlock, scanTo, watched);
     } catch (err) {
       logger.error(
         { err, fromBlock, scanTo },
@@ -848,6 +1027,42 @@ async function reconcileNativeOnce(): Promise<void> {
 }
 
 /**
+ * How far behind the head a `pending` incoming row can still be moved by the
+ * confirmations UPDATE below.
+ *
+ * `required_confirmations` is written once at payment creation from
+ * `adapter.requiredConfirmations` (services/paymentService.ts) — i.e. always
+ * `cfg.requiredConfirmations` for this chain — so that term is exact, not a
+ * guess. `reorgDepth` covers the gap between the head and the safe head, and one
+ * full MAX_SCAN_RANGE covers a catch-up pass that discovers a transfer up to a
+ * whole scan window behind the head.
+ */
+function confirmationWindowBlocks(): number {
+  return cfg.requiredConfirmations + cfg.reorgDepth + MAX_SCAN_RANGE;
+}
+
+/**
+ * Mark ONE payment's incoming transfers `confirmed`, per row and on the row's
+ * own depth. $1 = payment id, $2 = current head.
+ *
+ * The depth test is joined to `payments.required_confirmations` rather than
+ * taken from `bt.confirmations`, because that column is a maintained display
+ * value and this is a settlement decision.
+ */
+function confirmDeepRowsSql(): string {
+  return `UPDATE blockchain_transactions bt
+             SET status = 'confirmed'
+            FROM payments p
+           WHERE p.id = bt.payment_id
+             AND bt.payment_id = $1
+             AND bt.direction = 'incoming'
+             AND bt.status = 'pending'
+             AND bt.network = '${cfg.network}'
+             AND bt.block_number IS NOT NULL
+             AND ($2 - bt.block_number) >= p.required_confirmations`;
+}
+
+/**
  * Update confirmations = head - block_number for pending incoming txs and promote
  * their payments to `confirmed` at >= required_confirmations. Idempotent: the
  * promotion WHERE clause only fires once (status must still be 'confirming').
@@ -855,14 +1070,25 @@ async function reconcileNativeOnce(): Promise<void> {
 async function updateConfirmationsAndPromote(head: number): Promise<void> {
   // Update confirmations on the tx rows. Scoped to BEP20: `head` is a BSC block
   // number and comparing it against a Tron block number is meaningless.
+  //
+  // BOUNDED BY BLOCK, and the bound cannot starve anything. This statement only
+  // maintains the DISPLAY column: every decision below reads depth as
+  // `head - bt.block_number` straight from the row, never from `confirmations`.
+  // A `pending` row older than the window has, by definition, passed every
+  // threshold this chain applies, so the only rows it excludes are ones whose
+  // counter is already far past anything that reads it — and the promotion
+  // SELECT further down carries NO block bound at all, so they are still picked
+  // up and settled. What this removes is the rewrite of every pending row in
+  // the table on every pass, forever, against a predicate with no index.
   await query(
     `UPDATE blockchain_transactions
         SET confirmations = GREATEST(0, $1 - block_number)
       WHERE direction = 'incoming'
         AND status = 'pending'
         AND network = '${cfg.network}'
-        AND block_number IS NOT NULL`,
-    [head],
+        AND block_number IS NOT NULL
+        AND block_number > $1 - $2`,
+    [head, confirmationWindowBlocks()],
   );
 
   // Mirror confirmations onto payments (confirm-tracker).
@@ -909,14 +1135,44 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
   // A settled `partial` costs nothing to re-check: the partial branch below
   // marks its incoming rows `confirmed`, so a payment with no NEW money has no
   // `pending` row left to join against and never reappears in this result.
+  //
+  // ============ SUFFICIENCY IS MEASURED ON MONEY THAT REACHED DEPTH ==========
+  // `fully_paid` sums only the transfers that have INDIVIDUALLY cleared
+  // required_confirmations, not `p.amount_received` (which counts every
+  // non-reorged row, including one recorded seconds ago by the WS fast path at
+  // the live head). Using amount_received here promoted a payment — and fired
+  // payment.confirmed, and enqueued the sweep — on the strength of a transfer
+  // with ZERO confirmations, as long as some OTHER, older transfer had reached
+  // depth. That is money leaving the hot wallet against a deposit with no
+  // finality at all.
+  //
+  // Nothing is stranded by waiting: the shallow transfer's row stays `pending`,
+  // so this SELECT re-picks the payment the moment that row reaches depth and
+  // promotes it then. If instead the shallow transfer falls off the chain,
+  // detectReorgs marks the row `reorged`, it leaves both this sum and
+  // amount_received, and the payment drops to `partial` down the branch below —
+  // which is the honest answer. The only change is WHEN, bounded by
+  // required_confirmations blocks.
   const ready = await query<{ id: string; tx_hash: string | null; fully_paid: boolean }>(
-    `SELECT p.id, p.tx_hash, (p.amount_received >= p.amount) AS fully_paid
+    `SELECT DISTINCT
+            p.id,
+            p.tx_hash,
+            (COALESCE((
+               SELECT SUM(d.amount)
+                 FROM blockchain_transactions d
+                WHERE d.payment_id = p.id
+                  AND d.direction = 'incoming'
+                  AND d.status <> 'reorged'
+                  AND d.block_number IS NOT NULL
+                  AND ($1 - d.block_number) >= p.required_confirmations
+             ), 0) >= p.amount) AS fully_paid
        FROM payments p
        JOIN blockchain_transactions bt ON bt.payment_id = p.id
       WHERE p.status IN ('confirming', 'partial')
         AND bt.direction = 'incoming'
         AND bt.status = 'pending'
         AND bt.network = '${cfg.network}'
+        AND bt.block_number IS NOT NULL
         AND ($1 - bt.block_number) >= p.required_confirmations`,
     [head],
   );
@@ -956,13 +1212,12 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
       // The transaction itself IS confirmed on-chain; only the payment is not
       // satisfied. Leaving the row `pending` would make the reconciler keep
       // re-counting confirmations against it forever.
-      await query(
-        `UPDATE blockchain_transactions
-            SET status = 'confirmed'
-          WHERE payment_id = $1 AND direction = 'incoming' AND status = 'pending'
-            AND network = '${cfg.network}'`,
-        [p.id],
-      );
+      //
+      // Only the rows that reached depth — see confirmDeepRowsSql. A shallower
+      // transfer to the same address stays `pending` ON PURPOSE: that is what
+      // brings this payment back into the `ready` SELECT once it matures, which
+      // is how a top-up settles a `partial`.
+      await query(confirmDeepRowsSql(), [p.id, head]);
 
       logger.warn(
         {
@@ -989,14 +1244,16 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
     );
     if (promoted.length === 0) continue; // already promoted by a concurrent pass
 
-    // Mark the tx row confirmed too.
-    await query(
-      `UPDATE blockchain_transactions
-          SET status = 'confirmed'
-        WHERE payment_id = $1 AND direction = 'incoming' AND status = 'pending'
-          AND network = '${cfg.network}'`,
-      [p.id],
-    );
+    // Mark the tx rows confirmed too — but ONLY those that individually reached
+    // required_confirmations.
+    //
+    // This statement used to confirm EVERY pending incoming row for the payment,
+    // with no depth test of its own. One deep transfer therefore stamped
+    // `confirmed` on a transfer the WS fast path had recorded seconds earlier at
+    // the live head, and that row then looked, to everything downstream, exactly
+    // like money with finality. Anything still shallow is left `pending` and is
+    // swept up by the statement after this loop once it reaches depth.
+    await query(confirmDeepRowsSql(), [p.id, head]);
 
     logger.info({ paymentId: p.id }, 'payment confirmed');
 
@@ -1013,6 +1270,34 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
     });
     await enqueueOrDefer({ kind: 'sweep', paymentId: p.id });
   }
+
+  // ==================== WHAT PICKS UP THE ROWS LEFT BEHIND ====================
+  // Confirming rows one at a time, on their own depth, leaves a real leftover:
+  // a shallow transfer that arrived just before its payment was promoted stays
+  // `pending`, and its payment is now `confirmed`/`swept` — which the `ready`
+  // SELECT above deliberately does not match, so nothing up there would ever
+  // look at that row again. It would sit `pending` forever, be rewritten by the
+  // confirmations UPDATE on every pass, and misreport itself in the merchant's
+  // transaction list.
+  //
+  // This is that pickup. It is the ONLY statement that touches rows whose
+  // payment has already been settled, and it applies the same per-row depth test
+  // as everything else. Payments still in `confirming`/`partial` are excluded on
+  // purpose: their pending rows are the trigger that brings them back into the
+  // promotion path, and confirming those rows early would strand the payment.
+  await query(
+    `UPDATE blockchain_transactions bt
+        SET status = 'confirmed'
+       FROM payments p
+      WHERE p.id = bt.payment_id
+        AND bt.direction = 'incoming'
+        AND bt.status = 'pending'
+        AND bt.network = '${cfg.network}'
+        AND bt.block_number IS NOT NULL
+        AND ($1 - bt.block_number) >= p.required_confirmations
+        AND p.status IN ('confirmed', 'swept')`,
+    [head],
+  );
 }
 
 /**

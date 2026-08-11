@@ -116,7 +116,13 @@ export default function Payouts() {
       ? (settingsQuery.data?.payoutWalletTrc20 ?? null)
       : (settingsQuery.data?.payoutWallet ?? null);
 
-  const payouts = payoutsQuery.data;
+  // GET /payouts is paginated server-side now; listPayouts() walks the pages so
+  // this table still shows the whole history rather than the first page. Beyond
+  // its cap `truncated` is true and `total` is what the server actually holds,
+  // so the count below never overstates what is on screen without saying so.
+  const payouts = payoutsQuery.data?.rows;
+  const payoutTotal = payoutsQuery.data?.total ?? 0;
+  const payoutsTruncated = payoutsQuery.data?.truncated ?? false;
 
   const columns: Column<Payout>[] = [
     {
@@ -216,7 +222,7 @@ export default function Payouts() {
         description="Withdraw a balance to your configured payout wallet. Each asset settles separately."
         meta={
           payouts
-            ? `${payouts.length} payout${payouts.length === 1 ? '' : 's'}`
+            ? `${payoutTotal} payout${payoutTotal === 1 ? '' : 's'}`
             : undefined
         }
       />
@@ -382,7 +388,9 @@ export default function Payouts() {
             <span className="runhead">Payout history</span>
             {payouts && payouts.length > 0 && (
               <span className="num text-xs text-slate-500 dark:text-slate-400">
-                {payouts.length} record{payouts.length === 1 ? '' : 's'}
+                {payoutsTruncated
+                  ? `${payouts.length} most recent of ${payoutTotal}`
+                  : `${payouts.length} record${payouts.length === 1 ? '' : 's'}`}
               </span>
             )}
           </div>

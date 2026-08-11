@@ -6,7 +6,10 @@
  *   sweep        — move confirmed deposit funds deposit->central (gas-fund if needed)
  *   payout       — broadcast USDT payout (payoutService.executePayout)
  *   expiry       — repeatable: mark stale `waiting` payments as `expired`
- *   settle       — repeatable safety net; also reconciles paid invoices
+ *   settle       — repeatable safety net: re-drives sweeps and payouts,
+ *                  reconciles paid invoices, reaps funds that arrived at an
+ *                  expired payment's address, and re-drives webhook deliveries
+ *                  the queue never received or has given up on
  *   subscription — repeatable: mint the next invoice for due subscriptions
  *
  * On a successful sweep, if AUTO_PAYOUT_ENABLED, we enqueue an auto payout of the
@@ -26,6 +29,10 @@ import {
   SweepJob,
   PayoutJob,
   AdminWithdrawJob,
+  redeliverWebhook,
+  webhookBackoffMs,
+  WEBHOOK_ATTEMPTS,
+  WEBHOOK_RETRY_SPAN_MS,
 } from './queues';
 import { dispatch, enqueueWebhook } from '../services/webhookService';
 import { executePayout, requestPayout } from '../services/payoutService';
@@ -35,7 +42,7 @@ import { parseAsset } from '../blockchain/assets';
 import { reconcilePaidInvoices } from '../services/invoiceService';
 import { runDueSubscriptions } from '../services/subscriptionService';
 import { recordUnexpectedDeposit } from '../services/unexpectedDepositService';
-import { toAccountingUnits } from '../utils/money';
+import { fromAccountingUnits, toAccountingUnits } from '../utils/money';
 
 const connection = bullConnectionOptions;
 
@@ -98,6 +105,151 @@ async function enqueueSweep(paymentId: string): Promise<boolean> {
   }
   await sweepQueue.add('sweep', { paymentId } as SweepJob, { jobId });
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Reconciling what the sweep ACTUALLY moved against what the payment was
+// credited with.
+//
+// The sweep is balance-based on purpose — the adapters read the live on-chain
+// balance because that, not `amount_received`, is what can physically be
+// transferred. The credit is event-based: a listener saw a transfer while the
+// payment was still in ('waiting','confirming','partial') and added it up.
+//
+// Those two disagree whenever funds land at the deposit address AFTER the
+// payment was promoted. recordIncoming only matches the live statuses, so a
+// later transfer is not credited; and once the payment leaves those statuses
+// its address drops out of every listener's watch set within thirty seconds, so
+// a later transfer than that is not even RECORDED. Either way the sweep still
+// moves the whole balance to the central wallet, where it is summed into
+// admin commission with no payout to offset it. The merchant's customer paid;
+// the merchant was paid less; the difference became withdrawable house money.
+//
+// So: before the payment leaves `confirmed`, make the ledger say what the chain
+// did.
+//
+//  * SAME ASSET as the payment — this is a late payment for this invoice, from
+//    the customer who was already paying it. Raise `amount_received` to what we
+//    actually moved, so the auto payout a few lines below settles all of it and
+//    the merchant's balance reflects their own money. Never lower it: the guard
+//    is `amount_received < $2`, so a partial re-sweep can never revoke credit.
+//  * DIFFERENT ASSET — deliberately NOT credited. Crediting USDC into a USDT
+//    balance at 1:1 is a real loss the moment the two diverge; that is what
+//    `unexpected_deposits` exists for.
+//
+// Either way, resolve the `unexpected_deposits` rows for the address we just
+// emptied. A recovery row still pointing at an address with nothing in it sends
+// an operator (or a merchant clicking "recover") to sweep a zero balance.
+// ---------------------------------------------------------------------------
+async function reconcileSweptExcess(args: {
+  paymentId: string;
+  depositAddress: string;
+  network: string;
+  paymentAsset: string;
+  sweptAsset: string;
+  amountReceived: string;
+  balanceHuman: string;
+  txHash: string;
+}): Promise<void> {
+  // BigInt at the ledger scale, never a float and never a global decimals
+  // constant — both sides are NUMERIC(38,18) strings.
+  const moved = toAccountingUnits(args.balanceHuman);
+  const credited = toAccountingUnits(args.amountReceived);
+  const excess = moved - credited;
+  if (excess === 0n) return;
+
+  if (excess < 0n) {
+    // We moved LESS than the payment was credited with. Not a late arrival —
+    // either a partial sweep or a credit that never really arrived. Nothing to
+    // reconcile automatically; the merchant balance stands and a human decides.
+    logger.error(
+      {
+        paymentId: args.paymentId,
+        moved: args.balanceHuman,
+        credited: args.amountReceived,
+        asset: args.sweptAsset,
+        txHash: args.txHash,
+      },
+      'sweep moved LESS than the payment was credited with — the credit is not ' +
+        'backed by the funds that reached central; check the deposit address',
+    );
+    return;
+  }
+
+  logger.error(
+    {
+      paymentId: args.paymentId,
+      moved: args.balanceHuman,
+      credited: args.amountReceived,
+      excess: fromAccountingUnits(excess),
+      asset: args.sweptAsset,
+      network: args.network,
+      txHash: args.txHash,
+    },
+    'sweep moved MORE than the payment was credited with — funds arrived at the ' +
+      'deposit address after the payment was promoted',
+  );
+
+  // (1) The recovery ledger no longer points at an address we just emptied.
+  // Scoped to the asset that actually moved: a USDC row is untouched by a USDT
+  // sweep of the same address.
+  try {
+    const resolved = await query<{ id: string }>(
+      `UPDATE unexpected_deposits
+          SET status = 'swept', sweep_tx_hash = $2, error = NULL, updated_at = now()
+        WHERE lower(deposit_address) = lower($1)
+          AND asset = $3
+          AND status IN ('detected','failed')
+        RETURNING id`,
+      [args.depositAddress, args.txHash, args.sweptAsset],
+    );
+    if (resolved.length > 0) {
+      logger.info(
+        { paymentId: args.paymentId, count: resolved.length, txHash: args.txHash },
+        'sweep: resolved unexpected_deposits rows for the address it emptied',
+      );
+    }
+  } catch (err) {
+    // Bookkeeping must not abort the sweep: the transfer already happened and
+    // the payment still has to reach `swept`.
+    logger.error({ err, paymentId: args.paymentId }, 'sweep: unexpected_deposits resolve failed');
+  }
+
+  // (2) Credit a same-asset excess to the payment it was sent to.
+  if (args.sweptAsset !== args.paymentAsset) {
+    logger.warn(
+      {
+        paymentId: args.paymentId,
+        paymentAsset: args.paymentAsset,
+        sweptAsset: args.sweptAsset,
+        excess: fromAccountingUnits(excess),
+      },
+      'sweep: excess is in a DIFFERENT asset from the payment — moved to central ' +
+        'and left for recovery, deliberately NOT credited at 1:1',
+    );
+    return;
+  }
+
+  const credited2 = await query<{ id: string }>(
+    `UPDATE payments
+        SET amount_received = $2
+      WHERE id = $1
+        AND status = 'confirmed'
+        AND amount_received < $2
+      RETURNING id`,
+    [args.paymentId, args.balanceHuman],
+  );
+  if (credited2.length > 0) {
+    logger.warn(
+      {
+        paymentId: args.paymentId,
+        from: args.amountReceived,
+        to: args.balanceHuman,
+        asset: args.sweptAsset,
+      },
+      'sweep: credited the late same-asset arrival to the payment it was sent to',
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +382,33 @@ async function processSweep(job: Job<SweepJob>): Promise<void> {
     ],
   );
 
+  // Reconcile what actually moved against what the payment was credited with,
+  // BEFORE the status leaves `confirmed` — the credit UPDATE inside is guarded
+  // on that status, so this ordering is load-bearing.
+  //
+  // Guarded: the transfer has already happened, so nothing here may stop the
+  // payment reaching `swept`. A throw would leave it `confirmed` with an empty
+  // deposit address, and the retry would take the prior-tx adoption branch and
+  // skip this reconciliation entirely.
+  try {
+    await reconcileSweptExcess({
+      paymentId,
+      depositAddress: payment.deposit_address,
+      network: payment.network,
+      paymentAsset: payment.asset,
+      sweptAsset,
+      amountReceived: payment.amount_received,
+      balanceHuman,
+      txHash,
+    });
+  } catch (err) {
+    logger.error(
+      { err, paymentId, txHash, moved: balanceHuman, credited: payment.amount_received },
+      'sweep: excess reconciliation failed — if these differ, the difference is ' +
+        'sitting in central as unattributed commission; reconcile by hand',
+    );
+  }
+
   // Mark payment swept.
   await query(
     `UPDATE payments SET status = 'swept' WHERE id = $1 AND status = 'confirmed'`,
@@ -302,11 +481,78 @@ async function processExpiry(): Promise<void> {
 // got swept/paid out (worker was down, transient RPC failure, etc). Idempotent.
 // ---------------------------------------------------------------------------
 /**
- * How many stalled payments the settle tick re-drives per pass. The tick runs
- * every minute, so this is 500/min of catch-up capacity — far above any real
- * arrival rate, while keeping one pass bounded.
+ * How many stalled payments the settle tick re-drives per pass, PER HALF. The
+ * tick runs every minute, so this is 500/min of catch-up capacity in each of the
+ * sweep and payout passes — far above any real arrival rate, while keeping one
+ * pass bounded.
+ *
+ * Both halves are now capped. The payout half used to have no LIMIT at all: it
+ * selected every `swept` payment ever taken, once a minute, forever, and ran a
+ * full requestPayout per row in sequence. `swept` is the terminal state of every
+ * successful payment and nothing ever leaves it, so that set only grows.
+ *
+ * A CAP ALONE WOULD STARVE. Ordered purely oldest-first, a row that can never
+ * make progress — a payment below its asset's minSweep can never leave
+ * `confirmed`, and on Ethereum that is any ERC20 payment under 20 USDT — sits at
+ * the head of every batch forever and the cap means nothing behind it is ever
+ * reached. So the order is `settle_attempts ASC, confirmed_at ASC` and every row
+ * SELECTED has its attempt counter incremented, whatever the outcome.
+ *
+ * That makes the cap a round-robin rather than a queue: a row with k attempts is
+ * only skipped while rows with fewer than k exist, and every pass moves those
+ * closer to k. So THE REMAINDER OF AN OVER-CAP BACKLOG IS PICKED UP ON THE NEXT
+ * TICKS, in a bounded number of them, and no row can be starved by another —
+ * which is the property a plain `ORDER BY confirmed_at LIMIT 500` did not have.
  */
 const SETTLE_BATCH_LIMIT = 500;
+
+/**
+ * How many `swept` payments the settle tick examines per pass when maintaining
+ * the `settle_done_at` marker (see markSettledPayments). Larger than
+ * SETTLE_BATCH_LIMIT because the work is one bounded UPDATE, not a job per row.
+ */
+const SETTLE_MARK_LIMIT = 2_000;
+
+/**
+ * How many abandoned webhook deliveries are re-driven per pass. Each one is an
+ * HTTP request against a merchant endpoint that has already been failing, so
+ * this is a deliberate ceiling on how hard a recovering endpoint is hit — and on
+ * how fast the backlog that exists the first time this ships is drained.
+ */
+const WEBHOOK_REDELIVER_LIMIT = 100;
+
+/**
+ * How long a webhook_logs row may sit with no dispatch attempt recorded at all
+ * before the settle tick assumes its queue job was never created.
+ *
+ * `enqueueWebhook` writes the row and THEN calls webhookQueue.add. If the add
+ * throws — Redis restarting, a network blip — the row exists and no job does,
+ * and every caller treats the enqueue as best-effort and merely logs. Nothing
+ * else ever looks at it again.
+ *
+ * Generous, because the only cost of waiting is delay and the cost of being
+ * wrong is a duplicate delivery: a first attempt is normally recorded within
+ * seconds, and this only misfires if the webhook worker is more than fifteen
+ * minutes behind on its FIRST attempt for a row.
+ */
+const WEBHOOK_UNDISPATCHED_GRACE_MS = 15 * 60_000;
+
+/**
+ * Oldest webhook the reaper will re-drive.
+ *
+ * The queue's own tail already covers any outage up to WEBHOOK_RETRY_SPAN_MS
+ * (~24h), so this window exists for the two things it cannot cover: a delivery
+ * that was never enqueued, and an outage longer than the tail. Past three days
+ * an undelivered event is a conversation with the merchant, not a retry —
+ * replaying a week of order events into a system that has moved on is its own
+ * kind of damage, and it is also what would happen the FIRST time this ships, to
+ * every webhook the old eleven-minute tail ever abandoned.
+ *
+ * Older rows are not deleted and not hidden: they stay in webhook_logs, still
+ * `success = false`, and redelivery becomes an explicit operator/merchant action
+ * (queues.ts exports redeliverWebhook for exactly that).
+ */
+const WEBHOOK_REDELIVER_MAX_AGE_MS = 3 * 24 * 60 * 60_000;
 
 /**
  * How many expired deposit addresses the late-payment reaper reads per pass.
@@ -438,21 +684,103 @@ async function reapLateDeposits(): Promise<void> {
   }
 }
 
-async function processSettle(): Promise<void> {
-  // 1) Confirmed-but-unswept -> (re)enqueue sweep, via enqueueSweep, which is
-  // the only thing here that can actually create a job (see its comment).
-  //
-  // Bounded. This runs every minute and previously selected EVERY confirmed
-  // payment: if sweeps stall (RPC outage, an empty gas wallet), the backlog
-  // grows and each tick re-enqueues all of it. Oldest first, so a backlog drains
-  // in order instead of the same head being retried forever.
+/**
+ * Mark `swept` payments the settle tick has provably finished with.
+ *
+ * WHY THIS EXISTS. Step 2 below anti-joins `swept` payments against payouts.
+ * `swept` is where every successful payment ends and nothing ever leaves it, so
+ * without a marker that query re-reads the entire successful history of the
+ * gateway every sixty seconds. At a hundred thousand payments a day that is not
+ * a slow query, it is a query whose cost grows forever until it dominates the
+ * database.
+ *
+ * WHAT MAY BE MARKED. Only a payment whose payout has reached a state that
+ * NOTHING can move it back out of:
+ *
+ *   sent / confirmed / unresolved   — money is on the wire or has landed, and
+ *                                     `unresolved` is terminal for automation
+ *                                     by design (only a human moves it on).
+ *   broadcast_at IS NOT NULL        — a transaction may exist on chain. It is
+ *                                     stamped before signing and is NEVER
+ *                                     cleared anywhere in the codebase.
+ *
+ * That set is a strict subset of step 2's exclusion list and it is MONOTONE:
+ * once true for a payment it is true forever. So the marker can only ever hide
+ * rows that step 2 would itself refuse to act on, for the same reason, forever —
+ * which is what "provably already handled" has to mean before it is safe to
+ * stop looking at a row that represents money.
+ *
+ * `pending` and `processing` are deliberately NOT markable even though step 2
+ * excludes them: a payout that fails BEFORE broadcast goes back to `failed` with
+ * broadcast_at NULL, and step 2 is then correct to mint a fresh one. Marking on
+ * those would strand exactly the payments this safety net exists for.
+ *
+ * THE `LIMIT` APPLIES TO MARKABLE ROWS, NOT TO CANDIDATES. The markability test
+ * lives INSIDE the windowed subquery on purpose. With it outside, any swept row
+ * that can never be marked AND is never selected by step 2 — a merchant with no
+ * payout wallet for that chain is excluded by step 2's wallet guard, so its
+ * `settle_attempts` never moves — parks itself permanently at the head of the
+ * window. Two thousand of those and this pass marks nothing, ever, and the scan
+ * bound it exists to provide quietly stops existing. Filtering first means the
+ * window always contains work, so the marker converges: a marked row leaves the
+ * candidate set for good, and anything past the cap is marked on a later tick.
+ */
+async function markSettledPayments(): Promise<number> {
+  const marked = await query<{ id: string }>(
+    `UPDATE payments p
+        SET settle_done_at = now()
+      WHERE p.id IN (
+              SELECT c.id
+                FROM payments c
+               WHERE c.status = 'swept'
+                 AND c.settle_done_at IS NULL
+                 AND EXISTS (
+                       SELECT 1 FROM payouts po
+                        WHERE po.payment_id = c.id
+                          AND (
+                            po.status IN ('sent','confirmed','unresolved')
+                            OR po.broadcast_at IS NOT NULL
+                          )
+                     )
+               ORDER BY c.settle_attempts ASC, c.confirmed_at ASC NULLS FIRST
+               LIMIT $1
+            )
+      RETURNING p.id`,
+    [SETTLE_MARK_LIMIT],
+  );
+  return marked.length;
+}
+
+/** Count one attempt against every row a settle pass selected. */
+async function bumpSettleAttempts(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await query(
+    `UPDATE payments SET settle_attempts = settle_attempts + 1 WHERE id = ANY($1::text[])`,
+    [ids],
+  );
+}
+
+/**
+ * Step 1 of the settle tick: confirmed-but-unswept -> (re)enqueue sweep, via
+ * enqueueSweep, which is the only thing here that can actually create a job (see
+ * its comment).
+ *
+ * Bounded and round-robin: see SETTLE_BATCH_LIMIT. Previously this selected
+ * EVERY confirmed payment; then it was capped at 500 strictly oldest-first,
+ * which a permanently unsweepable row (below the asset's minSweep) parks itself
+ * at the head of forever.
+ */
+async function redriveSweeps(): Promise<{ selected: number; enqueued: number }> {
   const confirmed = await query<{ id: string }>(
     `SELECT id FROM payments
       WHERE status = 'confirmed'
-      ORDER BY confirmed_at ASC NULLS FIRST
+      ORDER BY settle_attempts ASC, confirmed_at ASC NULLS FIRST
       LIMIT $1`,
     [SETTLE_BATCH_LIMIT],
   );
+  // Count the attempt BEFORE doing the work, so a pass that dies half way
+  // through cannot re-select the same head next minute and starve the tail.
+  await bumpSettleAttempts(confirmed.map((p) => p.id));
   let enqueued = 0;
   for (const p of confirmed) {
     try {
@@ -462,32 +790,64 @@ async function processSettle(): Promise<void> {
       logger.warn({ err, paymentId: p.id }, 'settle: sweep enqueue failed');
     }
   }
+  return { selected: confirmed.length, enqueued };
+}
 
-  // 2) Swept + payout wallet set + no active payout -> (re)enqueue auto payout.
-  // The wallet-set guard is per-network: a payment settles on ITS network, using
-  // payout_wallet (BEP20), payout_wallet_trc20 (TRC20) or payout_wallet_erc20
-  // (Ethereum). This avoids re-enqueuing a payout for a merchant who only
-  // configured one chain's wallet — it would just throw, every minute, forever.
-  if (config.settlement.autoPayoutEnabled) {
-    const swept = await query<{
-      id: string;
-      client_id: string;
-      amount_received: string;
-      network: string;
-      asset: string;
-    }>(
-      // `p.asset` is in the projection because the payout below has to be
-      // requested IN IT. Without it requestPayout ran parseAsset(network,
-      // undefined), which resolves to the network default — USDT — so a swept
-      // USDC or DAI or BNB payment was settled by sending the merchant USDT,
-      // drawn from a balance that had nothing to do with it, while the real
-      // USDC balance stayed fully withdrawable. The primary path (processSweep)
-      // always got this right; only this recovery path, which by definition
-      // only runs after the primary one failed, was crossing assets.
-      `SELECT p.id, p.client_id, p.amount_received, p.network, p.asset
+/**
+ * Step 2 of the settle tick: swept + payout wallet set + no active payout ->
+ * (re)enqueue the auto payout.
+ *
+ * The wallet-set guard is per-network: a payment settles on ITS network, using
+ * payout_wallet (BEP20), payout_wallet_trc20 (TRC20) or payout_wallet_erc20
+ * (Ethereum). This avoids re-enqueuing a payout for a merchant who only
+ * configured one chain's wallet — it would just throw, every minute, forever.
+ *
+ * Bounded three ways, because this pass had no LIMIT, no ORDER BY and no marker
+ * at all, and ran a full requestPayout — a transaction, an advisory lock and
+ * three growing aggregates — per matched row, in sequence, once a minute, over
+ * every payment the gateway had ever settled:
+ *   * settle_done_at   — rows whose payout has provably reached the wire are
+ *                        excluded from the scan for good (markSettledPayments).
+ *   * ORDER BY + LIMIT — the same round-robin cap as the sweep half, so a row
+ *                        that throws every time cannot monopolise the batch and
+ *                        the remainder is picked up on the following ticks.
+ *   * the caller guards it, so it cannot take the rest of the tick down.
+ */
+async function redrivePayouts(): Promise<{ selected: number; marked: number }> {
+  let marked = 0;
+  try {
+    marked = await markSettledPayments();
+  } catch (err) {
+    // Purely an optimisation: the anti-join below is still correct without it,
+    // just as expensive as it used to be.
+    logger.warn({ err }, 'settle: settle_done_at marking pass failed');
+  }
+
+  const swept = await query<{
+    id: string;
+    client_id: string;
+    amount_received: string;
+    network: string;
+    asset: string;
+  }>(
+    // `p.asset` is in the projection because the payout below has to be
+    // requested IN IT. Without it requestPayout ran parseAsset(network,
+    // undefined), which resolves to the network default — USDT — so a swept
+    // USDC or DAI or BNB payment was settled by sending the merchant USDT,
+    // drawn from a balance that had nothing to do with it, while the real
+    // USDC balance stayed fully withdrawable. The primary path (processSweep)
+    // always got this right; only this recovery path, which by definition
+    // only runs after the primary one failed, was crossing assets.
+    `SELECT p.id, p.client_id, p.amount_received, p.network, p.asset
          FROM payments p
          JOIN clients c ON c.id = p.client_id
         WHERE p.status = 'swept'
+          -- Rows whose payout has provably reached the wire, excluded once and
+          -- for good so this stops being a scan of all history. The full
+          -- NOT EXISTS below is still applied to everything that survives, so
+          -- correctness never depends on the marker — only cost does. See
+          -- markSettledPayments for why the marking predicate is monotone.
+          AND p.settle_done_at IS NULL
           AND (
             (p.network = 'BEP20' AND c.payout_wallet IS NOT NULL) OR
             (p.network = 'TRC20' AND c.payout_wallet_trc20 IS NOT NULL) OR
@@ -521,47 +881,187 @@ async function processSettle(): Promise<void> {
                  po.status IN ('pending','processing','sent','confirmed','unresolved')
                  OR po.broadcast_at IS NOT NULL
                )
-          )`,
+          )
+        ORDER BY p.settle_attempts ASC, p.confirmed_at ASC NULLS FIRST
+        LIMIT $1`,
+    [SETTLE_BATCH_LIMIT],
+  );
+  // Count the attempt against every row selected, whatever the outcome below —
+  // that is what makes the LIMIT a round-robin instead of a queue whose head can
+  // never be passed.
+  await bumpSettleAttempts(swept.map((p) => p.id));
+  for (const p of swept) {
+    try {
+      await requestPayout({
+        clientId: p.client_id,
+        amount: p.amount_received,
+        paymentId: p.id,
+        network: p.network,
+        // Settle the asset that actually arrived, exactly as processSweep
+        // does. Never the network default.
+        asset: p.asset,
+        type: 'auto',
+        triggeredByUserId: null,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      logger.warn({ paymentId: p.id, reason }, 'settle: auto payout skipped');
+    }
+  }
+  return { selected: swept.length, marked };
+}
+
+/**
+ * Re-drive webhook deliveries the queue can no longer be relied on to make.
+ *
+ * TWO DIFFERENT LOSSES, one query.
+ *
+ * (a) NEVER ENQUEUED. enqueueWebhook writes the webhook_logs row and THEN calls
+ *     webhookQueue.add. If the add throws — Redis restarting, a network blip —
+ *     the row exists and the job does not, and every call site treats the
+ *     enqueue as best-effort and merely logs. Such a row has no dispatch result
+ *     recorded at all: no status_code, no response_body. Nothing else in the
+ *     product ever looked at it again.
+ *
+ * (b) TAIL EXHAUSTED. Even a 24-hour tail runs out, and a merchant whose
+ *     endpoint was down longer than that has a paid order they never heard
+ *     about. One automatic second chance costs a request and can turn a lost
+ *     order into a fulfilled one.
+ *
+ * SAFETY AGAINST DOUBLE DELIVERY. The queue is authoritative while it is still
+ * retrying, so (b) only considers rows older than the entire retry span — the
+ * reaper can never race a live job. Within a group, only the NEWEST row for
+ * (payment_id, event) is a candidate, so the thirty-odd attempt rows a failed
+ * delivery leaves behind produce ONE redelivery, not thirty. `redelivered_at`
+ * then stops that row being picked again on the next tick, sixty seconds later,
+ * before its own new attempt rows exist.
+ *
+ * Delivery is at-least-once regardless (a receiver that processed a request we
+ * timed out on is indistinguishable from one that did not), and every payload
+ * carries `event` + `paymentId` for receiver-side dedupe.
+ */
+async function redeliverAbandonedWebhooks(): Promise<number> {
+  const claimed = await query<{ id: string; event: string; payment_id: string | null }>(
+    `WITH candidates AS (
+       SELECT w.id
+         FROM webhook_logs w
+        WHERE w.success = false
+          AND w.redelivered_at IS NULL
+          AND w.payment_id IS NOT NULL
+          AND w.created_at > now() - ($2::double precision * interval '1 millisecond')
+          AND (
+            -- (a) the queue never got it: no attempt was ever recorded
+            (w.status_code IS NULL AND w.response_body IS NULL
+             AND w.created_at < now() - ($3::double precision * interval '1 millisecond'))
+            OR
+            -- (b) the queue has provably given up on it
+            w.created_at < now() - ($4::double precision * interval '1 millisecond')
+          )
+          -- Newest row of its (payment, event) group, and nothing in the group
+          -- ever succeeded. Both tests use the SAME group, so a later success
+          -- retires every older attempt row with it.
+          AND NOT EXISTS (
+            SELECT 1 FROM webhook_logs s
+             WHERE s.payment_id = w.payment_id
+               AND s.event = w.event
+               AND (s.success OR s.created_at > w.created_at)
+          )
+        ORDER BY w.created_at ASC
+        LIMIT $1
+        -- Two settle ticks overlapping (a retry, or two worker hosts) must not
+        -- both claim the same row and deliver it twice.
+        FOR UPDATE SKIP LOCKED
+     )
+     UPDATE webhook_logs w
+        SET redelivered_at = now()
+       FROM candidates c
+      WHERE w.id = c.id
+     RETURNING w.id, w.event, w.payment_id`,
+    [
+      WEBHOOK_REDELIVER_LIMIT,
+      WEBHOOK_REDELIVER_MAX_AGE_MS,
+      WEBHOOK_UNDISPATCHED_GRACE_MS,
+      WEBHOOK_RETRY_SPAN_MS,
+    ],
+  );
+
+  let requeued = 0;
+  for (const row of claimed) {
+    try {
+      await redeliverWebhook(row.id);
+      requeued += 1;
+    } catch (err) {
+      // The row is already stamped, so this one is not retried automatically —
+      // deliberately: a Redis that rejects an add will reject the next two
+      // hundred as well, and a tick that re-stamps and re-adds every minute is a
+      // storm, not a recovery. The row stays in webhook_logs, still
+      // unsuccessful, and an operator can resend it.
+      logger.error(
+        { err, webhookLogId: row.id, event: row.event, paymentId: row.payment_id },
+        'settle: webhook redelivery could not be enqueued — resend it by hand',
+      );
+    }
+  }
+  if (requeued > 0) {
+    logger.warn(
+      { requeued, capped: claimed.length === WEBHOOK_REDELIVER_LIMIT },
+      'settle: re-drove webhook deliveries the queue had abandoned or never received',
     );
-    for (const p of swept) {
-      try {
-        await requestPayout({
-          clientId: p.client_id,
-          amount: p.amount_received,
-          paymentId: p.id,
-          network: p.network,
-          // Settle the asset that actually arrived, exactly as processSweep
-          // does. Never the network default.
-          asset: p.asset,
-          type: 'auto',
-          triggeredByUserId: null,
-        });
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        logger.warn({ paymentId: p.id, reason }, 'settle: auto payout skipped');
-      }
+  }
+  return requeued;
+}
+
+async function processSettle(): Promise<void> {
+  // 1) Confirmed-but-unswept -> (re)enqueue sweep.
+  //
+  // Each half of this tick is independently guarded: the payout pass is the only
+  // thing that pays a merchant, and a failure in the sweep pass must not take it
+  // down with it (or the other way round).
+  let sweeps = { selected: 0, enqueued: 0 };
+  try {
+    sweeps = await redriveSweeps();
+  } catch (err) {
+    logger.error({ err }, 'settle: sweep re-drive pass failed');
+  }
+
+  // 2) Swept + payout wallet set + no active payout -> (re)enqueue auto payout.
+  let payouts = { selected: 0, marked: 0 };
+  if (config.settlement.autoPayoutEnabled) {
+    try {
+      payouts = await redrivePayouts();
+    } catch (err) {
+      logger.error({ err }, 'settle: payout re-drive pass failed');
     }
   }
 
-  if (confirmed.length > 0) {
+  if (sweeps.selected > 0 || payouts.selected > 0) {
+    // `capped` is the single clearest early warning that settlement has stalled:
+    // it means the backlog is at or over a whole pass's worth of catch-up
+    // capacity. The round-robin ordering means the remainder is picked up on
+    // following ticks rather than starved, but a `capped` that stays true tick
+    // after tick is an outage, not a burst — alert on it.
     logger.info(
       {
-        selected: confirmed.length,
-        enqueued,
-        capped: confirmed.length === SETTLE_BATCH_LIMIT,
+        confirmedSelected: sweeps.selected,
+        enqueued: sweeps.enqueued,
+        confirmedCapped: sweeps.selected === SETTLE_BATCH_LIMIT,
+        sweptSelected: payouts.selected,
+        sweptCapped: payouts.selected === SETTLE_BATCH_LIMIT,
+        markedDone: payouts.marked,
       },
-      'settle: re-drove sweeps for confirmed payments',
+      'settle: re-drove settlement',
     );
   }
 
   // 2b) Say the quiet parts out loud.
   //
-  // Both of the states this tick can no longer resolve on its own are otherwise
+  // Every state this tick can no longer resolve on its own is otherwise
   // completely silent — the row simply stops being selected, which is precisely
-  // how money ends up somewhere nobody looks. Neither query is a fix; they are
-  // the reason an operator finds out in fifteen minutes instead of never. Both
-  // are also visible in the admin panel: stalled payments under status
-  // `confirmed`, held payouts under status `failed` with an error.
+  // how money ends up somewhere nobody looks. None of these queries is a fix;
+  // they are the reason an operator finds out in fifteen minutes instead of
+  // never. All three are also visible in the admin panel: stalled payments under
+  // status `confirmed`, held payouts under status `failed`/`unresolved` with an
+  // error, and the swept backlog under status `swept`.
   try {
     const stalled = await queryOne<{ n: string; oldest: string | null }>(
       `SELECT count(*)::text AS n, min(confirmed_at)::text AS oldest
@@ -596,6 +1096,43 @@ async function processSettle(): Promise<void> {
           'merchant cannot settle it either until someone checks the explorer',
       );
     }
+
+    // The third silent state, and the one the payout half's cap can produce:
+    // swept payments that have not reached `settle_done_at`. A handful is the
+    // normal in-flight window (a payout that is still `pending` has not been
+    // marked yet). A number that keeps growing means the payout pass is capped
+    // every tick, or a merchant has no payout wallet for that chain, or a payout
+    // is wedged in `pending` — all of them money sitting in the central wallet
+    // with the merchant's name on it. Counting the whole backlog (not just what
+    // this pass selected) is the point: the cap hides the size.
+    //
+    // ONLY MEANINGFUL UNDER AUTO PAYOUT, and only safe to run there.
+    // `settle_done_at` is stamped exclusively by markSettledPayments, which only
+    // runs inside the payout pass, and it is only ever stampable from a payout
+    // carrying a payment_id — which merchant-initiated payouts do not have
+    // (routes/payouts.ts requests them by amount, not by payment). So with
+    // AUTO_PAYOUT_ENABLED off — the default — nothing is ever marked, every
+    // swept payment ever taken matches, and this becomes (a) a WARN every sixty
+    // seconds saying the merchant has not been paid when settling on demand is
+    // exactly how that deployment works, and (b) an unbounded count over the
+    // whole successful history once a minute, which is the very defect
+    // `settle_done_at` was added to remove.
+    if (config.settlement.autoPayoutEnabled) {
+      const backlog = await queryOne<{ n: string; oldest: string | null }>(
+        `SELECT count(*)::text AS n, min(confirmed_at)::text AS oldest
+           FROM payments
+          WHERE status = 'swept'
+            AND settle_done_at IS NULL
+            AND confirmed_at < now() - interval '30 minutes'`,
+      );
+      if (backlog && Number(backlog.n) > 0) {
+        logger.warn(
+          { count: Number(backlog.n), oldestConfirmedAt: backlog.oldest },
+          'settle: payments swept more than 30 minutes ago with no payout on the wire — ' +
+            'the funds are in the central wallet and the merchant has not been paid',
+        );
+      }
+    }
   } catch (err) {
     logger.warn({ err }, 'settle: stalled-state counters failed');
   }
@@ -623,6 +1160,14 @@ async function processSettle(): Promise<void> {
     // must never take the sweep and payout passes down with it.
     logger.error({ err }, 'settle: late-deposit reaper failed');
   }
+
+  // 5) Webhooks the queue never received, or has given up on.
+  try {
+    await redeliverAbandonedWebhooks();
+  } catch (err) {
+    // Bookkeeping relative to the money path; never fail the tick for it.
+    logger.error({ err }, 'settle: webhook redelivery pass failed');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -641,7 +1186,19 @@ function startWorkers(): Worker[] {
   const webhookWorker = new Worker(
     QUEUE_NAMES.webhook,
     async (job) => dispatch(job as Job<{ webhookLogId: string }>),
-    { connection, concurrency: 10 },
+    {
+      connection,
+      concurrency: 10,
+      // Resolves `backoff: { type: 'custom' }` on the webhook queue. BullMQ has
+      // no capped-exponential builtin, and an UNcapped one is what limited a
+      // delivery's whole life to about eleven minutes (see queues.ts): eight
+      // attempts was the only way to keep the last gap sane. With the cap, the
+      // attempt count buys span instead of an ever-doubling wait.
+      //
+      // This must ship with queues.ts. BullMQ throws `Unknown backoff strategy
+      // custom` if a worker without this setting picks up such a job.
+      settings: { backoffStrategy: (attemptsMade: number) => webhookBackoffMs(attemptsMade) },
+    },
   );
 
   const sweepWorker = new Worker(
@@ -707,7 +1264,13 @@ function startWorkers(): Worker[] {
 }
 
 async function main(): Promise<void> {
-  logger.info('starting workers');
+  logger.info(
+    {
+      webhookAttempts: WEBHOOK_ATTEMPTS,
+      webhookRetrySpanMinutes: Math.round(WEBHOOK_RETRY_SPAN_MS / 60_000),
+    },
+    'starting workers',
+  );
   await scheduleExpiryJob();
   await scheduleSettleJob();
   await scheduleSubscriptionJob();

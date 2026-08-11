@@ -385,15 +385,20 @@ export async function requestPayout(input: RequestPayoutInput): Promise<PayoutRo
 /**
  * Worker processor: broadcast the transfer for a payout, in the row's own asset.
  *
- * Idempotency: only processes rows still in 'pending'/'failed'/'unresolved'.
- * Once a tx_hash is set and status advanced to 'sent'/'confirmed', re-runs are
- * skipped. An 'unresolved' row is re-entered on purpose — chainBroadcast's happy
- * retry path re-broadcasts the stored bytes, which is a no-op if the original
- * landed, and refuses outright where it cannot prove that.
+ * Idempotency: only processes rows still in 'pending'/'failed'/'unresolved', plus
+ * the narrow re-entrant slice of 'processing' described at the claiming UPDATE
+ * below. Once a tx_hash is set and status advanced to 'sent'/'confirmed', re-runs
+ * are skipped. An 'unresolved' row is re-entered on purpose — chainBroadcast's
+ * happy retry path re-broadcasts the stored bytes, which is a no-op if the
+ * original landed, and refuses outright where it cannot prove that.
  */
 export async function executePayout(job: Job<PayoutJob>): Promise<void> {
   const { payoutId } = job.data;
 
+  // A first, non-authoritative read. It only supplies the network/asset needed
+  // to quantise the amount and to reject a no-op transfer BEFORE the row moves
+  // out of 'pending'. Everything that decides whether we may sign or broadcast
+  // is re-read from the claiming UPDATE below, never from this snapshot.
   const payout = await queryOne<PayoutRow>(
     `SELECT * FROM payouts WHERE id = $1`,
     [payoutId],
@@ -433,25 +438,128 @@ export async function executePayout(job: Job<PayoutJob>): Promise<void> {
     );
   }
 
-  // Fold the discarded remainder into commission so the ledger says what the
-  // chain did. Same statement as the status move, so a row is never briefly
-  // recorded as paying more than it will send.
+  // CLAIM THE ROW. This is a compare-and-set, not a blind write.
   //
-  // The remainder is derived from the row's OWN net_amount inside the UPDATE
-  // rather than from the value this worker read a moment ago. Postgres evaluates
-  // every SET expression against the pre-update row, so `net_amount - $2` IS the
-  // remainder — and it is zero the second time, whatever else has happened in
-  // between. Passing a pre-computed remainder instead would add it again on a
-  // BullMQ retry that raced another attempt, overstating commission and breaking
+  // The old code read the row on the pool, tested `status`, then issued an
+  // UNCONDITIONAL `SET status='processing'` and built the chainBroadcast state
+  // from that pre-lock snapshot. Everything between the read and
+  // `persistPrepared` — including the up-to-45s chainLock acquire — was
+  // therefore unguarded: a second executor for the same payoutId (a BullMQ
+  // stalled-job redelivery after a Redis hiccup or a host pause) saw
+  // signedTx=null, derived a FRESH nonce, and signed a genuinely different
+  // second transfer. Both landed. The row's own state is the only authority on
+  // whether we may sign, so it is read here, in the same statement that takes
+  // ownership, and `state` below is built from THIS row.
+  //
+  // The claimable set:
+  //   pending / failed / unresolved — nobody is executing this row. 'failed'
+  //     means provably-never-broadcast (see recordBroadcastFailure) and
+  //     'unresolved' is deliberately re-entered so chainBroadcast can
+  //     re-broadcast stored bytes or refuse; both were already documented.
+  //   processing WITH signed_tx or broadcast_at — a previous attempt got far
+  //     enough that chainBroadcast can only take a SAFE branch: re-broadcast the
+  //     identical bytes (same nonce on EVM, same txid on Bitcoin, a no-op if the
+  //     original landed), or refuse to re-sign and escalate. Keeping this slice
+  //     claimable is what stops a worker that crashed mid-broadcast from
+  //     stranding the payout in 'processing' forever.
+  //   processing with BOTH NULL is the one genuinely dangerous state — it is
+  //     exactly the window where a second executor would pick a new nonce — and
+  //     it is the one case excluded. Postgres re-evaluates this WHERE after
+  //     taking the row lock under READ COMMITTED, so two concurrent claims
+  //     cannot both succeed.
+  //
+  // Fold the discarded remainder into commission in the same statement, so a row
+  // is never briefly recorded as paying more than it will send. The remainder is
+  // derived from the row's OWN net_amount inside the UPDATE rather than from the
+  // value this worker read a moment ago: Postgres evaluates every SET expression
+  // against the pre-update row, so `net_amount - $2` IS the remainder — and it is
+  // zero the second time, whatever else has happened in between. Passing a
+  // pre-computed remainder instead would add it again on a retry that raced
+  // another attempt, overstating commission and breaking
   // gross = commission + fee + net for a payout nobody would think to re-check.
-  await query(
+  // (Quantising is idempotent, so $2 computed from an already-quantised
+  // net_amount is the same number — a re-claim writes a zero-value adjustment.)
+  const claimed = await queryOne<PayoutRow>(
     `UPDATE payouts
         SET status = 'processing',
             commission_amount = commission_amount + (net_amount - $2::numeric),
             net_amount = $2::numeric
-      WHERE id = $1`,
+      WHERE id = $1
+        AND (
+          status IN ('pending','failed','unresolved')
+          OR (status = 'processing'
+              AND (signed_tx IS NOT NULL OR broadcast_at IS NOT NULL))
+        )
+      RETURNING *`,
     [payoutId, fromAccountingUnits(wire.ledgerUnits)],
   );
+  if (!claimed) {
+    // Two ways to get here, both meaning "not ours to broadcast":
+    //   (a) the row advanced to 'sent'/'confirmed' between the read above and
+    //       this statement — already paid, nothing to do;
+    //   (b) another executor is mid-sign on it (status 'processing', no signed
+    //       bytes and no broadcast stamp yet).
+    //
+    // In both cases DO NOT touch the row. It keeps a status that RESERVES the
+    // balance — 'processing' reserves exactly like 'sent' — so nothing is
+    // released, and the settle tick cannot mint a second payout for the same
+    // payment (its NOT EXISTS guard counts these statuses, and
+    // uq_payouts_active_payment would reject it regardless). If the owner
+    // finishes, it moves the row on itself; if it died inside that window, the
+    // row surfaces in the admin payout list and in idx_payouts_needs_operator
+    // (status IN ('unresolved','processing')) for a human. Never a released
+    // reservation, never a second signer.
+    //
+    // (a) and (b) are NOT the same operational event, so they must not share a
+    // log line. (a) is routine. (b) is a payout that NO automatic path will ever
+    // move again: redrivePayouts excludes 'processing', markSettledPayments will
+    // not mark it, and there is no admin route that resolves a payout row — so
+    // the merchant's gross stays reserved until someone touches the database.
+    // The settle tick's swept-backlog alarm only notices it if the payout has a
+    // payment_id; a MANUAL payout stranded here has no other alarm at all, which
+    // makes this line the only signal that exists. Re-read to tell them apart —
+    // read-only, and a failure to read must not change the outcome.
+    let stuck = false;
+    try {
+      const after = await queryOne<{
+        status: string;
+        signed_tx: string | null;
+        broadcast_at: string | null;
+      }>(
+        `SELECT status, signed_tx, broadcast_at FROM payouts WHERE id = $1`,
+        [payoutId],
+      );
+      stuck =
+        after?.status === 'processing' &&
+        after.signed_tx === null &&
+        after.broadcast_at === null;
+    } catch (err) {
+      logger.warn({ err, payoutId }, 'could not re-read payout after a refused claim');
+    }
+    if (stuck) {
+      // ERROR, not warn, for the same reason recordBroadcastFailure uses ERROR on
+      // `unresolved`: this is a merchant's money held by a row that automation
+      // has deliberately given up on. Nothing was broadcast in this state (both
+      // signed_tx and broadcast_at are NULL, and each is written BEFORE anything
+      // reaches the wire), so the funds are intact in the central wallet — the
+      // payout simply needs a human to release it back to 'failed' or re-drive it.
+      logger.error(
+        { payoutId, paymentId: payout.payment_id, network: payout.network },
+        'payout is `processing` with no signed transaction and no broadcast stamp — ' +
+          'refusing to claim it, because a live executor in this state would sign a ' +
+          'SECOND transfer with a fresh nonce. Nothing was broadcast, so no funds ' +
+          'moved, but no automatic path will retry this row: if it stays this way ' +
+          'the owning worker died and an operator must resolve it manually',
+      );
+    } else {
+      logger.warn(
+        { payoutId, seenStatus: payout.status },
+        'payout not claimable (already advanced past our claim); ' +
+          'skipping without broadcast — reservation retained',
+      );
+    }
+    return;
+  }
   if (wire.remainderUnits > 0n) {
     logger.warn(
       { payoutId, from: payout.net_amount, to: wire.human, asset: asset.symbol },
@@ -464,27 +572,32 @@ export async function executePayout(job: Job<PayoutJob>): Promise<void> {
     txHash = await broadcastTransferOnce({
       adapter,
       network,
-      to: payout.to_address,
+      to: claimed.to_address,
       amountHuman: wire.human,
       // The asset recorded on the row, not a default: the amount was computed
       // against this asset's balance and must be sent in the same token.
-      asset: payout.asset,
-      label: `payout ${payout.id}`,
+      asset: claimed.asset,
+      label: `payout ${claimed.id}`,
+      // Built from the CLAIMED row. chainBroadcast branches on signedTx and
+      // broadcastAt to decide between re-broadcasting stored bytes, refusing to
+      // re-sign, and signing fresh — so feeding it a snapshot taken before we
+      // owned the row is what let a redelivered job sign a second transfer.
       state: {
-        nonce: payout.nonce === null || payout.nonce === undefined ? null : Number(payout.nonce),
-        signedTx: payout.signed_tx ?? null,
-        broadcastAt: payout.broadcast_at ?? null,
-        txHash: payout.tx_hash ?? null,
+        nonce:
+          claimed.nonce === null || claimed.nonce === undefined ? null : Number(claimed.nonce),
+        signedTx: claimed.signed_tx ?? null,
+        broadcastAt: claimed.broadcast_at ?? null,
+        txHash: claimed.tx_hash ?? null,
       },
       markAttempted: async () => {
-        await query(`UPDATE payouts SET broadcast_at = now() WHERE id = $1`, [payout.id]);
+        await query(`UPDATE payouts SET broadcast_at = now() WHERE id = $1`, [claimed.id]);
       },
       persistPrepared: async (p) => {
         await query(
           `UPDATE payouts
               SET nonce = $2, signed_tx = $3, tx_hash = $4, broadcast_at = now()
             WHERE id = $1`,
-          [payout.id, p.nonce, p.signedTx, p.txHash],
+          [claimed.id, p.nonce, p.signedTx, p.txHash],
         );
       },
     });
@@ -512,9 +625,9 @@ export async function executePayout(job: Job<PayoutJob>): Promise<void> {
   );
   logger.info({ payoutId, txHash, network }, 'payout broadcast');
 
-  if (payout.payment_id) {
+  if (claimed.payment_id) {
     enqueueWebhook({
-      paymentId: payout.payment_id,
+      paymentId: claimed.payment_id,
       event: 'payout.completed',
       // The amount that went ON THE WIRE, not the column read before it was
       // quantised. `payout` was SELECTed above, so payout.net_amount is the
@@ -720,34 +833,51 @@ async function getBalanceWith(
   if (asset && !network) {
     throw AppError.badRequest('An asset balance must be scoped to a network');
   }
+  // Two filter strings over the SAME positional arguments — one qualified for
+  // the payments scan, one for the payouts subquery — so both tables can be
+  // aggregated in a single statement without an unqualified `network` binding to
+  // whichever scope happens to be innermost.
   const args: unknown[] = [clientId];
-  let filter = '';
+  let payFilter = '';
+  let poFilter = '';
   if (network) {
     args.push(network);
-    filter += ` AND network = $${args.length}`;
+    payFilter += ` AND p.network = $${args.length}`;
+    poFilter += ` AND po.network = $${args.length}`;
   }
   if (asset) {
     args.push(asset);
-    filter += ` AND asset = $${args.length}`;
+    payFilter += ` AND p.asset = $${args.length}`;
+    poFilter += ` AND po.asset = $${args.length}`;
   }
-  const netFilter = filter;
 
-  const one = async (sql: string): Promise<string> => {
-    const rows = (await exec(sql, args)) as Array<{ total: string }>;
-    return rows[0]?.total ?? '0';
-  };
-
-  const confirmed = await one(
-    `SELECT COALESCE(SUM(amount_received),0)::text AS total
-       FROM payments
-      WHERE client_id = $1 AND status IN ('confirmed','swept')${netFilter}`,
-  );
-  const pending = await one(
-    `SELECT COALESCE(SUM(amount),0)::text AS total
-       FROM payments
-      WHERE client_id = $1 AND status IN ('waiting','confirming','partial')${netFilter}`,
-  );
-  // 'failed' is the ONLY status that frees the funds, and it now means something
+  // ONE ROUND TRIP, not three.
+  //
+  // requestPayout calls this while holding pg_advisory_xact_lock for
+  // (client, network), on the transaction's own connection. Every millisecond
+  // spent here is a millisecond that every other payout decision for this
+  // merchant on this chain is queued behind, and the previous shape paid three
+  // full client/server round trips plus three separate index scans for it. The
+  // two payments aggregates are now one scan with FILTER — the status sets are
+  // disjoint, so the numbers are identical — and the payouts reservation rides
+  // along as a scalar subquery in the same statement.
+  //
+  // The status lists, the exclusions and the arithmetic are unchanged. This is
+  // purely fewer round trips over the same rows; nothing is bounded away, so no
+  // payment or payout can be dropped from either sum by this change.
+  //
+  // What still grows without bound is the ROW COUNT behind these sums — a
+  // merchant's lifetime confirmed/swept history. Migration 022 adds covering
+  // indexes (INCLUDE the summed columns) so this becomes an index-only scan with
+  // no heap fetch, which is the part that actually hurt at volume. The permanent
+  // answer is a materialised per-(client, network, asset) balance maintained by
+  // whatever writes the underlying rows; that spans the listeners and is not
+  // attempted here.
+  //
+  // NON-FUNGIBILITY IS PRESERVED EXACTLY: the filters are still applied per
+  // (network, asset) and nothing is ever summed across a pair.
+  //
+  // 'failed' is the ONLY status that frees the funds, and it means something
   // narrow: we know the transfer never reached the wire. A payout that threw
   // after a broadcast was attempted is 'unresolved' and is counted here, because
   // it may be on chain — see recordBroadcastFailure. Releasing on "we don't
@@ -756,12 +886,31 @@ async function getBalanceWith(
   // This list is duplicated in getAllBalances above and in the settle tick's
   // NOT EXISTS guard (workers/index.ts); all three describe the same set and any
   // status added here belongs in all of them.
-  const paidOut = await one(
-    `SELECT COALESCE(SUM(gross_amount),0)::text AS total
-       FROM payouts
-      WHERE client_id = $1
-        AND status IN ('pending','processing','sent','confirmed','unresolved')${netFilter}`,
-  );
+  const rows = (await exec(
+    `SELECT
+       COALESCE(SUM(p.amount_received) FILTER (WHERE p.status IN ('confirmed','swept')),0)::text
+         AS confirmed,
+       COALESCE(SUM(p.amount) FILTER (WHERE p.status IN ('waiting','confirming','partial')),0)::text
+         AS pending,
+       COALESCE((SELECT SUM(po.gross_amount)
+                   FROM payouts po
+                  WHERE po.client_id = $1
+                    AND po.status IN ('pending','processing','sent','confirmed','unresolved')
+                    ${poFilter}), 0)::text
+         AS paid_out
+       FROM payments p
+      WHERE p.client_id = $1
+        AND p.status IN ('confirmed','swept','waiting','confirming','partial')
+        ${payFilter}`,
+    args,
+  )) as Array<{ confirmed: string; pending: string; paid_out: string }>;
+
+  // An ungrouped aggregate always returns exactly one row, even when the client
+  // has no payments at all — the scalar subquery is still evaluated there, so a
+  // merchant with payouts and no matching payments is not silently zeroed.
+  const confirmed = rows[0]?.confirmed ?? '0';
+  const pending = rows[0]?.pending ?? '0';
+  const paidOut = rows[0]?.paid_out ?? '0';
 
   const availU = toAccountingUnits(confirmed) - toAccountingUnits(paidOut);
   return {

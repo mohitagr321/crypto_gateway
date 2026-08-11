@@ -53,6 +53,17 @@ const CONFIRM_TIMEOUT_MS = 120_000;
 /** Gas a plain native value transfer costs. Fixed by the EVM, not estimated. */
 const NATIVE_TRANSFER_GAS = 21_000n;
 
+/**
+ * Pricing inputs used when a chain's policy is `fixed` and therefore carries
+ * none of its own. They exist so a fixed-policy chain can still SIZE its top-up
+ * from the live gas price instead of sending a flat amount that is 10-140x the
+ * real fee — see requiredGasTopup. Deliberately generous: an ERC20 transfer
+ * costs ~45k gas to a holder and ~65k to a fresh address, and the buffer
+ * absorbs a gas-price rise between the top-up and the transfer.
+ */
+const FIXED_POLICY_FALLBACK_TRANSFER_GAS = 70_000n;
+const FIXED_POLICY_BUFFER_PERCENT = 50;
+
 export function createEvmAdapter(cfg: EvmChainConfig): ChainAdapter {
   const provider = (): JsonRpcProvider => httpProviderFor(cfg.httpRpc, cfg.chainId);
 
@@ -111,32 +122,27 @@ export function createEvmAdapter(cfg: EvmChainConfig): ChainAdapter {
   })();
 
   /**
-   * Native currency a deposit address needs to pay for one token transfer.
+   * What one ERC20 transfer out of `depositAddress` costs right now, plus
+   * head-room. Returns null when the node gave no usable gas price — the caller
+   * decides whether that is fatal (dynamic) or falls back (fixed).
    *
-   * Returns null when the sweep should be DEFERRED — only possible under the
-   * dynamic policy, when the fee exceeds the configured ceiling. Deferring is
-   * not failing: nothing is broadcast, the funds stay put, and the settle tick
-   * re-drives the sweep on its next pass.
+   * Shared by both policies so there is ONE definition of "the fee", and the
+   * gas-unit figure is the node's own estimate wherever it can be had.
    */
-  async function requiredGasTopup(
+  async function priceTokenTransfer(
     rpc: JsonRpcProvider,
     asset: Asset,
     depositAddress: string,
+    fallbackTransferGas: bigint,
+    bufferPercent: number,
   ): Promise<bigint | null> {
-    if (cfg.gasPolicy.mode === 'fixed') {
-      return parseEther(cfg.gasPolicy.topupAmount);
-    }
-
-    const policy = cfg.gasPolicy;
     const feeData = await rpc.getFeeData();
     const gasPrice = feeData.maxFeePerGas ?? feeData.gasPrice;
-    if (!gasPrice || gasPrice <= 0n) {
-      throw new Error(`${cfg.label}: node returned no usable gas price`);
-    }
+    if (!gasPrice || gasPrice <= 0n) return null;
 
     // Prefer the node's own estimate; fall back to a figure above the worst
     // realistic transfer when it cannot be reached.
-    let gasUnits = policy.fallbackTransferGas;
+    let gasUnits = fallbackTransferGas;
     try {
       const estimate = await tokenContract(rpc, asset).transfer.estimateGas(
         centralWalletAddress,
@@ -153,7 +159,74 @@ export function createEvmAdapter(cfg: EvmChainConfig): ChainAdapter {
       );
     }
 
-    const fee = ((gasUnits * gasPrice) * BigInt(100 + policy.bufferPercent)) / 100n;
+    return ((gasUnits * gasPrice) * BigInt(100 + bufferPercent)) / 100n;
+  }
+
+  /**
+   * Native currency a deposit address needs to pay for one token transfer.
+   *
+   * Returns null when the sweep should be DEFERRED — only possible under the
+   * dynamic policy, when the fee exceeds the configured ceiling. Deferring is
+   * not failing: nothing is broadcast, the funds stay put, and the settle tick
+   * re-drives the sweep on its next pass.
+   *
+   * ================= THE FIXED AMOUNT IS A CEILING, NOT A SPEND ==============
+   * A fixed policy used to return the configured amount without pricing
+   * anything. On BSC that is GAS_TOPUP_BNB = 0.0008 BNB against a real transfer
+   * fee of 0.0000055-0.000165 BNB — 5x to 140x too much, every sweep. The
+   * excess does not come back: the token sweep moves the TOKEN, and
+   * sweepNativeDeposit (the only thing that would move the leftover BNB) runs
+   * only for a payment whose own asset is native, which a USDT payment never
+   * is. So each token sweep quietly abandoned most of a top-up at an address
+   * nothing looks at again.
+   *
+   * It now prices the transfer exactly like the dynamic policy and funds THAT,
+   * with the configured amount as a hard ceiling and as the fallback when the
+   * price cannot be read. Both fallbacks land on the old value, so a fixed
+   * policy is never worse off than before and NEVER defers — deferring is a
+   * dynamic-policy decision and introducing it here would leave BSC sweeps
+   * parked on a gas spike that the old code sailed through.
+   */
+  async function requiredGasTopup(
+    rpc: JsonRpcProvider,
+    asset: Asset,
+    depositAddress: string,
+  ): Promise<bigint | null> {
+    if (cfg.gasPolicy.mode === 'fixed') {
+      const configured = parseEther(cfg.gasPolicy.topupAmount);
+      let priced: bigint | null = null;
+      try {
+        priced = await priceTokenTransfer(
+          rpc,
+          asset,
+          depositAddress,
+          FIXED_POLICY_FALLBACK_TRANSFER_GAS,
+          FIXED_POLICY_BUFFER_PERCENT,
+        );
+      } catch (err) {
+        // Pricing is an optimisation here, not a precondition. A node that
+        // cannot answer must not turn a sweep that would have worked into a
+        // failure, so fall through to the configured amount.
+        logger.warn(
+          { err, chain: cfg.label, depositAddress },
+          'could not price the sweep fee; funding the full configured top-up',
+        );
+      }
+      if (priced === null || priced <= 0n || priced >= configured) return configured;
+      return priced;
+    }
+
+    const policy = cfg.gasPolicy;
+    const fee = await priceTokenTransfer(
+      rpc,
+      asset,
+      depositAddress,
+      policy.fallbackTransferGas,
+      policy.bufferPercent,
+    );
+    if (fee === null) {
+      throw new Error(`${cfg.label}: node returned no usable gas price`);
+    }
     const ceiling = parseEther(policy.maxFeeNative);
     if (fee > ceiling) {
       logger.warn(
@@ -356,7 +429,14 @@ export function createEvmAdapter(cfg: EvmChainConfig): ChainAdapter {
         return null;
       }
 
-      if (nativeBalance < topupWei) {
+      // Fund the SHORTFALL, not the whole requirement. Whatever native currency
+      // is already sitting at the deposit address — the residue of an earlier
+      // top-up for a sweep that was retried, or a customer's own stray transfer
+      // — pays for this transfer just as well as new money does. Sending the
+      // full amount on top of it stacked a second unrecoverable remainder at the
+      // same dead address.
+      const gasShortfall = topupWei - nativeBalance;
+      if (gasShortfall > 0n) {
         if (!cfg.gasStationPrivateKey) {
           logger.error(
             { paymentId, chain: cfg.label },
@@ -374,7 +454,7 @@ export function createEvmAdapter(cfg: EvmChainConfig): ChainAdapter {
         // therefore has no contention at all.
         const fundTx = await withChainLock(cfg.network, 'gas', async () => {
           const gasSigner = new Wallet(cfg.gasStationPrivateKey, rpc);
-          return gasSigner.sendTransaction({ to: depositAddress, value: topupWei });
+          return gasSigner.sendTransaction({ to: depositAddress, value: gasShortfall });
         });
         await fundTx.wait(1);
         await query(
@@ -388,13 +468,21 @@ export function createEvmAdapter(cfg: EvmChainConfig): ChainAdapter {
             fundTx.hash,
             fundTx.from,
             depositAddress,
-            formatEther(topupWei),
+            // The amount actually sent, so the ledger row equals the transfer.
+            formatEther(gasShortfall),
             cfg.feeCurrency,
             cfg.network,
           ],
         );
         logger.info(
-          { paymentId, chain: cfg.label, txHash: fundTx.hash, amount: formatEther(topupWei) },
+          {
+            paymentId,
+            chain: cfg.label,
+            txHash: fundTx.hash,
+            amount: formatEther(gasShortfall),
+            required: formatEther(topupWei),
+            alreadyHeld: formatEther(nativeBalance),
+          },
           'sweep: gas topped up',
         );
       }

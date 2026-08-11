@@ -17,9 +17,18 @@ import CodeBlock from '@/components/CodeBlock';
  * silently, because merchants have copied the old versions:
  *
  *   1. Request signing. This page used to sign `timestamp + body` with a
- *      MILLISECOND timestamp. The server signs `${timestamp}.${rawBody}` with a
- *      SECOND timestamp (backend/src/middleware/auth.ts) — so every request
- *      built from the old snippets returned 401.
+ *      MILLISECOND timestamp. The timestamp is unix SECONDS
+ *      (backend/src/middleware/auth.ts) — so every request built from the old
+ *      snippets returned 401.
+ *
+ *      The signed STRING has since changed too: it is now
+ *      `${ts}.${METHOD}.${path}.${sha256(rawBody)}` (v2), because the old
+ *      `${ts}.${rawBody}` bound neither the verb nor the path, so a signature
+ *      captured from a status poll was a valid signature for POST /payouts
+ *      inside the 5-minute window. Keys still accept the legacy form until an
+ *      operator sets api_keys.signature_version = 2, so the snippets here teach
+ *      v2 while the prose names v1 as legacy rather than deleting it — a
+ *      merchant reading this page has the old form in their code.
  *   2. Webhook verification. This page used to HMAC the raw request body. The
  *      signature is computed over the body with the `signature` field blanked
  *      (backend/src/services/webhookService.ts), so hashing the raw bytes never
@@ -55,6 +64,15 @@ import CodeBlock from '@/components/CodeBlock';
  */
 
 const BASE = API_BASE_URL;
+/**
+ * The path portion of BASE (normally "/api/v1").
+ *
+ * Load-bearing in every signing snippet below: the v2 signed string covers the
+ * request target the SERVER sees, which includes this prefix. Signing
+ * "/payments" when the wire path is "/api/v1/payments" is a 401 with no clue
+ * as to why, so the snippets derive it rather than hardcoding a guess.
+ */
+const PATH_PREFIX = new URL(BASE, window.location.origin).pathname.replace(/\/+$/, '');
 
 // ---------------------------------------------------------------------------
 // Snippets
@@ -63,13 +81,16 @@ const BASE = API_BASE_URL;
 const createPaymentTabs = [
   {
     label: 'curl',
-    code: `# Signed string is "<timestamp>.<rawBody>" — note the DOT — and the
-# timestamp is unix SECONDS, not milliseconds.
+    code: `# v2 signed string: "<ts>.<METHOD>.<path>.<sha256(body)>".
+# The timestamp is unix SECONDS, not milliseconds, and <path> is the request
+# target as the server sees it — prefix included, query string included.
 API_KEY="pk_live_your_key"
 API_SECRET="your_api_secret"
 TS=$(date +%s)
 BODY='{"amount":"50.00","orderId":"order_789","network":"BEP20","asset":"USDT"}'
-SIG=$(printf "%s.%s" "$TS" "$BODY" | openssl dgst -sha256 -hmac "$API_SECRET" | awk '{print $2}')
+BODY_HASH=$(printf "%s" "$BODY" | openssl dgst -sha256 | awk '{print $2}')
+SIGNED="$TS.POST.${PATH_PREFIX}/payments.$BODY_HASH"
+SIG=$(printf "%s" "$SIGNED" | openssl dgst -sha256 -hmac "$API_SECRET" | awk '{print $2}')
 
 curl -X POST "${BASE}/payments" \\
   -H "Content-Type: application/json" \\
@@ -99,9 +120,12 @@ async function createPayment() {
     asset: 'USDT',
   });
 
+  // v2: timestamp.METHOD.path.sha256(body) — the verb and path are signed, so
+  // a signature captured from a status poll is not a signature for a payout.
+  const bodyHash = crypto.createHash('sha256').update(body).digest('hex');
   const signature = crypto
     .createHmac('sha256', process.env.API_SECRET)
-    .update(\`\${timestamp}.\${body}\`)   // dot separator
+    .update(\`\${timestamp}.POST.${PATH_PREFIX}/payments.\${bodyHash}\`)
     .digest('hex');
 
   const res = await fetch(\`\${BASE}/payments\`, {
@@ -137,10 +161,11 @@ def create_payment():
         "asset": "USDT",
     }, separators=(",", ":"))                  # compact; sign what you send
 
+    # v2: timestamp.METHOD.path.sha256(body)
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    signed = f"{timestamp}.POST.${PATH_PREFIX}/payments.{body_hash}"
     signature = hmac.new(
-        API_SECRET.encode(),
-        f"{timestamp}.{body}".encode(),        # dot separator
-        hashlib.sha256,
+        API_SECRET.encode(), signed.encode(), hashlib.sha256
     ).hexdigest()
 
     resp = requests.post(
@@ -173,7 +198,10 @@ $body = json_encode([
     "asset" => "USDT",
 ], JSON_UNESCAPED_SLASHES);
 
-$signature = hash_hmac("sha256", "$timestamp.$body", $apiSecret);  // dot
+// v2: timestamp.METHOD.path.sha256(body)
+$bodyHash = hash("sha256", $body);
+$signed = "$timestamp.POST.${PATH_PREFIX}/payments.$bodyHash";
+$signature = hash_hmac("sha256", $signed, $apiSecret);
 
 $ch = curl_init("$base/payments");
 curl_setopt_array($ch, [
@@ -622,16 +650,37 @@ export default function ApiDocs() {
                   </Header>
                   <Header name="X-Signature">
                     <code className="code">
-                      hex( HMAC_SHA256( secret, "&#123;ts&#125;.&#123;rawBody&#125;" ) )
+                      hex( HMAC_SHA256( secret,
+                      "&#123;ts&#125;.&#123;METHOD&#125;.&#123;path&#125;.&#123;sha256(body)&#125;"
+                      ) )
                     </code>
                   </Header>
                 </dl>
                 <p className="measure mt-4 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                  Required for <code className="code">POST /payouts</code>. GET
-                  requests have an empty raw body, so you sign{' '}
-                  <code className="code">"&#123;ts&#125;."</code>. Requests more
+                  Required for <code className="code">POST /payouts</code>.{' '}
+                  <code className="code">&#123;path&#125;</code> is the request
+                  target exactly as sent — prefix and query string included,
+                  e.g. <code className="code">{`${PATH_PREFIX}/payouts?page=2`}</code>.
+                  A body-less request hashes the empty string. Requests more
                   than 5 minutes from server time are rejected — keep your clock
                   on NTP.
+                </p>
+                <p className="measure mt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                  Older keys also accept the legacy{' '}
+                  <code className="code">
+                    hex( HMAC_SHA256( secret,
+                    "&#123;ts&#125;.&#123;rawBody&#125;" ) )
+                  </code>
+                  , which binds neither the verb nor the path. Move to the form
+                  above — it is what new keys will require.
+                </p>
+                <p className="measure mt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                  A signature sent on a <strong>write</strong> is single-use:
+                  resending the identical request returns{' '}
+                  <code className="code">401 Signature already used</code>. Retry
+                  by re-signing with a fresh timestamp and the same{' '}
+                  <code className="code">Idempotency-Key</code>. Reads are not
+                  consumed, so polling is unaffected.
                 </p>
               </div>
 

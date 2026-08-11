@@ -439,10 +439,64 @@ export async function getBalance(): Promise<Balance> {
 }
 
 // ---- Payouts ----
-export async function listPayouts(): Promise<Payout[]> {
-  const { data } = await http.get<Payout[] | Paginated<Payout>>('/payouts');
-  // Tolerate either a bare array or a paginated envelope.
-  return Array.isArray(data) ? data : data.data;
+
+/** Server ceiling on GET /payouts?limit (routes/payouts.ts clamps to 1..100). */
+const PAYOUTS_PAGE_SIZE = 100;
+/**
+ * Hard stop on how many pages this helper will walk: 20 x 100 = 2,000 payouts.
+ *
+ * The page has no pager and sorts client-side, so it wants the whole history —
+ * but "the whole history" must not become an unbounded fan-out of requests from
+ * a browser tab. Beyond the cap the merchant sees the 2,000 most recent payouts
+ * (newest first) and `Payouts.tsx` says so, rather than silently truncating.
+ */
+const PAYOUTS_MAX_PAGES = 20;
+
+export interface PayoutHistory {
+  rows: Payout[];
+  /** Total the SERVER holds, which may exceed rows.length once the cap bites. */
+  total: number;
+  truncated: boolean;
+}
+
+/**
+ * GET /api/v1/payouts USED TO RETURN A BARE ARRAY OF EVERY PAYOUT EVER.
+ *
+ * It is now paginated (`{ data, page, total }`, default limit 20) because the
+ * unbounded version materialised a merchant's entire payout history on every
+ * page load. This helper restores the panel's previous "show me all of it"
+ * behaviour on top of the bounded endpoint by walking pages, so the table is
+ * not silently reduced to the 20 most recent rows.
+ *
+ * The bare-array branch is kept so a panel deployed against an older backend
+ * still works during a rolling upgrade.
+ */
+export async function listPayouts(): Promise<PayoutHistory> {
+  const first = await http.get<Payout[] | Paginated<Payout>>('/payouts', {
+    params: { page: 1, limit: PAYOUTS_PAGE_SIZE },
+  });
+  if (Array.isArray(first.data)) {
+    return { rows: first.data, total: first.data.length, truncated: false };
+  }
+
+  const total = first.data.total ?? first.data.data.length;
+  const rows = [...first.data.data];
+  const pages = Math.ceil(total / PAYOUTS_PAGE_SIZE);
+  const lastPage = Math.min(pages, PAYOUTS_MAX_PAGES);
+
+  // Sequential, not Promise.all: this is a background refetch on a dashboard,
+  // and firing 20 parallel requests at an API whose per-key budget is shared
+  // with the merchant's own integration traffic is not worth the latency.
+  for (let page = 2; page <= lastPage; page += 1) {
+    const { data } = await http.get<Payout[] | Paginated<Payout>>('/payouts', {
+      params: { page, limit: PAYOUTS_PAGE_SIZE },
+    });
+    const chunk = Array.isArray(data) ? data : data.data;
+    if (chunk.length === 0) break;
+    rows.push(...chunk);
+  }
+
+  return { rows, total, truncated: pages > PAYOUTS_MAX_PAGES };
 }
 
 export async function createPayout(input: CreatePayoutInput): Promise<Payout> {

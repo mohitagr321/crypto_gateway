@@ -26,6 +26,15 @@ import { primeRates, validateRateConfig } from './services/rateService';
 const app = express();
 
 // Behind a proxy/load balancer -> trust X-Forwarded-* for correct req.ip.
+//
+// The literal 1 means "exactly one proxy hop", which matches the single Apache
+// reverse proxy the deploy script writes, and it is the safe direction to be
+// wrong in: too LOW and req.ip degrades to a proxy address, too HIGH and a
+// client can forge X-Forwarded-For and pick its own rate-limit bucket. Every
+// IP-keyed limiter in middleware/rateLimit.ts depends on this number, so if a
+// second hop is ever put in front (a CDN, a cloud load balancer), raise it to
+// the real hop count in the same change — leaving it at 1 collapses the whole
+// internet into one shared bucket rather than merely mis-attributing it.
 app.set('trust proxy', 1);
 
 app.use(helmet());
@@ -54,12 +63,27 @@ app.use(
   }),
 );
 
-app.use(globalRateLimiter);
-
-// Health check (no auth, no rate concerns for orchestrators).
+// Health check — MOUNTED ABOVE THE RATE LIMITER ON PURPOSE.
+//
+// An orchestrator probes from one fixed address that, on a busy node, is also
+// carrying real traffic. Underneath the limiter the probe spends the same
+// per-IP budget as that traffic, so a burst 429s the probe and the balancer
+// responds by pulling a perfectly healthy instance out of rotation — shifting
+// its load onto the survivors, which then burst harder. Registering the route
+// first means no store is consulted at all, so this endpoint also keeps
+// answering while Redis is down. (middleware/rateLimit.ts additionally skips
+// /health, so this stays correct if the order is ever disturbed.)
+//
+// Deliberately does no I/O: it reports that this PROCESS is up and serving.
+// Wiring a Redis or Postgres check in here would hand a single dependency blip
+// the power to mark every instance dead at once, which is the same failure this
+// ordering exists to prevent. Dependency health belongs on a separate,
+// non-orchestrator-facing endpoint.
 app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'ok', service: 'crypto-gateway', ts: Date.now() });
 });
+
+app.use(globalRateLimiter);
 
 // Docs.
 mountDocs(app);
