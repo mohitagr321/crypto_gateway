@@ -604,8 +604,23 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
   );
 
   // Find payments that have crossed the confirmation threshold.
-  const ready = await query<{ id: string; tx_hash: string | null }>(
-    `SELECT p.id, p.tx_hash
+  //
+  // `fully_paid` is the whole point of this query and was missing. Confirmation
+  // DEPTH and payment SUFFICIENCY are two independent questions, and this code
+  // only ever asked the first: any nonzero transfer that reached
+  // required_confirmations was promoted to `confirmed`, so 0.000001 USDT
+  // settled a 500 USDT invoice and fired payment.confirmed at the merchant.
+  // `amount_received` was already being maintained (see RECEIVED_SUM) and
+  // `partial` already existed in the payment_status enum — the comparison
+  // between them simply was not written, which left `partial` a value the
+  // schema declared, the queries read, and nothing ever wrote.
+  //
+  // Compared exactly, with no tolerance. Both columns are NUMERIC(38,18) so the
+  // comparison is exact rather than floating point, and "close enough" on the
+  // amount a customer owes is a business decision for the operator to make
+  // explicitly, not a default to inherit silently.
+  const ready = await query<{ id: string; tx_hash: string | null; fully_paid: boolean }>(
+    `SELECT p.id, p.tx_hash, (p.amount_received >= p.amount) AS fully_paid
        FROM payments p
        JOIN blockchain_transactions bt ON bt.payment_id = p.id
       WHERE p.status = 'confirming'
@@ -617,6 +632,44 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
   );
 
   for (const p of ready) {
+    // UNDERPAID. The transfer is final on-chain, but the customer owes more.
+    // The payment goes to `partial` and stops here: no payment.confirmed, and
+    // no sweep. It stays open, and recordIncoming already accepts `partial` in
+    // its WHERE clause, so a top-up transfer to the same deposit address
+    // re-enters this path and settles it properly once the balance is covered.
+    if (!p.fully_paid) {
+      const marked = await query<{ id: string; amount: string; amount_received: string }>(
+        `UPDATE payments
+            SET status = 'partial'
+          WHERE id = $1 AND status = 'confirming'
+          RETURNING id, amount, amount_received`,
+        [p.id],
+      );
+      if (marked.length === 0) continue;
+
+      // The transaction itself IS confirmed on-chain; only the payment is not
+      // satisfied. Leaving the row `pending` would make the reconciler keep
+      // re-counting confirmations against it forever.
+      await query(
+        `UPDATE blockchain_transactions
+            SET status = 'confirmed'
+          WHERE payment_id = $1 AND direction = 'incoming' AND status = 'pending'
+            AND network = '${cfg.network}'`,
+        [p.id],
+      );
+
+      logger.warn(
+        {
+          paymentId: p.id,
+          expected: marked[0].amount,
+          received: marked[0].amount_received,
+          network: cfg.network,
+        },
+        'payment underpaid — held as partial, not confirmed, not swept',
+      );
+      continue;
+    }
+
     // Promote confirming -> confirmed (guarded so it fires exactly once).
     const promoted = await query<{ id: string }>(
       `UPDATE payments
