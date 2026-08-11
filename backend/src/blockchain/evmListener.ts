@@ -1161,7 +1161,14 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
         AND status = 'pending'
         AND network = '${cfg.network}'
         AND block_number IS NOT NULL
-        AND block_number > $1 - $2
+        -- BOTH SIDES CAST. Everywhere else in this file the arithmetic is
+        -- head-minus-block_number, where the typed BIGINT column lets Postgres
+        -- infer the parameter. Here both operands are parameters, so there is
+        -- nothing to infer from and the planner rejects the statement outright
+        -- with "operator is not unique: unknown - unknown". It failed on every
+        -- reconciler pass against a real database, which is exactly how it got
+        -- through a typecheck-and-read review: only running it shows it.
+        AND block_number > $1::bigint - $2::bigint
         AND confirmations <> GREATEST(0, $1 - block_number)`,
     [head, confirmationWindowBlocks()],
   );
