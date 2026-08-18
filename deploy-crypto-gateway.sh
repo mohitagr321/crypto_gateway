@@ -40,9 +40,9 @@
 set -euo pipefail
 
 # ─────────────────────────── EDIT THESE VALUES ──────────────────────────────
-CLIENT_DOMAIN="pay.ezulix.com"          # merchant / client panel
-ADMIN_DOMAIN="admin-pay.ezulix.com"     # admin panel
-API_DOMAIN="pay-api.ezulix.com"             # dedicated API hostname (merchants call this)
+CLIENT_DOMAIN="pay.paycrypo.com"       # merchant panel + hosted checkout (/pay/:token)
+ADMIN_DOMAIN="admin.paycrypo.com"      # admin console
+API_DOMAIN="api.paycrypo.com"          # the hostname merchants call
 LE_EMAIL="namit@ezulix.com"             # Let's Encrypt contact
 
 # First-login admin (idempotent — only created if it doesn't exist yet).
@@ -69,7 +69,7 @@ ADMIN_SEED_FAILED=false  # set true in step 8 if the seed ran and did not succee
 # ────────────────────────────────────────────────────────────────────────────
 
 # Fixed settings (change only if you know why)
-REPO_URL="https://github.com/Ezulix/CryptoPay.git"
+REPO_URL="https://github.com/mohitagr321/crypto_gateway.git"
 # Only needed if the repo is PRIVATE. Export it in your shell before running
 # (export GITHUB_TOKEN=ghp_xxx) — do NOT hardcode it here / commit it.
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
@@ -218,6 +218,10 @@ if [ ! -f "$ENV_FILE" ]; then
   set_env NODE_ENV     production                                     "$ENV_FILE"
   set_env PORT         "$API_PORT"                                    "$ENV_FILE"
   set_env APP_BASE_URL "https://${CLIENT_DOMAIN}"                     "$ENV_FILE"
+  # Builds every verification / password-reset link in outbound email. Without
+  # it the default is http://localhost:5174, so every merchant who signs up gets
+  # a dead link pointing at their own machine — silently, with no error anywhere.
+  set_env PUBLIC_PANEL_URL "https://${CLIENT_DOMAIN}"                "$ENV_FILE"
   set_env DATABASE_URL "postgres://${PG_ROLE}:${PG_PW}@localhost:5432/${PG_DB}" "$ENV_FILE"
   set_env REDIS_URL    "redis://localhost:6379/${REDIS_DB}"          "$ENV_FILE"
   # Fresh secrets — only ever generated here, on first deploy (DB is empty, so
@@ -230,6 +234,10 @@ else
   # Re-run: keep the live .env, but make sure infra values still point right.
   set_env PORT         "$API_PORT"                                    "$ENV_FILE"
   set_env APP_BASE_URL "https://${CLIENT_DOMAIN}"                     "$ENV_FILE"
+  # Builds every verification / password-reset link in outbound email. Without
+  # it the default is http://localhost:5174, so every merchant who signs up gets
+  # a dead link pointing at their own machine — silently, with no error anywhere.
+  set_env PUBLIC_PANEL_URL "https://${CLIENT_DOMAIN}"                "$ENV_FILE"
   set_env DATABASE_URL "postgres://${PG_ROLE}:${PG_PW}@localhost:5432/${PG_DB}" "$ENV_FILE"
   set_env REDIS_URL    "redis://localhost:6379/${REDIS_DB}"          "$ENV_FILE"
   chmod 600 "$ENV_FILE"
