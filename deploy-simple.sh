@@ -35,11 +35,22 @@ sudo apt-get update -y
 sudo apt-get install -y git curl ca-certificates gnupg build-essential rsync \
   postgresql postgresql-contrib redis-server apache2 certbot python3-certbot-apache
 
-say "2/9  Node 20 + PM2"
-if ! command -v node >/dev/null || [ "$(node -v | cut -d. -f1 | tr -d v)" -lt 20 ]; then
-  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-  sudo apt-get install -y nodejs
+say "2/9  Node >= 20 + PM2"
+node_major(){ command -v node >/dev/null && node -v | cut -d. -f1 | tr -d v || echo 0; }
+if [ "$(node_major)" -lt 20 ]; then
+  # Ubuntu's own nodejs first — on 26.04 it is already >= 20, and NodeSource does
+  # not publish for every release the moment it ships. Falling straight to their
+  # setup script on an unsupported codename adds a broken apt source and then
+  # fails, which is a worse state than not having tried.
+  sudo apt-get install -y nodejs npm || true
+  if [ "$(node_major)" -lt 20 ]; then
+    sudo apt-get remove -y nodejs npm || true
+    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - || \
+      die "Could not install Node 20 from Ubuntu or NodeSource. Install it by hand, then re-run."
+    sudo apt-get install -y nodejs
+  fi
 fi
+[ "$(node_major)" -ge 20 ] || die "Node is $(node -v) — the backend requires >= 20."
 command -v pm2 >/dev/null || sudo npm install -g pm2
 node -v
 
