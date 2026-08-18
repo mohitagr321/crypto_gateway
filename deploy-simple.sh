@@ -6,7 +6,7 @@
 #   3. bash deploy-simple.sh
 set -euo pipefail
 
-CLIENT_DOMAIN="pay.paycrypo.com"
+CLIENT_DOMAIN="paycrypo.com"           # merchant panel + hosted checkout (apex)
 ADMIN_DOMAIN="admin.paycrypo.com"
 API_DOMAIN="api.paycrypo.com"
 REPO="https://github.com/mohitagr321/crypto_gateway.git"
@@ -154,12 +154,15 @@ vhost "$ADMIN_DOMAIN" "DocumentRoot $APP/admin-panel/dist
     Require all granted
     FallbackResource /index.html
   </Directory>"
+# www -> apex. Not cosmetic: a visitor typing www.paycrypo.com otherwise gets
+# Apache's default page, or a cert error once TLS is on.
+vhost "www.$CLIENT_DOMAIN" "Redirect permanent / https://$CLIENT_DOMAIN/"
 vhost "$API_DOMAIN" "ProxyPreserveHost On
   ProxyPass        / http://127.0.0.1:$API_PORT/
   ProxyPassReverse / http://127.0.0.1:$API_PORT/"
 sudo apache2ctl configtest && sudo systemctl reload apache2
 sudo certbot --apache --non-interactive --agree-tos -m "$LE_EMAIL" \
-  -d "$CLIENT_DOMAIN" -d "$ADMIN_DOMAIN" -d "$API_DOMAIN" || \
+  -d "$CLIENT_DOMAIN" -d "www.$CLIENT_DOMAIN" -d "$ADMIN_DOMAIN" -d "$API_DOMAIN" || \
   echo "certbot failed — check DNS has propagated, then: sudo certbot --apache"
 
 cat <<EOF

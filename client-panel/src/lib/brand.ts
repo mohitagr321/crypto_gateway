@@ -31,5 +31,12 @@ export const BRAND_TAGLINE = 'Crypto Payments';
  */
 export const BRAND_DOMAIN = import.meta.env.VITE_BRAND_DOMAIN || 'paycrypo.com';
 
-/** Host shown on the hosted-checkout preview. */
-export const BRAND_CHECKOUT_HOST = `pay.${BRAND_DOMAIN}`;
+/**
+ * Host shown on the hosted-checkout preview.
+ *
+ * The apex, not a `pay.` subdomain: checkout is the /pay/:token route on THIS
+ * app, so it is served from wherever the merchant panel is. It said
+ * pay.paycrypo.com while the deploy pointed the panel at the apex, which put a
+ * hostname on the marketing page that resolved to nothing.
+ */
+export const BRAND_CHECKOUT_HOST = BRAND_DOMAIN;
