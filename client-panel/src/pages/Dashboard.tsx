@@ -1,5 +1,4 @@
 import { useMemo } from 'react';
-import type { ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -14,13 +13,9 @@ import {
   YAxis,
 } from 'recharts';
 import {
-  ArrowDownRight,
-  ArrowRight,
-  ArrowUpRight,
   CheckCircle2,
   Clock,
   Link2,
-  Minus,
   PlusCircle,
   TrendingUp,
   XCircle,
@@ -35,6 +30,8 @@ import DataTable from '@/components/DataTable';
 import type { Column } from '@/components/DataTable';
 import OnboardingChecklist from '@/components/OnboardingChecklist';
 import BalanceStrip from '@/components/BalanceStrip';
+import Sparkline from '@/components/Sparkline';
+import Section, { MoreLink } from '@/components/Section';
 import { PaymentStatusBadge } from '@/components/Badge';
 import {
   AXIS_INK_CLASS,
@@ -69,73 +66,6 @@ import type { StatusGroupId } from '@/lib/chartTheme';
  * Page furniture
  * ------------------------------------------------------------------ */
 
-/**
- * A band's running head, set in INK.
- *
- * The quiet slate `.runhead` labels a column inside a strip (StatCard,
- * BalanceStrip use it that way); this is one level up — the section of the paper
- * you are in — so it takes the ink step. Same primitive, one utility overriding
- * its colour, rather than a second heading style.
- */
-function BandHead({ children, aside }: { children: ReactNode; aside?: ReactNode }) {
-  return (
-    <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-      <h2 className="runhead text-slate-900 dark:text-slate-100">{children}</h2>
-      {aside}
-    </div>
-  );
-}
-
-/** "View all →", the one repeated affordance on this page. */
-function MoreLink({ to, children }: { to: string; children: ReactNode }) {
-  return (
-    <Link
-      to={to}
-      className="inline-flex items-center gap-1 text-xs font-medium text-brand-600 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-brand-500 dark:text-brand-400"
-    >
-      {children} <ArrowRight size={13} aria-hidden />
-    </Link>
-  );
-}
-
-/**
- * The period-over-period change on the headline figure.
- *
- * Same contract as StatCard's `Delta`, deliberately: the ARROW follows the SIGN
- * (a fall points down, truthfully) and the COLOUR follows the JUDGEMENT. Received
- * volume is the uninverted case — up is good — so the two agree here. The
- * inverted case (refunds, failures, time-to-settle) lives in StatCard's
- * `invertDelta` and is not reimplemented.
- *
- * NULL IS NOT ZERO. A first period has nothing to compare against, and saying
- * "0%" would invent a baseline that does not exist.
- */
-function Change({ value }: { value: number | null }) {
-  if (value === null) {
-    return (
-      <span className="text-slate-500 dark:text-slate-400">
-        no earlier period to compare
-      </span>
-    );
-  }
-  const flat = Math.abs(value) < 0.05;
-  const Icon = flat ? Minus : value > 0 ? ArrowUpRight : ArrowDownRight;
-  const ink = flat
-    ? 'text-slate-500 dark:text-slate-400'
-    : value > 0
-      ? 'text-emerald-600 dark:text-emerald-400'
-      : 'text-red-600 dark:text-red-400';
-
-  return (
-    <span className={`inline-flex items-center gap-1 font-medium ${ink}`}>
-      <Icon size={14} aria-hidden />
-      <span className="num lining-nums">{flat ? '0' : Math.abs(value).toFixed(1)}%</span>
-      {/* The word, because colour and an arrow are not enough on their own. */}
-      <span>{flat ? 'flat' : value > 0 ? 'up' : 'down'}</span>
-    </span>
-  );
-}
-
 /* ------------------------------------------------------------------ *
  * Charts
  * ------------------------------------------------------------------ */
@@ -165,7 +95,7 @@ function ChartTip({
   const d = active ? payload?.[0]?.payload : undefined;
   if (!d?.tipHead) return null;
   return (
-    <div className="rounded border border-slate-200 bg-white px-3 py-2 shadow-soft dark:border-slate-700 dark:bg-slate-900">
+    <div className="surface px-3 py-2 shadow-float">
       <span className="runhead">{d.tipHead}</span>
       <p className="num mt-1 text-sm font-medium text-slate-900 dark:text-slate-50">
         {d.tipValue}
@@ -431,115 +361,121 @@ export default function Dashboard() {
       />
 
       {onboardingQuery.data && !onboardingQuery.data.complete && (
-        <section className="mb-8">
+        <div className="mb-4">
           <OnboardingChecklist state={onboardingQuery.data} />
-        </section>
+        </div>
       )}
 
       {/* ============================================================
-          THE SPREAD. One enormous figure against a ledger strip —
-          asymmetric, and the two columns open on the same hairline.
+          THE METRIC GRID.
+          `auto-fit` + `minmax` rather than a fixed column count: the tiles
+          reflow from four across to one without a single breakpoint, and —
+          more importantly — a tile can never be squeezed below the width its
+          figure needs. `minmax(0, 1fr)` on the track is what allows the
+          `break-words` inside StatCard to work at all, since a grid item
+          defaults to `min-width: auto` and refuses to shrink under its
+          content.
+
+          The lead tile spans two columns. A row of five identical boxes states
+          five numbers at identical weight, so none of them is the point; this
+          page has exactly one headline figure and it should look like it.
           ============================================================ */}
-      <section className="grid gap-x-10 gap-y-8 lg:grid-cols-12">
-        <div className="rule pt-3 lg:col-span-6">
-          <span className="runhead">Received · last 30 days</span>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))] gap-3">
+        <StatCard
+          wide
+          label="Received · last 30 days"
+          value={
+            <>
+              ≈ {formatAmount(Number(totals?.settledVolumeApprox ?? 0))}{' '}
+              <span className="text-[0.5em] font-semibold text-slate-500 dark:text-slate-400">
+                USD
+              </span>
+            </>
+          }
+          loading={loading}
+          delta={totals?.volumeChangePct ?? null}
+          deltaLabel={
+            totals && totals.volumeChangePct !== null
+              ? `against ≈ ${formatAmount(Number(totals?.previousSettledVolumeApprox ?? 0))} in the 30 days before`
+              : 'no earlier period to compare'
+          }
+        >
+          {/* The sparkline is the tile's own body, not a second chart: it says
+              "this is the shape of that number" in 44px, and the full series is
+              one section down for anyone who wants to read it. */}
+          {volumeSeries.length > 1 && <Sparkline points={volumeSeries.map((p) => p.volume)} />}
+        </StatCard>
 
-          {loading ? (
-            <span className="ghost mt-3 h-12 w-3/4" aria-hidden />
-          ) : (
-            <p className="figure-lg mt-2 truncate text-5xl lg:text-6xl">
-              ≈ {formatAmount(Number(totals?.settledVolumeApprox ?? 0))}
-            </p>
-          )}
+        <StatCard
+          label="Settled payments"
+          value={totals?.settledCount ?? 0}
+          icon={TrendingUp}
+          loading={loading}
+          sub={`${totals?.partialCount ?? 0} partial · ${totals?.expiredCount ?? 0} expired`}
+        />
+        <StatCard
+          label="In flight"
+          value={`≈ ${formatAmount(Number(totals?.inFlightAmountApprox ?? 0))}`}
+          icon={Clock}
+          tone="amber"
+          loading={loading}
+          sub={`USD · ${totals?.inFlightCount ?? 0} awaiting confirmation`}
+        />
+        <StatCard
+          label="Success rate"
+          value={`${(totals?.successRate ?? 0).toFixed(1)}%`}
+          icon={CheckCircle2}
+          loading={loading}
+          sub="Confirmed against finished"
+        />
+        <StatCard
+          label="Failed"
+          value={totals?.failedCount ?? 0}
+          icon={XCircle}
+          // Red is the ink for money that failed — so it is only spent when
+          // something actually did. A red glyph over a zero is a false alarm.
+          tone={(totals?.failedCount ?? 0) > 0 ? 'red' : undefined}
+          loading={loading}
+          sub="In the last 30 days"
+        />
+      </div>
 
-          {!loading && (
-            <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-slate-500 dark:text-slate-400">
-              <Change value={totals?.volumeChangePct ?? null} />
-              {totals && totals.volumeChangePct !== null && (
-                <span>
-                  against{' '}
-                  <span className="num">
-                    ≈ {formatAmount(Number(totals?.previousSettledVolumeApprox ?? 0))}
-                  </span>{' '}
-                  in the 30 days before
-                </span>
-              )}
-            </p>
-          )}
-
-          {/* THE CAVEAT, stated once and next to the figure it qualifies rather
-              than three bands away. This is a flow, not a balance. */}
-          <p className="figure-label measure">
-            USD, approximate across every asset you accept. Assets are not fungible
-            across chains, so this is what arrived — not what you can withdraw. The
-            balances below are that figure, and{' '}
-            <Link to="/reports" className="link-ink">
-              Reports
-            </Link>{' '}
-            is where you reconcile.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-2 gap-x-8 gap-y-6 lg:col-span-6">
-          <StatCard
-            label="Settled payments"
-            value={totals?.settledCount ?? 0}
-            icon={TrendingUp}
-            loading={loading}
-            sub={`${totals?.partialCount ?? 0} partial · ${totals?.expiredCount ?? 0} expired`}
-          />
-          <StatCard
-            label="In flight"
-            value={`≈ ${formatAmount(Number(totals?.inFlightAmountApprox ?? 0))}`}
-            icon={Clock}
-            tone="amber"
-            loading={loading}
-            sub={`USD · ${totals?.inFlightCount ?? 0} awaiting confirmation`}
-          />
-          <StatCard
-            label="Success rate"
-            value={`${(totals?.successRate ?? 0).toFixed(1)}%`}
-            icon={CheckCircle2}
-            loading={loading}
-            sub="Confirmed against finished"
-          />
-          <StatCard
-            label="Failed"
-            value={totals?.failedCount ?? 0}
-            icon={XCircle}
-            // Red is the ink for money that failed — so it is only spent when
-            // something actually did. A red glyph over a zero is a false alarm.
-            tone={(totals?.failedCount ?? 0) > 0 ? 'red' : undefined}
-            loading={loading}
-            sub="In the last 30 days"
-          />
-        </div>
-      </section>
+      {/* THE CAVEAT, stated once and next to the figure it qualifies rather
+          than three sections away. This is a FLOW, not a balance. */}
+      <p className="measure-wide mt-3 px-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+        The headline is USD, approximate across every asset you accept. Assets are
+        not fungible across chains, so it is what arrived — not what you can
+        withdraw. The balances below are that figure, and{' '}
+        <Link to="/reports" className="link-ink">
+          Reports
+        </Link>{' '}
+        is where you reconcile.
+      </p>
 
       {/* ============================================================
-          BALANCES. Immediately under the headline, because the headline
-          is explicitly NOT one. BalanceStrip refuses to total, and says
-          so on screen.
+          BALANCES. Immediately under the headline, because the headline is
+          explicitly NOT one. BalanceStrip refuses to total, and says so on
+          screen.
           ============================================================ */}
-      <section className="mt-10">
-        <BandHead aside={<MoreLink to="/payouts">Payouts</MoreLink>}>
-          Balances · per network and asset
-        </BandHead>
-        <div className="mt-3">
-          <BalanceStrip />
-        </div>
-      </section>
+      <Section
+        className="mt-4"
+        title="Balances · per network and asset"
+        aside={<MoreLink to="/payouts">Payouts</MoreLink>}
+      >
+        <BalanceStrip />
+      </Section>
 
       {/* ============================================================
-          CHARTS.
+          CHARTS. Two surfaces on a 3-column grid — the series gets two, the
+          composition gets one, because a 14-point series needs the width and
+          a four-slice donut does not.
           ============================================================ */}
-      <section className="mt-10 grid gap-x-10 gap-y-10 lg:grid-cols-3">
-        <div className="rule pt-3 lg:col-span-2">
-          <BandHead>Volume received · last 14 days</BandHead>
+      <div className="mt-4 grid gap-3 lg:grid-cols-3">
+        <Section className="lg:col-span-2" title="Volume received · last 14 days">
           {loading ? (
-            <span className="ghost mt-4 h-[240px] w-full opacity-60" aria-hidden />
+            <span className="ghost h-[240px] w-full opacity-60" aria-hidden />
           ) : volumeSeries.length === 0 ? (
-            <p className="measure mt-4 py-16 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+            <p className="measure py-16 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
               Nothing has settled in this period yet. The first confirmed payment
               starts this series.
             </p>
@@ -548,26 +484,40 @@ export default function Dashboard() {
                ask for `currentColor` — a documented recharts prop rather than a
                reach into its DOM — and follow the theme with no JS. The axis ink
                is the one class that has to reach in; see lib/chartTheme.ts. */
-            <div className={`mt-4 ${VOLUME_INK_CLASS} ${AXIS_INK_CLASS}`}>
+            <div className={`${VOLUME_INK_CLASS} ${AXIS_INK_CLASS}`}>
               <ResponsiveContainer width="100%" height={240}>
                 <AreaChart data={volumeSeries} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
                   <defs>
                     <linearGradient id="vol" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="currentColor" stopOpacity={0.28} />
+                      <stop offset="5%" stopColor="currentColor" stopOpacity={0.3} />
                       <stop offset="95%" stopColor="currentColor" stopOpacity={0} />
                     </linearGradient>
                   </defs>
+                  {/*
+                    `minTickGap` is what makes this chart readable under 400px.
+                    Without it recharts draws all fourteen date labels whatever
+                    the width, so on a phone they overlap into a grey smear and
+                    the axis stops being an axis. With it, recharts drops labels
+                    until each has 28px of clearance — fewer ticks, all legible.
+                    `preserveStartEnd` guarantees the first and last dates
+                    survive that culling, which are the two the reader needs to
+                    know what window they are looking at.
+                  */}
                   <XAxis
                     dataKey="date"
                     tick={{ fontSize: AXIS_TICK_SIZE }}
                     tickLine={false}
                     axisLine={false}
+                    interval="preserveStartEnd"
+                    minTickGap={28}
                   />
                   <YAxis
                     tick={{ fontSize: AXIS_TICK_SIZE }}
                     tickLine={false}
                     axisLine={false}
-                    width={48}
+                    // 40 rather than 48: on a 320px plot the axis gutter was
+                    // taking an eighth of the chart to print four labels.
+                    width={40}
                   />
                   <Tooltip
                     content={<ChartTip />}
@@ -586,20 +536,19 @@ export default function Dashboard() {
               </ResponsiveContainer>
             </div>
           )}
-        </div>
+        </Section>
 
-        <div className="rule pt-3">
-          <BandHead>Payment status · last 30 days</BandHead>
+        <Section title="Payment status · last 30 days">
           {loading ? (
-            <span className="ghost mt-4 h-[200px] w-full opacity-60" aria-hidden />
+            <span className="ghost h-[200px] w-full opacity-60" aria-hidden />
           ) : statusGroups.length === 0 ? (
-            <p className="measure mt-4 py-16 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+            <p className="measure py-16 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
               No payments yet.
             </p>
           ) : (
             <>
-              <div className={`mt-4 ${AXIS_INK_CLASS}`}>
-                <ResponsiveContainer width="100%" height={200}>
+              <div className={AXIS_INK_CLASS}>
+                <ResponsiveContainer width="100%" height={190}>
                   <PieChart>
                     <Pie
                       data={statusGroups}
@@ -607,8 +556,8 @@ export default function Dashboard() {
                       nameKey="label"
                       cx="50%"
                       cy="50%"
-                      innerRadius={48}
-                      outerRadius={78}
+                      innerRadius="58%"
+                      outerRadius="92%"
                       paddingAngle={2}
                       // recharts' default sector stroke is a hardcoded white,
                       // which drew white hairlines between slices on the dark
@@ -627,10 +576,15 @@ export default function Dashboard() {
 
               {/* The key, replacing recharts' <Legend>: it carries the WORD, the
                   count and the share, so the slice colour never has to be read
-                  on its own, and it names every underlying status. */}
-              <ul className="mt-4">
+                  on its own, and it names every underlying status. This is also
+                  the only way the values are reachable on a touch device, where
+                  a hover tooltip is not. */}
+              <ul className="mt-3">
                 {statusGroups.map((g) => (
-                  <li key={g.groupId} className="rule flex items-start justify-between gap-3 py-2">
+                  <li
+                    key={g.groupId}
+                    className="flex items-start justify-between gap-3 border-t border-[var(--line-soft)] py-2 first:border-t-0"
+                  >
                     <span className="flex min-w-0 gap-2">
                       <svg
                         width="8"
@@ -659,72 +613,71 @@ export default function Dashboard() {
               </ul>
             </>
           )}
-        </div>
-      </section>
+        </Section>
+      </div>
 
       {/* ============================================================
           PER-ASSET SETTLEMENT. The authoritative breakdown: one row per
-          (network, asset), never summed, because a merchant holding USDT
-          on BEP20 and USDT on TRC20 does not hold one combined number of
-          anything.
+          (network, asset), never summed, because a merchant holding USDT on
+          BEP20 and USDT on TRC20 does not hold one combined number of anything.
           ============================================================ */}
       {(loading || (a?.byAsset.length ?? 0) > 0) && (
-        <section className="mt-10">
-          <BandHead aside={<MoreLink to="/reports">Reports</MoreLink>}>
-            Settled by asset · last 30 days
-          </BandHead>
-          <div className="mt-3">
-            <DataTable
-              columns={assetColumns}
-              rows={a?.byAsset ?? []}
-              rowKey={(r) => `${r.network}:${r.asset}`}
-              loading={loading}
-              skeletonRows={3}
-              label="Settled volume by asset and network"
-              emptyLabel="Nothing has settled in the last 30 days."
-            />
-          </div>
-          <p className="measure-wide mt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-            One row per network and asset, never summed — each pair settles from its
-            own wallet.
+        <Section
+          className="mt-4"
+          flush
+          title="Settled by asset · last 30 days"
+          aside={<MoreLink to="/reports">Reports</MoreLink>}
+        >
+          <DataTable
+            columns={assetColumns}
+            rows={a?.byAsset ?? []}
+            rowKey={(r) => `${r.network}:${r.asset}`}
+            loading={loading}
+            skeletonRows={3}
+            label="Settled volume by asset and network"
+            emptyLabel="Nothing has settled in the last 30 days."
+          />
+          <p className="measure-wide pb-1 pt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+            One row per network and asset, never summed — each pair settles from
+            its own wallet.
           </p>
-        </section>
+        </Section>
       )}
 
       {/* ============================================================
-          RECENT ACTIVITY. The dashboard used to end at the charts, which
-          meant the most common question — "did that payment land?" —
-          needed a second navigation to answer.
+          RECENT ACTIVITY. The dashboard used to end at the charts, which meant
+          the most common question — "did that payment land?" — needed a second
+          navigation to answer.
           ============================================================ */}
-      <section className="mt-10">
-        <BandHead aside={<MoreLink to="/payments">View all</MoreLink>}>
-          Recent payments
-        </BandHead>
-        <div className="mt-3">
-          <DataTable
-            columns={paymentColumns}
-            rows={recent}
-            rowKey={(p) => p.paymentId}
-            loading={paymentsQuery.isLoading}
-            // The list used to fall through to "No payments yet" when the
-            // request FAILED, which told a merchant with a full account that
-            // they had never taken a payment.
-            error={paymentsQuery.isError ? errorMessage(paymentsQuery.error) : null}
-            onRetry={() => paymentsQuery.refetch()}
-            skeletonRows={6}
-            renderMobile={paymentMobileRow}
-            onRowClick={(p) => navigate(`/payments/${p.paymentId}`)}
-            label="Recent payments"
-            emptyLabel="No payments yet."
-            emptyHint="Create one from here, or share a payment link — send a small amount yourself to watch the whole lifecycle."
-            emptyAction={
-              <Link to="/payments/new" className="btn-primary">
-                <PlusCircle size={16} /> Create a payment
-              </Link>
-            }
-          />
-        </div>
-      </section>
+      <Section
+        className="mt-4"
+        flush
+        title="Recent payments"
+        aside={<MoreLink to="/payments">View all</MoreLink>}
+      >
+        <DataTable
+          columns={paymentColumns}
+          rows={recent}
+          rowKey={(p) => p.paymentId}
+          loading={paymentsQuery.isLoading}
+          // The list used to fall through to "No payments yet" when the request
+          // FAILED, which told a merchant with a full account that they had
+          // never taken a payment.
+          error={paymentsQuery.isError ? errorMessage(paymentsQuery.error) : null}
+          onRetry={() => paymentsQuery.refetch()}
+          skeletonRows={6}
+          renderMobile={paymentMobileRow}
+          onRowClick={(p) => navigate(`/payments/${p.paymentId}`)}
+          label="Recent payments"
+          emptyLabel="No payments yet."
+          emptyHint="Create one from here, or share a payment link — send a small amount yourself to watch the whole lifecycle."
+          emptyAction={
+            <Link to="/payments/new" className="btn-primary">
+              <PlusCircle size={16} /> Create a payment
+            </Link>
+          }
+        />
+      </Section>
     </>
   );
 }

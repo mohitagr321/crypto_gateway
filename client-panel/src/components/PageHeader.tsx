@@ -5,29 +5,37 @@ interface PageHeaderProps {
   description?: string;
   actions?: ReactNode;
   /**
-   * The running head — which section of the paper this page is in ("Money in",
-   * "Money out", "Developers"). Small, quiet and letter-spaced; it orients
-   * without competing with the title. Optional, and worth setting on every page
-   * that belongs to a group.
+   * The running head — which section of the product this page is in ("Money
+   * in", "Money out", "Developers"). Small, quiet and letter-spaced; it orients
+   * without competing with the title. Worth setting on every page that belongs
+   * to a group.
    */
   eyebrow?: string;
   /**
-   * A quiet line ranged right under the actions: a count, a freshness stamp,
-   * "340 payments · updated 14:02". Facts about the page, not controls.
+   * A quiet line under the actions: a count, a freshness stamp, "340 payments ·
+   * updated 14:02". Facts about the page, not controls.
    */
   meta?: ReactNode;
 }
 
 /**
- * The page masthead.
+ * THE PAGE MASTHEAD.
  *
- * Running head, title, standfirst on a real measure, and a heavy rule closing
- * the block — the one masthead gesture on the page, used once. `.rule-strong`
- * draws on the top edge, which is right for a band and wrong here, so this uses
- * `.rule-b-strong`: the stroke belongs UNDER the title it terminates.
+ * Running head, title, standfirst on a real measure — and NO rule under it.
+ * The outgoing version closed the block with a heavy stroke, which was the
+ * correct gesture in a design made of rules and is redundant in one made of
+ * surfaces: the first card on the page already draws the line between "this is
+ * the header" and "this is the content", and a stroke as well is belt and
+ * braces.
+ *
+ * ACTIONS COME FIRST IN THE DOM on small screens? No — deliberately not. They
+ * stay after the title, because a screen-reader user should hear WHERE THEY
+ * ARE before being offered what to do there. What changes on mobile is only the
+ * visual order via flex, and only from `sm` up, where they sit on the same
+ * baseline as the title.
  *
  * The description sits on `.measure` rather than running the full width of a
- * 1280px dashboard, because a 160-character line is not read, it is skipped.
+ * 1400px dashboard: a 160-character line is not read, it is skipped.
  */
 export default function PageHeader({
   title,
@@ -37,18 +45,18 @@ export default function PageHeader({
   meta,
 }: PageHeaderProps) {
   return (
-    <header className="rule-b-strong mb-6 flex flex-col gap-3 pb-4 sm:flex-row sm:items-end sm:justify-between">
+    <header className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between sm:gap-6">
       <div className="min-w-0">
         {eyebrow && <span className="runhead">{eyebrow}</span>}
         <h1
-          className={`text-2xl font-semibold tracking-[-0.02em] text-slate-900 dark:text-slate-50 ${
+          className={`text-[1.75rem] font-semibold leading-[1.1] tracking-[-0.035em] text-slate-900 sm:text-3xl dark:text-slate-50 ${
             eyebrow ? 'mt-1.5' : ''
           }`}
         >
           {title}
         </h1>
         {description && (
-          <p className="measure mt-1.5 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+          <p className="measure mt-2 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
             {description}
           </p>
         )}

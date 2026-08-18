@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ArrowDown, ArrowUp, ChevronsUpDown } from 'lucide-react';
 
@@ -212,20 +212,30 @@ export default function DataTable<T>({
    * one cell spans the width. A page that swaps its whole table for a centred
    * icon the moment a filter matches nothing makes the merchant re-find the
    * columns each time; this way only the body changes.
+   *
+   * ON A PHONE THE FRAME IS DROPPED ENTIRELY, and that is a fix rather than a
+   * simplification. These states used to render the full desktop table before
+   * the `renderMobile` branch below was ever reached, so every list page
+   * dragged sideways WHILE LOADING and WHEN EMPTY — which is first paint on
+   * every single visit, the one moment the layout is most likely to be judged.
+   * Column headings are meaningless next to "nothing here" anyway.
    */
   const frame = (body: ReactNode) => (
-    <div className="ledger-scroll">
-      <table className="ledger">
-        {head}
-        <tbody>
-          <tr>
-            <td colSpan={columns.length} className="py-0">
-              {body}
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <>
+      <div className="px-1 py-8 md:hidden">{body}</div>
+      <div className="ledger-scroll hidden md:block">
+        <table className="ledger">
+          {head}
+          <tbody>
+            <tr>
+              <td colSpan={columns.length} className="py-0">
+                {body}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 
   if (loading) {
@@ -234,7 +244,22 @@ export default function DataTable<T>({
         <span className="sr-only" role="status">
           Loading…
         </span>
-        <div className="ledger-scroll" aria-busy="true">
+        {/* The stacked placeholder, for the same reason the frame drops on a
+            phone: a skeleton that overflows the viewport is a worse first
+            impression than the real table it stands in for. */}
+        <ul className="md:hidden" aria-busy="true">
+          {Array.from({ length: Math.min(skeletonRows, 5) }, (_, r) => (
+            <li
+              key={r}
+              className="border-t border-[var(--line-soft)] py-3.5 first:border-t-0"
+              style={{ opacity: Math.max(0.3, 1 - r * 0.15) }}
+            >
+              <span aria-hidden className="ghost h-3.5 w-1/2" />
+              <span aria-hidden className="ghost mt-2 h-3 w-3/4" />
+            </li>
+          ))}
+        </ul>
+        <div className="ledger-scroll hidden md:block" aria-busy="true">
           <table className="ledger">
             {head}
             <tbody>
@@ -346,17 +371,65 @@ export default function DataTable<T>({
     </div>
   );
 
-  if (!renderMobile) return table;
+  /**
+   * THE DEFAULT STACKED ROW.
+   *
+   * Eight pages across the two panels called DataTable with no `renderMobile`,
+   * and every one of them handed a phone a six-column table to drag sideways.
+   * Making the prop optional was the mistake: the fallback should never have
+   * been "the desktop table, but worse".
+   *
+   * So a row with no bespoke mobile layout gets a generic one — the first
+   * column as the row's title, every other visible column as a label/value
+   * pair. It is not as good as a hand-built layout, which is why `renderMobile`
+   * still exists and is still worth writing; it is enormously better than a
+   * horizontal scrollbar, which is the bar it has to clear.
+   *
+   * `hideOnMobile` columns stay hidden here too. A column the author judged
+   * unimportant enough to drop on a narrow TABLE is not one to promote to its
+   * own row in a narrow LIST.
+   */
+  const defaultMobileRow = (row: T) => {
+    const visible = columns.filter((c) => !c.hideOnMobile);
+    const [lead, ...rest] = visible;
+    return (
+      <div className="space-y-2">
+        {lead && (
+          <div className="text-[13.5px] font-medium text-slate-900 dark:text-slate-100">
+            {lead.render(row)}
+          </div>
+        )}
+        <dl className="grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+          {rest.map((col) => (
+            <Fragment key={col.key}>
+              <dt className="truncate text-[11px] uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                {col.header}
+              </dt>
+              <dd
+                className={`min-w-0 break-words text-right text-[13px] text-slate-700 dark:text-slate-300 ${
+                  col.numeric ? 'num' : ''
+                }`}
+              >
+                {col.render(row)}
+              </dd>
+            </Fragment>
+          ))}
+        </dl>
+      </div>
+    );
+  };
+
+  const mobileRow = renderMobile ?? defaultMobileRow;
 
   return (
     <>
-      {/* The stacked ledger: the same ink rule opens it, the same hairlines
-          divide it. Only the row's own layout changes. */}
-      <ul className="border-t border-slate-900 md:hidden dark:border-slate-100">
+      {/* The stacked ledger: the same rule opens it, the same hairlines divide
+          it. Only the row's own layout changes. */}
+      <ul className="md:hidden">
         {sorted.map((row) => (
           <li
             key={rowKey(row)}
-            className="border-t border-slate-200 first:border-t-0 dark:border-slate-800"
+            className="border-t border-[var(--line-soft)] first:border-t-0"
           >
             <div
               onClick={onRowClick ? () => onRowClick(row) : undefined}
@@ -376,7 +449,7 @@ export default function DataTable<T>({
                   : ''
               }`}
             >
-              {renderMobile(row)}
+              {mobileRow(row)}
             </div>
           </li>
         ))}

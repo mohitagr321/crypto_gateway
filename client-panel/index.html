@@ -3,9 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#4f46e5" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)" />
+    <!-- viewport-fit=cover is what makes env(safe-area-inset-*) resolve to
+         anything other than 0px. Without it every safe-area rule in the CSS is
+         dead code and the mobile dock sits under the iPhone home indicator. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- The browser chrome should continue the page, not announce the brand.
+         These are the two page grounds (--n-50 / --n-950) as sRGB. -->
+    <meta name="theme-color" content="#F7F7FB" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#13121D" media="(prefers-color-scheme: dark)" />
     <meta name="description" content="Accept stablecoins, native coins and Bitcoin across four chains. Non-custodial deposit addresses, signed webhooks, and settlement to a wallet you control." />
     <title>PayCrypo — Crypto Payments for Merchants</title>
     <script>

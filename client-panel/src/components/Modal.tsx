@@ -14,11 +14,41 @@ interface ModalProps {
 }
 
 const sizes = {
-  sm: 'max-w-sm',
-  md: 'max-w-lg',
-  lg: 'max-w-2xl',
+  sm: 'sm:max-w-sm',
+  md: 'sm:max-w-lg',
+  lg: 'sm:max-w-2xl',
 };
 
+/**
+ * A DIALOG ON DESKTOP, A SHEET ON A PHONE — one component, because they are the
+ * same thing wearing the size it fits into.
+ *
+ * The outgoing version was a centred card at every width. On a 360px viewport
+ * that produced a floating box with 16px of dead margin on each side, its own
+ * 24px of padding inside that, and a `max-h-[90vh]` that measured against a
+ * viewport TALLER than the visible one — so the footer, which is where the
+ * confirm button lives, could sit under the browser's own toolbar. A merchant
+ * could not reach "Save".
+ *
+ * What it does now:
+ *
+ *   BELOW `sm`   full-bleed, pinned to the bottom edge, rounded at the top
+ *                only. It enters by travelling, which is the whole point of a
+ *                sheet: it tells you which direction it came from and
+ *                therefore where it will go back to.
+ *   FROM `sm`    a centred dialog that scales in from 0.98. It does NOT
+ *                travel — a modal that slides on a desktop reads as a
+ *                notification rather than as the thing you just asked for.
+ *
+ * `100dvh` RATHER THAN `100vh`, throughout. On mobile Safari `vh` is the
+ * viewport WITHOUT the collapsing toolbar, i.e. always taller than what you can
+ * see, and it is the direct cause of the unreachable-footer bug above.
+ *
+ * THE BODY IS THE ONLY SCROLLER. Header and footer are pinned, so the title
+ * stays visible while a long form scrolls and the primary action never leaves
+ * the screen. `pb-[env(safe-area-inset-bottom)]` on the footer keeps that
+ * action clear of the iOS home indicator.
+ */
 export default function Modal({
   open,
   onClose,
@@ -44,21 +74,29 @@ export default function Modal({
   if (!open) return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4">
       <div
-        className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm"
+        className="absolute inset-0 bg-slate-950/70 backdrop-blur-sm"
         onClick={dismissable ? onClose : undefined}
         aria-hidden
       />
       <div
         role="dialog"
         aria-modal="true"
-        className={`card relative z-10 w-full ${sizes[size]} max-h-[90vh] overflow-y-auto p-6`}
+        className={`surface relative z-10 flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-b-none rounded-t-3xl shadow-float sm:max-h-[88dvh] sm:rounded-2xl ${sizes[size]} motion-safe:animate-[sheet-in_var(--dur-modal)_var(--ease-out)] sm:motion-safe:animate-[dialog-in_var(--dur-modal)_var(--ease-out)]`}
       >
         {(title || dismissable) && (
-          <div className="mb-4 flex items-start justify-between gap-4">
+          <div className="flex shrink-0 items-start justify-between gap-4 px-5 pb-3 pt-5 sm:px-6">
+            {/* The grabber says "this is a sheet and it came from down there".
+                Purely a signifier, so it is hidden from assistive tech and is
+                not a control — it is not draggable and must not look like it
+                on a surface where a mis-drag would dismiss unsaved input. */}
+            <span
+              className="absolute left-1/2 top-2 h-1 w-10 -translate-x-1/2 rounded-full bg-slate-300 sm:hidden dark:bg-slate-700"
+              aria-hidden
+            />
             {title && (
-              <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+              <h2 className="min-w-0 text-lg font-semibold tracking-[-0.02em] text-slate-900 dark:text-slate-100">
                 {title}
               </h2>
             )}
@@ -67,15 +105,24 @@ export default function Modal({
                 type="button"
                 onClick={onClose}
                 aria-label="Close"
-                className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
+                className="-mr-2 -mt-1 grid h-10 w-10 shrink-0 place-items-center rounded-full text-slate-400 transition-colors hover:bg-[var(--hover)] hover:text-slate-600 dark:hover:text-slate-300"
               >
                 <X size={18} />
               </button>
             )}
           </div>
         )}
-        <div>{children}</div>
-        {footer && <div className="mt-6 flex justify-end gap-2">{footer}</div>}
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-5 pt-1 sm:px-6">{children}</div>
+
+        {footer && (
+          <div
+            className="flex shrink-0 flex-col-reverse gap-2 border-t border-[var(--line-soft)] bg-[var(--surface-2)] px-5 py-4 sm:flex-row sm:justify-end sm:px-6"
+            style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
+          >
+            {footer}
+          </div>
+        )}
       </div>
     </div>,
     document.body,
