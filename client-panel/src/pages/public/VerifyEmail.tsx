@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { Check, CheckCircle2, XCircle } from 'lucide-react';
-import AuthShell from '@/components/AuthShell';
+import { Check, CheckCircle2, Mail, XCircle } from 'lucide-react';
+import AuthShell, { Notice } from '@/components/AuthShell';
 import Spinner from '@/components/Spinner';
 import { errorMessage, resendVerification, verifyEmail } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
@@ -29,29 +29,31 @@ type State = 'working' | 'done' | 'failed';
  * no-op in React 18, so the ref alone is both necessary and sufficient.
  *
  * ---------------------------------------------------------------------------
- * SET IN TYPE, AND DELIBERATELY BARE.
+ * DELIBERATELY BARE.
  *
- * Three states, each of which used to centre a 44-52px icon inside a tinted
+ * Three states, each of which once centred a 44-52px icon inside a tinted
  * rounded panel roughly 200px tall — the standard way a page with almost no
- * content pretends to have some. All three panels are gone. Each state is now a
- * running head, the shell's h1, one statement on the reading measure and at most
- * one action, with the state itself carried by a single line of coloured type
- * that always ships an icon and a word beside the hue.
+ * content pretends to have some. There is a real surface here now, supplied by
+ * the shell, and the correct amount of content to put on it is still exactly
+ * what each state has: one sentence of state and at most one action. A page
+ * with three sentences on it is allowed to be a page with three sentences on it
+ * once the sentences are sitting on something.
  *
- * The colour rule the old version broke twice: success was `brand`, which made
+ * The colour rule an older version broke twice: success was `brand`, which made
  * the interactive hue mean "good outcome" on this one screen, and failure was
  * `text-red-500` in both themes — the one step that must never carry text,
  * because it fails AA on the paper ground. Success is emerald (verified),
- * failure is red at 600 in light and 400 in dark.
+ * failure is red at 600 in light and 400 in dark, and both go through the
+ * funnel's shared <Notice> so all six screens state a result the same way.
  *
  * `aside={null}` ON EVERY STATE, and that is load-bearing rather than a
  * judgement about the copy. This page swaps its entire body AFTER mount, but
  * React reconciles the three returns into the same AuthShell instance, so the
- * shell's useReveal() never re-runs — it collected its targets during the
- * `working` state. Any `.reveal` reaching the DOM later (the default standing
- * matter carries four) would never be observed and would render permanently
- * INVISIBLE in browsers without scroll-driven animation. Nothing on this page
- * may carry `.reveal`, and no margin column may appear here.
+ * shell's useReveal() never re-runs — it collected its targets when the shell
+ * mounted, during the `working` state. Any `.reveal` reaching the DOM later
+ * (the default standing matter carries four) would never be observed and would
+ * render permanently INVISIBLE in browsers without scroll-driven animation.
+ * No supporting column may appear here.
  */
 export default function VerifyEmail() {
   const [params] = useSearchParams();
@@ -101,6 +103,7 @@ export default function VerifyEmail() {
     );
   }
 
+
   if (state === 'done') {
     return (
       <AuthShell
@@ -109,14 +112,10 @@ export default function VerifyEmail() {
         subtitle="Your email is confirmed and your account is active. Taking you to your dashboard…"
         aside={null}
       >
-        <div className="space-y-6">
-          <p
-            role="status"
-            className="flex items-center gap-2 text-sm font-medium text-emerald-700 dark:text-emerald-400"
-          >
-            <CheckCircle2 size={16} className="shrink-0" aria-hidden />
+        <div className="space-y-5">
+          <Notice tone="ok" icon={CheckCircle2} live="status">
             Account activated
-          </p>
+          </Notice>
           {/* The redirect fires in 1.4s; this is the manual path for anyone it
               does not reach, and the only brand-coloured thing on the page. */}
           <Link to="/onboarding" className="btn-primary w-full">
@@ -147,25 +146,17 @@ export default function VerifyEmail() {
         </>
       }
     >
-      <div className="space-y-6">
+      <div className="space-y-5">
         {error && (
-          <p
-            role="alert"
-            className="flex items-start gap-2 text-sm font-medium text-red-600 dark:text-red-400"
-          >
-            <XCircle size={16} className="mt-0.5 shrink-0" aria-hidden />
-            <span>{error}</span>
-          </p>
+          <Notice tone="failed" icon={XCircle}>
+            {error}
+          </Notice>
         )}
 
         {resent ? (
-          <p
-            role="status"
-            className="flex items-start gap-2 text-sm font-medium text-emerald-700 dark:text-emerald-400"
-          >
-            <Check size={16} className="mt-0.5 shrink-0" aria-hidden />
-            <span>If that address needs confirming, a new link is on its way.</span>
-          </p>
+          <Notice tone="ok" icon={Check} live="status">
+            If that address needs confirming, a new link is on its way.
+          </Notice>
         ) : (
           <form
             className="space-y-4"
@@ -184,15 +175,25 @@ export default function VerifyEmail() {
               <label className="label" htmlFor="verify-email">
                 Email address
               </label>
-              <input
-                id="verify-email"
-                type="email"
-                required
-                className="input"
-                placeholder="you@yourcompany.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
+              {/* The leading icon every other field in the funnel carries. It
+                  was the one bare input across six screens, which is exactly
+                  the sort of difference nobody notices and everybody feels. */}
+              <div className="relative">
+                <Mail
+                  size={16}
+                  className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-slate-400"
+                  aria-hidden
+                />
+                <input
+                  id="verify-email"
+                  type="email"
+                  required
+                  className="input pl-9"
+                  placeholder="you@yourcompany.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                />
+              </div>
             </div>
             <button type="submit" className="btn-primary w-full">
               Send a new link

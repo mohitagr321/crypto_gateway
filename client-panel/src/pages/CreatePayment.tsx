@@ -15,19 +15,27 @@ import { isTerminal } from '@/lib/format';
 import { errorMessage } from '@/lib/api';
 import type { CreatePaymentInput, Payment } from '@/types';
 import PageHeader from '@/components/PageHeader';
+import Section from '@/components/Section';
 import AssetPicker from '@/components/AssetPicker';
 import PaymentCard from '@/components/PaymentCard';
 
 /**
  * Create one payment by hand.
  *
- * SET AS A FORM ON A PAGE, NOT A FORM IN A BOX. The fields are separated by
- * hairlines and sit in the wide column of an asymmetric grid; the narrow margin
- * column carries the running head and the two facts that decide whether the
- * merchant fills this in correctly — that the address is bound to one
- * (network, asset) pair, and that a fiat price is struck once and never
- * revisited. Those notes used to be absent, or buried under the control they
- * qualified, which is where nobody reads them.
+ * SET AS FOUR DECISIONS ON FOUR SURFACES, and that is the change. The form was
+ * one unbroken column of fields separated by hairlines — nine controls at one
+ * weight, in which "which chain" and "what does this cost" looked exactly as
+ * important as "order id". Grouping them onto titled surfaces lets the eye land
+ * on one question at a time, and it makes the shape of the task legible before
+ * a single field is filled: what you are accepting, what it costs, what to call
+ * it, and then the irreversible bit on a surface of its own.
+ *
+ * The margin column keeps its job — the two facts that decide whether the
+ * merchant fills this in correctly, that the address is bound to one
+ * (network, asset) pair and that a fiat price is struck once and never
+ * revisited. It is a surface too now rather than ranged type in the gutter,
+ * because a note printed on the bare canvas beside four lit cards reads as
+ * something that did not finish loading.
  *
  * MOTION: none on mount. The only moving thing is the fiat estimate, and it
  * moves because a value changed (the merchant typed), not because the page
@@ -201,114 +209,135 @@ export default function CreatePayment() {
         }
       />
 
-      <div className="grid gap-x-10 gap-y-8 lg:grid-cols-12">
-        {/* The margin column. Everything a merchant needs to know BEFORE
-            filling the form in, rather than after the address is issued and
-            the mistake is permanent. */}
-        <aside className="col-aside lg:col-span-4">
-          <span className="runhead">One order, one address</span>
-          <p className="mt-3">
-            The address this creates is derived for this payment alone and is
-            valid only on the network you choose. It is never reused, and funds
-            sent on any other chain cannot be credited.
-          </p>
-          <dl className="mt-6">
-            <div className="rule flex items-baseline justify-between gap-4 py-2.5">
-              <dt>Pair</dt>
-              <dd className="text-right font-medium text-slate-900 dark:text-slate-100">
-                {selectedAsset} · {selectedNetwork}
-              </dd>
-            </div>
-            <div className="rule flex items-baseline justify-between gap-4 py-2.5">
-              <dt>Priced in</dt>
-              <dd className="text-right font-medium text-slate-900 dark:text-slate-100">
-                {fiatMode ? fiatCurrency : selectedAsset}
-              </dd>
-            </div>
-            <div className="rule flex items-baseline justify-between gap-4 py-2.5">
-              <dt>Rate</dt>
-              <dd className="text-right font-medium text-slate-900 dark:text-slate-100">
-                {fiatMode ? 'Locked at creation' : 'Not applicable'}
-              </dd>
-            </div>
-          </dl>
+      {/* `items-start` so the margin column keeps its own height instead of
+          stretching to match a form that grows by 120px the moment fiat mode is
+          selected — a surface with a long empty tail under its last row reads as
+          a loading state. */}
+      <div className="grid items-start gap-4 lg:grid-cols-12">
+        {/* THE MARGIN COLUMN, FIRST IN THE DOM and deliberately so: everything
+            a merchant needs to know BEFORE filling the form in, rather than
+            after the address is issued and the mistake is permanent. A screen
+            reader and a phone both meet it in that order; only `lg` ranges it
+            alongside. */}
+        <aside className="min-w-0 lg:col-span-4">
+          <Section title="One order, one address">
+            <p className="measure text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+              The address this creates is derived for this payment alone and is
+              valid only on the network you choose. It is never reused, and funds
+              sent on any other chain cannot be credited.
+            </p>
+            {/* The spine primitive rather than three hand-rolled ruled rows —
+                same shape, and it cannot drift from the detail views that use
+                it. */}
+            <dl className="mt-4">
+              <div className="spine-row">
+                <dt className="spine-label">Pair</dt>
+                <dd className="spine-value font-medium">
+                  {selectedAsset} · {selectedNetwork}
+                </dd>
+              </div>
+              <div className="spine-row">
+                <dt className="spine-label">Priced in</dt>
+                <dd className="spine-value font-medium">
+                  {fiatMode ? fiatCurrency : selectedAsset}
+                </dd>
+              </div>
+              <div className="spine-row">
+                <dt className="spine-label">Rate</dt>
+                <dd className="spine-value font-medium">
+                  {fiatMode ? 'Locked at creation' : 'Not applicable'}
+                </dd>
+              </div>
+            </dl>
+          </Section>
         </aside>
 
-        <form onSubmit={onSubmit} className="min-w-0 lg:col-span-7 lg:col-start-6">
+        <form onSubmit={onSubmit} className="min-w-0 space-y-4 lg:col-span-8">
           {createMutation.isError && (
-            <p
-              role="alert"
-              className="mb-6 flex gap-2 border-t-2 border-red-600 pt-3 text-sm leading-relaxed text-red-600 dark:border-red-400 dark:text-red-400"
-            >
-              <AlertCircle size={16} className="mt-0.5 shrink-0" aria-hidden />
-              {errorMessage(createMutation.error)}
-            </p>
+            <div role="alert" className="surface flex items-start gap-2 p-4">
+              <AlertCircle
+                size={16}
+                className="mt-0.5 shrink-0 text-red-600 dark:text-red-400"
+                aria-hidden
+              />
+              <p className="measure-wide text-sm leading-relaxed text-red-600 dark:text-red-400">
+                {errorMessage(createMutation.error)}
+              </p>
+            </div>
           )}
 
-          {/* Each field is a ruled block. `first:border-t-0` is a utility and so
-              outranks `.rule`, which keeps the opening field from drawing a
-              hairline immediately under the masthead rule. */}
-          <div>
-            <div className="rule pt-5 first:border-t-0 first:pt-0">
+          {/* ---- What the customer will be sending ---- */}
+          <Section title="Asset and network">
+            <div className="space-y-4">
               <AssetPicker
                 network={selectedNetwork}
                 value={selectedAsset}
                 onChange={(sym) => setValue('asset', sym, { shouldDirty: true })}
               />
+
+              {networks.length > 1 && (
+                <div>
+                  <label className="label" htmlFor="network">
+                    Network
+                  </label>
+                  <select id="network" className="input" {...register('network')}>
+                    {networks.map((n) => (
+                      <option key={n} value={n}>
+                        {networkLabel(n)}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="measure mt-1.5 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                    The deposit address is valid only on the selected network.
+                  </p>
+                </div>
+              )}
+            </div>
+          </Section>
+
+          {/* ---- Price in crypto, or in the merchant's own currency ---- */}
+          <Section title="Price">
+            {/* Ruled tabs rather than a filled segmented control: the ink
+                underline says "this one" without spending a fill, and the two
+                labels are words, not colours. 120ms, colour only.
+
+                THE HIT BOX IS 44px AND THE UNDERLINE IS AT THE BOTTOM OF IT.
+                These were a 20px-tall pair of text buttons — the smallest
+                controls on the page and the ones that decide what the customer
+                is charged in. `items-end` is what keeps the tab reading as a
+                tab: the label and its rule sit on the strip's own hairline, and
+                the extra height is invisible dead space above them. */}
+            <div
+              className="flex flex-wrap items-end gap-x-5 border-b border-[var(--line-soft)]"
+              role="group"
+              aria-label="Pricing basis"
+            >
+              {[
+                { on: !fiatMode, label: selectedAsset, set: () => setFiatMode(false) },
+                { on: fiatMode, label: 'Fiat', set: () => setFiatMode(true) },
+              ].map((t) => (
+                <button
+                  key={t.label}
+                  type="button"
+                  onClick={t.set}
+                  aria-pressed={t.on}
+                  className={`-mb-px inline-flex min-h-[44px] items-end border-b-2 px-1 pb-1.5 text-xs font-medium uppercase tracking-[0.14em] outline-none transition-colors duration-[var(--dur-press)] focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-brand-500 sm:min-h-[34px] ${
+                    t.on
+                      ? 'border-slate-900 text-slate-900 dark:border-slate-100 dark:text-slate-50'
+                      : 'border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
             </div>
 
-            {networks.length > 1 && (
-              <div className="rule pt-5 first:border-t-0 first:pt-0">
-                <label className="label" htmlFor="network">
-                  Network
-                </label>
-                <select id="network" className="input" {...register('network')}>
-                  {networks.map((n) => (
-                    <option key={n} value={n}>
-                      {networkLabel(n)}
-                    </option>
-                  ))}
-                </select>
-                <p className="measure mt-1.5 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                  The deposit address is valid only on the selected network.
-                </p>
-              </div>
-            )}
-
-            {/* ---- Price in crypto, or in the merchant's own currency ---- */}
-            <div className="rule pt-5 first:border-t-0 first:pt-0">
-              <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
-                <span className="label mb-0">Price</span>
-                {/* Ruled tabs rather than a filled segmented control: the ink
-                    underline says "this one" without spending a fill, and the
-                    two labels are words, not colours. 120ms, colour only. */}
-                <div className="flex items-baseline gap-5" role="group" aria-label="Pricing basis">
-                  {[
-                    { on: !fiatMode, label: selectedAsset, set: () => setFiatMode(false) },
-                    { on: fiatMode, label: 'Fiat', set: () => setFiatMode(true) },
-                  ].map((t) => (
-                    <button
-                      key={t.label}
-                      type="button"
-                      onClick={t.set}
-                      aria-pressed={t.on}
-                      className={`border-b-2 pb-0.5 text-xs font-medium uppercase tracking-[0.14em] outline-none transition-colors duration-[var(--dur-press)] focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-brand-500 ${
-                        t.on
-                          ? 'border-slate-900 text-slate-900 dark:border-slate-100 dark:text-slate-50'
-                          : 'border-transparent text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
-                      }`}
-                    >
-                      {t.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
+            <div className="mt-4">
               {fiatMode ? (
                 <>
                   <div className="flex gap-2">
                     <select
-                      className="input w-28"
+                      className="input w-24 shrink-0 sm:w-28"
                       value={fiatCurrency}
                       onChange={(e) => setFiatCurrency(e.target.value)}
                       aria-label="Currency"
@@ -320,7 +349,7 @@ export default function CreatePayment() {
                       ))}
                     </select>
                     <input
-                      className="input num flex-1"
+                      className="input num min-w-0 flex-1"
                       inputMode="decimal"
                       placeholder="5000"
                       aria-label="Fiat amount"
@@ -335,14 +364,27 @@ export default function CreatePayment() {
                       number without moving the layout under the cursor.
 
                       A preview, not the quote. The binding rate is struck
-                      server-side at creation and returned on the payment. */}
+                      server-side at creation and returned on the payment.
+
+                      ON A `.well`, WHICH IS THE POINT OF THE PRIMITIVE. Every
+                      other box in this section is something you type into;
+                      this is the one thing the page computes back at you, and
+                      an INSET ground says "derived" where a raised one would
+                      claim it is another control. It is also the one ground
+                      that cannot be confused with an input, because `.input`
+                      takes the same fill and would vanish into it — which is
+                      exactly why the field groups above are ruled and not
+                      welled. */}
                   {/* Deliberately NOT aria-live: it re-derives on every
                       keystroke, and a live region here would read the whole
                       figure back after each digit. */}
-                  <div className="rule mt-5 pt-4">
+                  <div className="well mt-4 p-3.5">
                     <span className="runhead">Customer sends about</span>
                     <p className="mt-2 flex flex-wrap items-baseline gap-x-2.5">
-                      <span className="figure-lg">{preview ?? '—'}</span>
+                      {/* `break-words` and no width utility: the clamp in
+                          `.figure-lg` is what sizes this, and a `text-*`
+                          utility here would defeat it at every viewport. */}
+                      <span className="figure-lg min-w-0 break-words">{preview ?? '—'}</span>
                       <span className="text-sm font-medium text-slate-500 dark:text-slate-400">
                         {selectedAsset}
                       </span>
@@ -384,41 +426,52 @@ export default function CreatePayment() {
                 </>
               )}
             </div>
+          </Section>
 
-            <div className="rule pt-5 first:border-t-0 first:pt-0">
-              <label className="label" htmlFor="orderId">
-                Order ID
-              </label>
-              <input
-                id="orderId"
-                className="input"
-                placeholder="order_789"
-                {...register('orderId', { required: 'Order ID is required' })}
-              />
-              {errors.orderId && (
-                <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">
-                  {errors.orderId.message}
-                </p>
-              )}
+          {/* ---- What you will call it in your own books ---- */}
+          <Section title="Your reference">
+            <div className="space-y-4">
+              <div>
+                <label className="label" htmlFor="orderId">
+                  Order ID
+                </label>
+                <input
+                  id="orderId"
+                  className="input"
+                  placeholder="order_789"
+                  {...register('orderId', { required: 'Order ID is required' })}
+                />
+                {errors.orderId && (
+                  <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">
+                    {errors.orderId.message}
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="label" htmlFor="description">
+                  Description{' '}
+                  <span className="font-normal text-slate-500 dark:text-slate-400">
+                    (optional)
+                  </span>
+                </label>
+                <textarea
+                  id="description"
+                  className="input min-h-[80px] resize-y"
+                  placeholder="Order #789 — Pro plan"
+                  {...register('description')}
+                />
+              </div>
             </div>
+          </Section>
 
-            <div className="rule pt-5 first:border-t-0 first:pt-0">
-              <label className="label" htmlFor="description">
-                Description{' '}
-                <span className="font-normal text-slate-400">(optional)</span>
-              </label>
-              <textarea
-                id="description"
-                className="input min-h-[80px] resize-y"
-                placeholder="Order #789 — Pro plan"
-                {...register('description')}
-              />
-            </div>
-          </div>
-
-          {/* The heavier stroke a ledger puts above its total: below it is the
-              irreversible bit. */}
-          <div className="rule-strong mt-8 pt-5">
+          {/* THE IRREVERSIBLE BIT, ON A SURFACE OF ITS OWN. It was a band under
+              a heavy ledger rule, which is the right gesture in a design made
+              of rules and says nothing in one made of surfaces. Its own card is
+              what now separates "filling this in" from "doing it" — and a
+              submit control floating on the bare canvas under three lit cards
+              reads as unfinished rather than as final. */}
+          <div className="surface p-4 sm:p-5">
             <button
               type="submit"
               className="btn-primary w-full"

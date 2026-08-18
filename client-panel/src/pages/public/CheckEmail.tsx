@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { AlertCircle, Check, Loader2, RefreshCw } from 'lucide-react';
-import AuthShell from '@/components/AuthShell';
+import AuthShell, { Notice } from '@/components/AuthShell';
 import { errorMessage, resendVerification } from '@/lib/api';
 import { revealDelay } from '@/lib/useReveal';
 
@@ -14,18 +14,20 @@ import { revealDelay } from '@/lib/useReveal';
  * personal data and does not belong in a URL that lands in browser history and
  * referrer headers.
  *
- * SET IN TYPE. This is a low-content page, which is exactly where a template
- * starts padding: the old version filled the column with a 44px mail icon
- * floating inside a brand-tinted rounded panel, then stacked two full-width
- * buttons under it. All three were wrong. The tinted panel spent the brand hue
- * on decoration; the "sent again" confirmation used brand as a STATE; and the
- * second button ("Back to sign in") was navigation dressed as an action.
+ * A LOW-CONTENT PAGE, which is exactly where a template starts padding: an
+ * older version filled the column with a 44px mail icon floating inside a
+ * brand-tinted rounded panel and stacked two full-width buttons under it. The
+ * tinted panel spent the brand hue on decoration; the "sent again" confirmation
+ * used brand as a STATE; and the second button ("Back to sign in") was
+ * navigation dressed as an action. None of that came back.
  *
- * What is left is the shape the direction asks for: a running head, one
- * statement on the reading measure (the shell's standfirst), ONE action, two
- * ruled notes, and the navigation demoted to text links in the footer. The one
- * number worth stating — 24 — is set enormous in the margin column instead of
- * being buried in a bullet.
+ * What the panel holds now is one action and the two things worth knowing while
+ * you wait, set into a `.well` — an inset group is how this system marks
+ * "supporting detail inside the thing you are doing", and it keeps a page with
+ * three sentences on it from looking like a page with three sentences on it.
+ * Navigation stays demoted to text links under the panel. The one number worth
+ * stating — 24 — is set enormous in the supporting column rather than buried in
+ * a bullet.
  */
 export default function CheckEmail() {
   const location = useLocation();
@@ -58,9 +60,17 @@ export default function CheckEmail() {
       subtitle={
         email ? (
           <>
-            If <strong className="text-slate-900 dark:text-slate-100">{email}</strong> can be
-            registered, we've sent it a confirmation link. Click it to activate your
-            account — you'll be signed in automatically.
+            {/* `break-words` on the address, and it is not defensive coding for
+                its own sake: an email is a single unbreakable token, the lede
+                is set at 18px, and a 45-character address is wider than the
+                panel on a 360px phone — which drags the entire page sideways
+                rather than merely looking untidy. */}
+            If{' '}
+            <strong className="break-words text-slate-900 dark:text-slate-100">
+              {email}
+            </strong>{' '}
+            can be registered, we've sent it a confirmation link. Click it to
+            activate your account — you'll be signed in automatically.
           </>
         ) : (
           <>
@@ -88,20 +98,16 @@ export default function CheckEmail() {
         </>
       }
     >
-      <div className="space-y-6">
-        {/* STATE, NOT DECORATION. No tinted panel behind either of these: a
-            hairline-free line of coloured type with an icon beside it carries
-            the meaning, and the icon is what keeps the hue from being the only
-            thing saying it. Red at the 600/400 steps, emerald at 700/400 —
-            never the 500 step, which fails AA on paper. */}
+      <div className="space-y-5">
+        {/* STATE, WITH A SHAPE. On a lit panel a bare coloured sentence reads as
+            a label rather than as a state, so both of these take the funnel's
+            <Notice>: a tint, an inset ring, an icon and the sentence. Red is a
+            failure, emerald is "this worked" — and each ships three carriers, so
+            neither depends on hue. */}
         {error && (
-          <p
-            role="alert"
-            className="flex items-start gap-2 text-sm font-medium text-red-600 dark:text-red-400"
-          >
-            <AlertCircle size={16} className="mt-0.5 shrink-0" aria-hidden />
-            <span>{error}</span>
-          </p>
+          <Notice tone="failed" icon={AlertCircle}>
+            {error}
+          </Notice>
         )}
 
         {/* THE SINGLE ACTION. Secondary rather than primary on purpose: the real
@@ -110,13 +116,9 @@ export default function CheckEmail() {
             even landed. */}
         {email &&
           (sent ? (
-            <p
-              role="status"
-              className="flex items-start gap-2 text-sm font-medium text-emerald-700 dark:text-emerald-400"
-            >
-              <Check size={16} className="mt-0.5 shrink-0" aria-hidden />
-              <span>Sent again — give it a minute to arrive.</span>
-            </p>
+            <Notice tone="ok" icon={Check} live="status">
+              Sent again — give it a minute to arrive.
+            </Notice>
           ) : (
             <button
               type="button"
@@ -144,12 +146,14 @@ export default function CheckEmail() {
             </button>
           ))}
 
-        {/* Two notes, divided by rules rather than bulleted inside a grey box.
-            These stay in the MAIN column — the margin column is hidden below
-            lg, and "check your spam folder" is the advice a phone most needs. */}
-        <ul className="text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+        {/* Two notes, set into the panel. These stay in the MAIN column — the
+            supporting column is dropped below `lg`, and "check your spam
+            folder" is the one piece of advice a phone most needs. The rule
+            falls BETWEEN them only; a stroke under the last note would leave a
+            line hanging inside the well. */}
+        <ul className="well px-4 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
           {notes.map((note) => (
-            <li key={note} className="rule py-3.5">
+            <li key={note} className="rule py-3.5 first:border-t-0">
               {note}
             </li>
           ))}
@@ -165,30 +169,31 @@ const notes = [
 ];
 
 /**
- * The margin column. One running head, one enormous figure, one footnote — the
- * expiry rule is the only fact worth stating here, and it is a number, so it is
- * set as one instead of being filed away as a third bullet.
+ * The supporting column. One running head, one enormous figure, one footnote —
+ * the expiry rule is the only fact worth stating here, and it is a number, so
+ * it is set as one instead of being filed away as a third bullet. The figure
+ * takes the brand -> accent gradient: the signup funnel is marketing-frequency
+ * and this is the one figure the column exists to state.
  *
- * Hidden below lg by the shell, so nothing here competes with the action on a
- * phone. Anything a reader must have on a small screen belongs in the main
+ * Dropped below `lg` by the shell, so nothing here competes with the action on
+ * a phone. Anything a reader must have on a small screen belongs in the main
  * column, not in this one.
  */
 function WhileYouWait() {
   return (
     <>
       <span className="runhead">If it does not arrive</span>
-      <div className="rule-strong mt-3" aria-hidden />
 
-      <div className="reveal mt-8">
-        <span className="figure-xl">24</span>
-        <span className="figure-label">
+      <div className="reveal mt-6">
+        <span className="figure-xl text-gradient">24</span>
+        <span className="figure-label measure">
           hours before the link expires, and each one works exactly once. If you
           resend, open the newest mail — the earlier link stops working.
         </span>
       </div>
 
       <p
-        className="reveal rule mt-10 pt-5 text-xs leading-relaxed text-slate-500 dark:text-slate-400"
+        className="reveal rule measure mt-10 pt-5 text-xs leading-relaxed text-slate-500 dark:text-slate-400"
         style={revealDelay(1)}
       >
         Confirming is how we know the address is really yours. It is the one

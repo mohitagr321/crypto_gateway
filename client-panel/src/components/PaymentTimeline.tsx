@@ -36,19 +36,38 @@ const ORDER: PaymentStatus[] = ['waiting', 'confirming', 'confirmed', 'swept'];
  * COLOUR IS NOT THE SOLE CARRIER at any step. A reached stage carries a tick, an
  * unreached one a hollow circle, and the step the payment is actually sitting on
  * is named in words ("current") as well as marked with `aria-current`.
+ *
+ * ---------------------------------------------------------------------------
+ * THE SPINE STAYS A RULE, and that is not a leftover from the old design. The
+ * redesign replaced rules doing STRUCTURAL work — bands standing in for a page
+ * — with surfaces. This is a vertical rule threaded through four markers to say
+ * the stages are ONE sequence, which is the thing a hairline is actually for,
+ * and it sits inside a surface rather than pretending to be one.
+ *
+ * SLATE-400 NO LONGER CARRIES TEXT HERE. Every description, date and unreached
+ * label was painted slate-400, which this ramp reserves for input borders and
+ * decorative marks — it measures 2.74:1 on the light page. They take the
+ * documented secondary steps now: 500 in light, 400 in dark. The marker DISCS
+ * keep 400, because a disc is a mark rather than type.
+ *
+ * THE MARKER RING FOLLOWS THE SURFACE. It was a hardcoded `ring-white
+ * dark:ring-slate-900` — the colour of the card this used to live in — so
+ * PaymentDetail, which sets it on the page ground, has to repaint it from
+ * outside. `--surface` resolves per theme with no `dark:` half, and that page's
+ * override still wins on specificity, so nothing there breaks.
  */
 type StageTone = 'settled' | 'waiting' | 'todo';
 
 const MARKER_INK: Record<StageTone, string> = {
   settled: 'bg-emerald-600 text-white dark:bg-emerald-400 dark:text-slate-950',
   waiting: 'bg-amber-600 text-white dark:bg-amber-400 dark:text-slate-950',
-  todo: 'bg-slate-200 text-slate-400 dark:bg-slate-700',
+  todo: 'bg-slate-200 text-slate-400 dark:bg-slate-700 dark:text-slate-400',
 };
 
 const LABEL_INK: Record<StageTone, string> = {
   settled: 'text-emerald-700 dark:text-emerald-400',
   waiting: 'text-amber-700 dark:text-amber-400',
-  todo: 'text-slate-400',
+  todo: 'text-slate-500 dark:text-slate-400',
 };
 
 export default function PaymentTimeline({ payment }: { payment: Payment }) {
@@ -65,10 +84,8 @@ export default function PaymentTimeline({ payment }: { payment: Payment }) {
 
   return (
     <div>
-      <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
-        Timeline
-      </h4>
-      <ol className="relative space-y-4 border-l border-slate-200 pl-5 dark:border-slate-700">
+      <h4 className="runhead mb-3">Timeline</h4>
+      <ol className="relative space-y-4 border-l border-[var(--line)] pl-5">
         {HAPPY_PATH.map((step, i) => {
           const done = !isFailure && currentIndex >= i && currentIndex !== -1;
           const active = !isFailure && currentIndex === i;
@@ -82,7 +99,7 @@ export default function PaymentTimeline({ payment }: { payment: Payment }) {
           return (
             <li key={step.key} className="relative">
               <span
-                className={`absolute -left-[27px] flex h-4 w-4 items-center justify-center rounded-full ring-4 ring-white dark:ring-slate-900 ${MARKER_INK[tone]}`}
+                className={`absolute -left-[27px] flex h-4 w-4 items-center justify-center rounded-full ring-4 ring-[var(--surface)] ${MARKER_INK[tone]}`}
               >
                 {done ? <Check size={10} /> : <Circle size={6} />}
               </span>
@@ -105,12 +122,14 @@ export default function PaymentTimeline({ payment }: { payment: Payment }) {
                   </span>
                 )}
                 {i === 0 && payment.createdAt && (
-                  <span className="ml-2 font-normal text-xs text-slate-400">
+                  <span className="num ml-2 text-xs font-normal text-slate-500 dark:text-slate-400">
                     {formatDate(payment.createdAt)}
                   </span>
                 )}
               </p>
-              <p className="text-xs text-slate-400">{step.description}</p>
+              <p className="text-xs leading-snug text-slate-500 dark:text-slate-400">
+                {step.description}
+              </p>
             </li>
           );
         })}
@@ -120,13 +139,13 @@ export default function PaymentTimeline({ payment }: { payment: Payment }) {
             {/* 600 in light, 400 in dark, like every other marker above. The
                 500 step is the one the ramp does NOT correct, so a stock
                 red-500 disc sat visibly off the corrected reds beside it. */}
-            <span className="absolute -left-[27px] flex h-4 w-4 items-center justify-center rounded-full bg-red-600 text-white ring-4 ring-white dark:bg-red-400 dark:text-slate-950 dark:ring-slate-900">
+            <span className="absolute -left-[27px] flex h-4 w-4 items-center justify-center rounded-full bg-red-600 text-white ring-4 ring-[var(--surface)] dark:bg-red-400 dark:text-slate-950">
               <X size={10} />
             </span>
             <p className="text-sm font-medium capitalize text-red-600 dark:text-red-400">
               {payment.status}
             </p>
-            <p className="text-xs text-slate-400">
+            <p className="text-xs leading-snug text-slate-500 dark:text-slate-400">
               {payment.status === 'expired'
                 ? 'Payment window elapsed without full payment.'
                 : payment.status === 'partial'

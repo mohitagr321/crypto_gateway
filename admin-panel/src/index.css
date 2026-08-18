@@ -1,60 +1,266 @@
-/* Inter Variable, self-hosted.
-
-   THE FONT BUG, in the shape it took in this app. tailwind.config.js has named
-   `Inter` as the head of the sans stack since the beginning, but nothing in the
-   admin panel ever loaded a font file and the package was not even a dependency
-   — so every operator screen has been rendering in system-ui, while the client
-   panel (which does self-host) rendered in Inter. Two panels of one product,
-   set in two different typefaces.
-
-   The name below is the one that matters: fontsource registers the family as
-   'Inter Variable'. Importing the package while asking for plain 'Inter' is the
-   near-miss that let the same bug survive its own fix in the client panel.
-
-   `/opsz.css` rather than the barrel: the barrel ships the wght axis only, so
-   `font-optical-sizing: auto` on .figure-xl would be a no-op. This build carries
-   wght 100-900 AND the optical-size axis, which is what makes the display sizes
-   tighten correctly instead of looking like scaled-up body text. */
-@import '@fontsource-variable/inter/opsz.css';
+/* ===========================================================================
+ * GEIST + GEIST MONO — self-hosted, LATIN SUBSET ONLY.
+ *
+ * THE FONT BUG, in the shape it took in this app. This panel named `Inter` at
+ * the head of its sans stack from the beginning but never loaded a font file,
+ * so every operator screen rendered in system-ui while the merchant panel
+ * rendered in a real face — two panels of one product set in two typefaces. The
+ * fix then was `@import '@fontsource-variable/inter/opsz.css'`; the fix now is
+ * to load what the merchant panel loads, which is Geist.
+ *
+ * Declared by hand rather than @imported, for the same reason as over there.
+ * @fontsource-variable/geist ships index/wght (+ italics) and nothing
+ * per-subset, so its barrel emits latin, latin-ext, cyrillic, cyrillic-ext and
+ * vietnamese — five files where a reader of our copy fetches exactly one.
+ * `unicode-range` sees to that at runtime, but the other four would still sit in
+ * dist as dead weight.
+ *
+ * THE FAMILY NAMES ARE 'Geist Variable' AND 'Geist Mono Variable', not 'Geist'
+ * and 'Geist Mono'. Read out of each package's own wght.css under
+ * node_modules/@fontsource-variable/, not guessed. This repo has shipped that
+ * bug three times and its failure mode is SILENT: the page renders in system-ui
+ * and looks merely a little plain, which is the one kind of breakage nobody
+ * reports. It is also exactly the bug this file used to carry.
+ *
+ * ITALICS ARE NOT LOADED, deliberately. Nothing in a payments product is set in
+ * italic — not an amount, not an address, not a status — and the italic axis is
+ * a second file for a style with no call sites.
+ *
+ * @fontsource-variable/inter is now unreferenced. It is still in package.json;
+ * removing a dependency is not this file's job, but nothing here pulls it in.
+ * ======================================================================== */
+@font-face {
+  font-family: 'Geist Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('@fontsource-variable/geist/files/geist-latin-wght-normal.woff2')
+    format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Geist Mono Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2')
+    format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
-  /* ===================================================================
-   * MOTION
+  /* =====================================================================
+   * THE TOKENS.
    *
-   * THE FREQUENCY BOUNDARY. How often a person sees a surface decides how
-   * much it may move.
-   *   - MARKETING routes are seen once or twice. They earn reveals, parallax
-   *     and scrubbed scenes. THIS APP HAS NONE — the operator console is
-   *     dashboard end to end, which means it lives entirely inside the hard
-   *     budget below and the marketing primitives are deliberately not ported.
-   *   - DASHBOARD routes are opened dozens of times a day and get a hard
-   *     budget: nothing over 200ms, nothing travelling more than 8px, nothing
-   *     that loops, no page-level entrance, no count-up on mount. A command
-   *     palette opens INSTANTLY — a keyboard-initiated action is never
-   *     animated, because the user is already ahead of it.
+   * Ported from client-panel/src/index.css, values unchanged. The operator
+   * console and the merchant panel are ONE PRODUCT; an operator with both open
+   * — which is most of their day — must not be able to tell which window they
+   * are in from a border colour. Read that file for the full derivation, which
+   * is not duplicated here.
    *
-   * THE DATA-DRIVEN LAW. On the dashboard nothing animates on MOUNT; things
-   * animate only when a value actually CHANGES. That is what buys motion on a
-   * surface an operator lives in without taxing them for visiting it. An
-   * operator refreshes this panel all day; an entrance animation would be a
-   * tax charged once per visit, forever.
+   * Every colour is an OKLCH TRIPLET — "L C H", with no `oklch()` wrapper and
+   * no alpha. tailwind.config.js wraps each one as
+   * `oklch(var(--x) / <alpha-value>)`, and Tailwind substitutes the opacity
+   * into that slot. Storing a finished `oklch(...)` string here would leave
+   * nowhere for the alpha to go and every `/N` utility in the codebase would
+   * silently render opaque.
    *
-   * CRAFT RULES. Never `ease-in` on UI. Never `scale(0)` — entry is
-   * scale(0.97) + opacity 0. Exit runs ~20% faster than entry. Popovers scale
-   * from their transform-origin; modals stay centred. Stagger 30-80ms and
-   * never block interaction. Animate compositor-only properties: transform and
-   * opacity. `transition-all`, and any transition or animation on
-   * width/height/top/left/margin/padding, is a layout animation and is BANNED —
-   * use transform: scaleX() with transform-origin: 0.
-   * =================================================================== */
+   * These are ABSOLUTE VALUES and do not change between themes. What changes
+   * per theme is which STEP a surface reaches for — `bg-slate-50` in light,
+   * `dark:bg-slate-950` in dark. The semantic aliases further down (--ground,
+   * --surface, --ink…) are the theme-varying layer, and they exist for the
+   * handful of places a raw CSS rule needs a colour that follows the theme
+   * without a `dark:` variant to hang it on.
+   * ================================================================== */
   :root {
+    /* ---- GROUND, base hue 285 with a small torsion (-2 deg at the light end
+           to +4 at the dark). OKLab has a residual blue->purple drift as
+           lightness falls, and countering it is what makes the ramp read as
+           ONE family rather than as two ramps that meet in the middle.
+
+           CHROMA IS A VALLEY, not a peak: chroma is highest at BOTH surface
+           ends (0.025 at 975, 0.011 at 200) and near-zero through the text
+           steps (0.007 at 600). Chroma in grey TEXT is what reads muddy;
+           chroma in a dark SURFACE is what reads expensive. Getting that curve
+           the wrong way round is the single most common way a tinted neutral
+           ramp goes wrong.
+
+           Contrast is stated in tailwind.config.js and was generated, not
+           eyeballed. ---- */
+    --n-0: 1.000 0.000 283.0; /* #FFFFFF */
+    --n-50: 0.978 0.005 283.5; /* #F7F7FB */
+    --n-100: 0.945 0.008 283.9; /* #ECECF2 */
+    --n-200: 0.900 0.011 284.4; /* #DDDDE5 */
+    --n-300: 0.868 0.014 284.8; /* #D2D2DD */
+    --n-400: 0.788 0.012 285.3; /* #B9B9C1 */
+    --n-500: 0.515 0.008 285.8; /* #67676C */
+    --n-600: 0.395 0.007 286.2; /* #46464A */
+    --n-700: 0.330 0.008 286.7; /* #353539 */
+    --n-800: 0.302 0.013 287.2; /* #2E2D35 */
+    --n-850: 0.266 0.016 287.6; /* #25242D */
+    --n-900: 0.232 0.019 288.1; /* #1D1C26 */
+    --n-950: 0.190 0.022 288.5; /* #13121D */
+    --n-975: 0.160 0.025 289.0; /* #0D0B17 */
+
+    /* ---- HUE RAMPS. Chroma is a BELL peaking at 600 — the solid-fill and
+           primary-button step — and every value is clamped to 94% of the
+           maximum in-gamut chroma for its (L, H). That clamp is not a nicety:
+           Chrome and Safari gamut-map by CLIPPING CHANNELS rather than by the
+           CSS Color 4 chroma reduction, and a clipped colour comes back with a
+           shifted HUE. Handing the browser an out-of-gamut value is how one
+           step of a ramp silently ends up a different colour from the rest. ---- */
+
+    /* BRAND — indigo. 500 is the lightest fill that still holds white text. */
+    --b-50: 0.966 0.015 269.0; /* #EFF4FE */
+    --b-100: 0.940 0.027 269.4; /* #E4EBFE */
+    --b-200: 0.900 0.045 269.8; /* #D2DDFD */
+    --b-300: 0.868 0.061 270.2; /* #C4D2FD */
+    --b-400: 0.800 0.094 270.6; /* #A7BBFB */
+    --b-500: 0.575 0.209 271.0; /* #4F67F1 */
+    --b-600: 0.510 0.215 271.4; /* #404FDE */
+    --b-700: 0.440 0.189 271.8; /* #333EB8 */
+    --b-800: 0.370 0.159 272.2; /* #272F92 */
+    --b-900: 0.305 0.125 272.6; /* #1D236C */
+    --b-950: 0.240 0.099 273.0; /* #12164D */
+
+    /* ACCENT — cyan. Gradient terminus and lit edges. Never a control, and
+       never a status: it sits 42 deg from emerald, which is close enough that
+       giving it a MEANING would be a mistake, and far enough that it reads as
+       a different colour when it is only carrying light. */
+    --a-50: 0.966 0.015 203.0; /* #E9F7F8 */
+    --a-100: 0.940 0.027 203.4; /* #D7F1F3 */
+    --a-200: 0.900 0.045 203.8; /* #BCE7EC */
+    --a-300: 0.868 0.072 204.2; /* #9AE2E9 */
+    --a-400: 0.800 0.117 204.6; /* #4AD3E1 */
+    --a-500: 0.575 0.093 205.0; /* #1A8893 */
+    --a-600: 0.510 0.082 205.4; /* #14737D */
+    --a-700: 0.440 0.071 205.8; /* #0E5D66 */
+    --a-800: 0.370 0.060 206.2; /* #08494F */
+    --a-900: 0.305 0.050 206.6; /* #04363C */
+    --a-950: 0.240 0.040 207.0; /* #012429 */
+
+    /* SETTLED — emerald. "Funds arrived", and nothing else ever. */
+    --ok-50: 0.966 0.016 160.0; /* #EBF7F0 */
+    --ok-100: 0.940 0.029 160.4; /* #DBF2E5 */
+    --ok-200: 0.900 0.048 160.8; /* #C3E8D4 */
+    --ok-300: 0.868 0.077 161.2; /* #A7E4C4 */
+    --ok-400: 0.800 0.125 161.6; /* #6AD7A4 */
+    --ok-500: 0.575 0.119 162.0; /* #1A8E63 */
+    --ok-600: 0.510 0.105 162.4; /* #147854 */
+    --ok-700: 0.440 0.090 162.8; /* #0E6244 */
+    --ok-800: 0.370 0.076 163.2; /* #084C34 */
+    --ok-900: 0.305 0.063 163.6; /* #043926 */
+    --ok-950: 0.240 0.050 164.0; /* #012619 */
+
+    /* PENDING — amber, at hue 58-62. Pulled well off yellow on purpose: a
+       true yellow cannot reach the light-mode text threshold without going
+       brown, and this hue sits 100 deg from emerald and 33 from red, so the
+       three states stay separable for a red/green-blind operator too. */
+    --warn-50: 0.966 0.017 58.0; /* #FDF1E9 */
+    --warn-100: 0.940 0.030 58.4; /* #FBE7D8 */
+    --warn-200: 0.900 0.050 58.8; /* #F8D7BE */
+    --warn-300: 0.868 0.079 59.2; /* #FBC8A0 */
+    --warn-400: 0.800 0.129 59.6; /* #FAA964 */
+    --warn-500: 0.575 0.127 60.0; /* #AE6415 */
+    --warn-600: 0.510 0.113 60.4; /* #945410 */
+    --warn-700: 0.440 0.097 60.8; /* #78440A */
+    --warn-800: 0.370 0.082 61.2; /* #5E3405 */
+    --warn-900: 0.305 0.068 61.6; /* #472602 */
+    --warn-950: 0.240 0.055 62.0; /* #311800 */
+
+    /* FAILED — red. */
+    --bad-50: 0.966 0.016 25.0; /* #FEF0EE */
+    --bad-100: 0.940 0.028 25.4; /* #FEE4E2 */
+    --bad-200: 0.900 0.049 25.8; /* #FDD2CD */
+    --bad-300: 0.868 0.067 26.2; /* #FDC4BD */
+    --bad-400: 0.800 0.108 26.6; /* #FCA299 */
+    --bad-500: 0.575 0.209 27.0; /* #D92B2B */
+    --bad-600: 0.510 0.196 27.4; /* #BD181A */
+    --bad-700: 0.440 0.170 27.8; /* #9B1112 */
+    --bad-800: 0.370 0.143 28.2; /* #7A0A0A */
+    --bad-900: 0.305 0.119 28.6; /* #5D0504 */
+    --bad-950: 0.240 0.095 29.0; /* #420201 */
+
+    /* ---- CATEGORICAL SERIES. For chart dimensions that carry NO status
+           meaning — per asset, per network, per merchant. Ordered so adjacent
+           entries are far apart in BOTH hue and lightness, and deliberately
+           off every semantic hue, so a series can never be mistaken for a
+           state readout sitting beside it. This console is chart-heavy —
+           Dashboard, Analytics and Revenue all draw one — so these earn their
+           place here more than they do in the merchant panel.
+           components/Chart.tsx is the only thing that should reach for
+           them. ---- */
+    --s-teal-300: 0.868 0.072 186.2; /* #9CE4DB */
+    --s-teal-400: 0.800 0.117 186.6; /* #50D6CA */
+    --s-teal-600: 0.510 0.084 187.4; /* #14756E */
+    --s-fuchsia-300: 0.868 0.106 331.2; /* #FDBAF4 */
+    --s-fuchsia-400: 0.800 0.170 331.6; /* #FC91EF */
+    --s-fuchsia-600: 0.510 0.217 332.4; /* #A7179A */
+    --s-sky-300: 0.868 0.064 249.2; /* #B4D8FC */
+    --s-sky-700: 0.440 0.121 250.8; /* #0C5492 */
+
+    /* =================================================================
+     * DISPLAY FACE — one property, and the whole display bet reverts by
+     * editing this line. It points at the UI face on purpose: this design
+     * takes its presence from size, weight and tracking rather than from a
+     * second typeface. The fallback chain stays a GROTESQUE one, so a
+     * failed load degrades to something in the same key.
+     *
+     * Nothing in THIS panel sets type at display size — the marketing
+     * headline classes are not ported (see the note above the components
+     * layer) — but `font-display` is a utility the shared config generates,
+     * so the property it resolves has to exist here too.
+     * ============================================================== */
+    --font-display: 'Geist Variable', 'Inter Variable', system-ui, sans-serif;
+
+    /* =================================================================
+     * MOTION TOKENS.
+     *
+     * THE FREQUENCY BOUNDARY — how often a surface is seen decides how much
+     * it may move — is the law this whole file is written under, and THIS
+     * PANEL SITS ENTIRELY INSIDE ITS STRICTEST BAND. The merchant panel has
+     * three tiers: marketing routes seen once, which earn reveals and
+     * parallax; dashboard routes opened dozens of times a day; and checkout,
+     * which gets three animations because it is a stranger's money. The
+     * operator console has only the middle one. Every route here is a
+     * console route, so the hard budget is not a rule that applies to most
+     * of this app — it is the only rule there is:
+     *
+     *   nothing over 240ms, nothing travelling more than 8px, no page-level
+     *   entrance, no count-up on mount. A command palette opens INSTANTLY —
+     *   a keyboard-initiated action is never animated, because the user is
+     *   already ahead of it.
+     *
+     * THE DATA-DRIVEN LAW. Nothing animates on MOUNT; things animate when a
+     * value CHANGES. An operator refreshes this panel all day, and an
+     * entrance animation would be a tax charged once per visit, forever.
+     *
+     * ONE EXCEPTION IS GRANTED: the halo under a status dot that is still in
+     * flight (`.st-live`). It loops, on a console route, by design — it marks
+     * the rows an operator is actively waiting on, which is information
+     * rather than decoration. It travels nowhere and animates box-shadow only.
+     *
+     * CRAFT RULES. Never `ease-in` on UI. Never `scale(0)` — entry is
+     * scale(0.97) + opacity 0. Exit runs ~20% faster than entry. Popovers
+     * scale from their transform-origin; modals stay centred. Animate
+     * compositor-only properties. A width or height transition is a layout
+     * animation and is banned — use `transform: scaleX()` with
+     * `transform-origin: 0`.
+     * ============================================================== */
     --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
     --ease-set: cubic-bezier(0.16, 1, 0.3, 1); /* type settling into place */
     --ease-inout: cubic-bezier(0.77, 0, 0.175, 1); /* on-screen movement only */
+    /* The one overshoot in the system. Reserved for a control the operator
+       just pressed — never for anything carrying a number. */
+    --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 
     --dur-press: 120ms;
     --dur-pop: 180ms;
@@ -63,23 +269,132 @@
     --dur-morph: 320ms;
     --dur-set: 520ms;
     --dur-rule: 620ms;
+
+    /* =================================================================
+     * SEMANTIC SURFACES — the theme-varying layer.
+     *
+     * The ramp above is absolute; this is the part that flips. It exists for
+     * raw CSS rules that need a theme-aware colour with no `dark:` variant to
+     * hang it on: the ledger's opaque sticky ground, the rim highlight, the
+     * glass fill, the depth field.
+     *
+     * ELEVATION LADDER
+     *   light   50 page  ->  white surface  ->  100 inset  ->  200 hairline
+     *   dark   950 page  ->   900 surface   ->  850 raised ->  800 hairline
+     *
+     * `--rim` is the single most load-bearing value in the dark theme. It is
+     * the highlight a raised surface catches on its top edge, and it is what
+     * replaces the drop shadow as the depth cue — a shadow needs paper to fall
+     * on, and there is no paper here. This console read flat in dark mode for
+     * exactly that reason: every card was a slightly different grey rectangle
+     * with an invisible shadow under it.
+     *
+     * WHICH IS WHY THE SHADOWS ARE DECLARED HERE RATHER THAN IN THE CONFIG.
+     * The two themes do not want the same elevation model, and a single fixed
+     * value cannot serve both:
+     *
+     *   LIGHT elevates by CASTING. The stack is a hairline ring, a tight
+     *     contact shadow, an ambient one, and an inner glow — the last of
+     *     which is the layer everyone skips and the one that makes a card look
+     *     machined rather than drawn.
+     *   DARK elevates by LUMINANCE. The surface is simply lighter than the
+     *     page, and it catches a rim. The cast is cut to almost nothing:
+     *     a black shadow on a near-black ground is invisible where it is
+     *     subtle and muddy where it is not, and muddy shadows are most of why
+     *     a dark dashboard reads cheap.
+     * ============================================================== */
+    --ground: oklch(var(--n-50));
+    --surface: oklch(var(--n-0));
+    --surface-2: oklch(var(--n-100));
+    --line: oklch(var(--n-200));
+    --line-soft: oklch(var(--n-100));
+    --ink: oklch(var(--n-950));
+    --ink-2: oklch(var(--n-600));
+    --ink-3: oklch(var(--n-500));
+    --ink-4: oklch(var(--n-400));
+    --rim: oklch(var(--n-0) / 0.9);
+    --glass: oklch(var(--n-0) / 0.72);
+    --grid-ink: oklch(var(--n-950) / 0.05);
+    /* Hover band, shared by the ledger row, the nav item and the menu row so
+       there is exactly one hover language in the product. */
+    --hover: oklch(var(--n-950) / 0.045);
+
+    --shadow-soft:
+      0 0 0 1px oklch(var(--n-950) / 0.05),
+      0 1px 2px oklch(var(--n-950) / 0.05);
+    --shadow-lift:
+      0 0 0 1px oklch(var(--n-950) / 0.06),
+      0 2px 3px -1px oklch(var(--n-950) / 0.05),
+      0 10px 20px -10px oklch(var(--n-950) / 0.18),
+      inset 0 1px 0 oklch(var(--n-0) / 0.9);
+    --shadow-float:
+      0 0 0 1px oklch(var(--n-950) / 0.07),
+      0 8px 16px -6px oklch(var(--n-950) / 0.12),
+      0 24px 48px -20px oklch(var(--n-950) / 0.28),
+      inset 0 1px 0 oklch(var(--n-0) / 0.9);
+    --shadow-rim: inset 0 1px 0 oklch(var(--n-0) / 0.9);
   }
 
-  /* The app shell is a full-height flex column; this is load-bearing layout,
-     not styling, and predates the restyle. */
+  .dark {
+    --ground: oklch(var(--n-950));
+    --surface: oklch(var(--n-900));
+    --surface-2: oklch(var(--n-850));
+    --line: oklch(var(--n-800));
+    --line-soft: oklch(var(--n-850));
+    --ink: oklch(var(--n-50));
+    --ink-2: oklch(var(--n-300));
+    --ink-3: oklch(var(--n-400));
+    --ink-4: oklch(var(--n-500));
+    --rim: oklch(var(--n-0) / 0.11);
+    --glass: oklch(var(--n-900) / 0.66);
+    --grid-ink: oklch(var(--n-0) / 0.035);
+    --hover: oklch(var(--n-0) / 0.05);
+
+    --shadow-soft: inset 0 1px 0 oklch(var(--n-0) / 0.05);
+    --shadow-lift:
+      inset 0 1px 0 oklch(var(--n-0) / 0.07),
+      0 8px 24px -14px oklch(0 0 0 / 0.6);
+    --shadow-float:
+      inset 0 1px 0 oklch(var(--n-0) / 0.09),
+      0 20px 48px -20px oklch(0 0 0 / 0.75);
+    --shadow-rim: inset 0 1px 0 oklch(var(--n-0) / 0.07);
+  }
+
+  /* THE APP SHELL IS A FIXED-HEIGHT FLEX COLUMN, and that is load-bearing
+     layout rather than styling. Layout.tsx is `flex h-full` with `<main>` as
+     the only scroller, so the rail and the topbar stay put while a route
+     scrolls under them, and this chain is what gives that `h-full` something to
+     resolve against. It predates the restyle and survives it.
+
+     THE UNIT IS `dvh`, NOT `%`, AND NEVER `vh`. `height: 100%` on `html`
+     resolves against the LAYOUT viewport, which on mobile Safari is the tall
+     one that ignores the collapsing URL bar — so the shell was reliably taller
+     than the screen and the foot of the sidebar drawer sat behind the browser's
+     own chrome, where the last nav item could not be tapped. `100vh` has the
+     same defect and is banned product-wide for it. `dvh` tracks the viewport
+     that is actually visible.
+
+     The merchant panel expresses the same intent differently — `min-height:
+     100dvh` here and `h-dvh` on its own shell element — because its shell
+     scrolls the document rather than an inner pane. Same unit, same reason.
+
+     A browser too old for `dvh` drops these three declarations and falls back
+     to the `h-full` classes index.html puts on html, body and #root, which is
+     the previous behaviour rather than no behaviour. */
   html,
   body,
   #root {
-    height: 100%;
+    height: 100dvh;
   }
 
   html {
-    font-family: 'Inter Variable', Inter, system-ui, sans-serif;
+    font-family: 'Geist Variable', Geist, 'Inter Variable', system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
     /* Tell the BROWSER which theme is active, not just our own CSS. Without
-       this, an operator whose OS is dark but who picks the light theme in-app
-       gets UA-rendered controls (input fills, scrollbars, date pickers,
-       autofill) painted dark on our white cards. `color-scheme` is the only
+       this, an operator whose OS is dark but who selects the light theme in-app
+       gets UA-rendered controls — input fills, scrollbars, date pickers,
+       autofill — painted dark on our white surfaces. `color-scheme` is the only
        thing that reaches those. */
     color-scheme: light;
   }
@@ -88,212 +403,512 @@
   }
 
   body {
-    @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+    background-color: var(--ground);
+    color: var(--ink);
   }
 
-  /* Preflight resolves a bare `border` / `border-t` to borderColor.DEFAULT,
-     which has no dark variant — 17 call sites in this app rely on this rule to
-     get a sane stroke in both themes. Remapped, not removed. */
-  * {
-    @apply border-slate-200 dark:border-slate-800;
+  /* Preflight resolves a bare `border` / `border-t` to `borderColor.DEFAULT`,
+     which is Tailwind's own cool grey and has no dark variant. Call sites
+     across this console still lean on a bare border for a hairline, so the
+     default is remapped rather than removed.
+
+     `--line` rather than the `border-slate-200 dark:border-slate-800` pair this
+     rule used to carry: the two resolve to the same steps, but one custom
+     property follows the theme without needing a `dark:` variant, and it is the
+     same value every `.surface`, `.rule` and ledger row in this file reaches
+     for. One hairline colour, named once.
+
+     This has no counterpart in the merchant panel, which spells its borders out
+     at every call site. It is a deliberate divergence and it is about the code
+     that already exists here, not about the design.
+
+     `::before`/`::after` are included where the old rule covered only `*`.
+     Preflight sets the default on all three, so leaving the pseudo-elements out
+     left them on Tailwind's cool grey — a bug that only shows on a decorative
+     pseudo-element carrying a border, which is exactly the kind nobody looks
+     at twice. */
+  *,
+  *::before,
+  *::after {
+    border-color: var(--line);
   }
 
-  /* Thin, theme-aware scrollbars. Identical to the client panel, down to the
-     8px track — a chrome detail that differs between two windows of one product
-     is noticed even when nobody can say what changed. */
+  /* A selection that belongs to the palette rather than to the OS. */
+  ::selection {
+    background-color: oklch(var(--b-500) / 0.28);
+    color: var(--ink);
+  }
+
+  /* Thin, theme-aware scrollbars, identical to the merchant panel down to the
+     9px track. A chrome detail that differs between two windows of one product
+     is noticed even when nobody can say what changed. `scrollbar-color` takes
+     no utility, so the value is written out — but from the ramp's own custom
+     property, not as a copied literal, so it cannot go stale when the ramp is
+     retuned. The literal that used to sit here was Tailwind's COOL slate-400,
+     which is exactly the way it goes stale. */
   * {
     scrollbar-width: thin;
-    /* slate-400 as a literal, because scrollbar-color takes no utility. The
-       value that used to sit here was rgb(148 163 184), Tailwind's COOL
-       slate-400, which would have survived the remap and left a blue thumb
-       riding down every warm page. Kept in step with the ramp by hand. */
-    scrollbar-color: rgb(148 140 161 / 0.5) transparent;
+    scrollbar-color: oklch(var(--n-400) / 0.4) transparent;
   }
   *::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
-  *::-webkit-scrollbar-thumb {
-    @apply rounded-full bg-slate-300 dark:bg-slate-700;
+    width: 9px;
+    height: 9px;
   }
   *::-webkit-scrollbar-track {
     background: transparent;
   }
+  *::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background-color: oklch(var(--n-400) / 0.32);
+    /* Inset the thumb inside its track so it reads as a bar rather than as a
+       filled gutter. */
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: oklch(var(--n-400) / 0.55);
+  }
+
+  /* One focus treatment, defined once. Every control below inherits it rather
+     than spelling out its own ring — this file used to repeat
+     `focus-visible:ring-2 focus-visible:ring-offset-2` on five button classes,
+     which is how one of them ends up different. `:focus-visible`, never
+     `:focus`: a mouse click must not leave a ring behind, and a Tab must always
+     show one. */
+  :focus-visible {
+    outline: 2px solid oklch(var(--b-500));
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
 }
 
+/* ===========================================================================
+ * WHAT IS DELIBERATELY NOT HERE.
+ *
+ * The merchant panel's stylesheet carries a marketing layer — the landing page,
+ * pricing, the developer docs and the signup funnel all live in that app. THIS
+ * CONSOLE HAS NO PUBLIC SURFACE AT ALL: every route behind the login is a
+ * working screen an operator opens dozens of times a day. So the marketing
+ * classes are not ported, each verified to have zero call sites in src/ first:
+ *
+ *   .section .eyebrow .lede .h-display .h-section .figure-xl .band .col-aside
+ *   .chip .bg-mesh .bg-grid .aurora .marquee-mask .reveal .parallax-slow
+ *   .scroll-progress
+ *
+ * plus the `@supports (animation-timeline: view())` block and the cg-reveal /
+ * cg-parallax / cg-progress keyframes that only those last three used.
+ *
+ * `.eyebrow` needs a word, because it looks like a false negative: `eyebrow` IS
+ * all over this codebase, but as a PROP on PageHeader, which renders it through
+ * `.runhead`. Brand ink opens a section you are being SOLD; a running head
+ * names where you are. Only the latter belongs on a console.
+ *
+ * `.figure-label` is the one member of that list that stayed — Dashboard.tsx
+ * and Analytics.tsx caption a figure with it. Its sibling rule did not: the
+ * `.figure-xl + .figure-label` margin correction existed because Geist's digits
+ * do not descend and the marketing figure left dead space under its own
+ * baseline. `.figure-lg` is a different size and its spacing is already right,
+ * so there is nothing left for that rule to correct.
+ *
+ * AN ORPHANED `.reveal` IS NOT MERELY DEAD — it renders content INVISIBLE
+ * wherever scroll-driven animation is unsupported and the IntersectionObserver
+ * that clears it was never ported. That is the one on this list worth being
+ * glad about.
+ * ======================================================================== */
+
 @layer components {
-  /* The console's primary surface. Warm border and a soft shadow so cards read
-     as raised rather than as outlined rectangles — the border-only treatment is
-     why this panel looked flat in dark mode. */
-  .card {
-    @apply rounded-2xl border border-slate-200/90 bg-white shadow-soft
-           dark:border-slate-800 dark:bg-slate-900/70;
-    /* A faint brand wash, matching the merchant panel exactly. Pure white on
-       the plum ground read as an absence rather than as a surface. Felt as a
-       lift, never seen as a tint. */
-    background-image: linear-gradient(
-      180deg,
-      rgb(99 102 241 / 0.035),
-      rgb(99 102 241 / 0.012)
-    );
+  /* =====================================================================
+   * SIGNATURE 1 — THE RIM-LIT SURFACE.
+   *
+   * This is the primitive the whole product is now built from, and the single
+   * biggest reason the dark theme stopped reading flat.
+   *
+   * A drop shadow describes an object floating above PAPER. On a near-black
+   * ground there is no paper for it to fall on, so the outgoing dark theme was
+   * a set of slightly-different-grey rectangles with invisible shadows under
+   * them. What a real object does in a dark room is catch light on its top
+   * edge — so every surface here carries:
+   *
+   *   ::before  a soft top-down wash, so the surface is lighter where the
+   *             light hits it and settles into the ground below;
+   *   ::after   a 1px specular line across the top edge, faded at both ends so
+   *             it reads as a highlight rather than as a border.
+   *
+   * The cast shadow is still there and still does its job in light mode. The
+   * inset highlight is what makes the dark mode look built.
+   *
+   * `isolation: isolate` is load-bearing: ::before sits at z-index -1 so
+   * content stacks above it, and without a stacking context that -1 escapes
+   * the card and paints behind the PAGE, where it is invisible.
+   * ================================================================== */
+  .surface {
+    position: relative;
+    isolation: isolate;
+    background-color: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: theme('borderRadius.xl');
+    box-shadow: theme('boxShadow.lift');
   }
-  :is(.dark) .card {
-    background-image: linear-gradient(
-      180deg,
-      rgb(129 140 248 / 0.06),
-      rgb(129 140 248 / 0.02)
-    );
+  .surface::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    pointer-events: none;
+    background: linear-gradient(180deg, var(--rim), transparent 55%);
+    opacity: 0.5;
+  }
+  .surface::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    inset-inline: 14%;
+    height: 1px;
+    pointer-events: none;
+    background: linear-gradient(90deg, transparent, var(--rim), transparent);
   }
 
-  /* THE SIGNATURE RAIL — the brand -> accent gradient from the PayCrypo mark,
-     on the element that marks where you are. Navigation, not a state. */
-  .rail-brand {
-    @apply bg-gradient-to-b from-brand-500 to-brand-700;
+  /* `.card` is the OLD name for this and keeps the remaining call sites
+     working while the pages are converted. It is an alias, not a variant —
+     there is one surface treatment in this product and a second one would be
+     the beginning of a second design. What it REPLACES is worth naming: the
+     old `.card` painted a faint indigo wash over white with a hand-written
+     `linear-gradient`, which is the gesture `.surface::before` now performs
+     from the rim token instead. */
+  .card {
+    @apply surface;
   }
+
+  /* A surface that is INSET rather than raised: a code block, a well, the
+     ground under a raw webhook payload. No rim light, because light does not
+     catch on the top edge of a hole. */
+  .well {
+    background-color: var(--surface-2);
+    border: 1px solid var(--line-soft);
+    border-radius: theme('borderRadius.lg');
+  }
+
+  /**
+   * FROSTED CHROME — the topbar, the mobile dock, a popover over a busy page.
+   *
+   * THE PARAMETERS ARE THE WHOLE DIFFERENCE between this and a 2021 glass card,
+   * and they are all calibrated an order of magnitude below the defaults
+   * everyone reaches for:
+   *
+   *   fill        a tint, not milk. `rgba(255,255,255,0.2)` is the single
+   *               loudest tell; this sits under 0.08 in dark and leans on the
+   *               surface colour instead.
+   *   saturate()  the actual premium signal. Blur alone desaturates whatever is
+   *               behind it and reads grey and cheap; the saturation boost is
+   *               what makes it read as glass rather than as fog.
+   *   blur 16px   NOT 20+. Backdrop-filter cost scales with radius x area and
+   *               repaints its backdrop EVERY SCROLL FRAME. This console's
+   *               `<main>` is an inner scroller under a sticky topbar, so that
+   *               repaint happens on every wheel tick of every long ledger.
+   *               16px is the ceiling for an element this size, and the radius
+   *               below must stay above blur/2 or the corners look chewed.
+   *   rim         asymmetric — bright on the top edge, almost nothing at the
+   *               bottom. A uniform 1px white border all the way round is the
+   *               other 2021 tell.
+   *
+   * GLASS LIVES ON EXACTLY ONE Z-PLANE. Chrome gets it; cards and modals do
+   * not. Three glass planes stacked is both a performance problem (each is a
+   * compositing layer) and the thing that makes a design look like a demo.
+   * Budget: never more than 3-4 live in one viewport.
+   */
+  .glass {
+    background-color: var(--glass);
+    backdrop-filter: blur(16px) saturate(180%);
+    -webkit-backdrop-filter: blur(16px) saturate(180%);
+    border: 1px solid var(--line);
+    box-shadow:
+      inset 0 1px 0 var(--rim),
+      inset 0 -1px 0 oklch(var(--n-0) / 0.02);
+  }
+  /* The one honest fallback: no backdrop-filter means no translucency, so the
+     panel goes opaque rather than letting the page show through unblurred. */
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .glass {
+      background-color: var(--surface);
+    }
+  }
+  /* Radius must clear blur/2 — see above. */
+  .glass-card {
+    @apply glass rounded-2xl;
+  }
+
+  /* =====================================================================
+   * SIGNATURE 2 — THE SPOTLIGHT.
+   *
+   * A cursor-follow radial highlight, driven by two custom properties that a
+   * single delegated pointermove handler writes. Costs no layout work and no
+   * per-element listener, and it is what makes a dense surface feel physically
+   * lit rather than printed.
+   *
+   * THIS PANEL HAS NO SUCH HANDLER YET. The merchant panel ships
+   * lib/useSpotlight.ts and calls it once from its Layout; nothing here does,
+   * so until that lands `--mx`/`--my` keep their 50% defaults and a `.spot`
+   * surface lights from its centre on hover rather than under the pointer.
+   * That degrades to a plain hover glow rather than to nothing, which is why
+   * the class ships now instead of waiting.
+   *
+   * Deliberately BRAND-tinted and deliberately faint (0.10): it is light, not
+   * a highlight state, and it must never be mistaken for selection.
+   * ================================================================== */
+  .spot {
+    position: relative;
+    overflow: hidden;
+  }
+  .spot::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity var(--dur-menu) var(--ease-out);
+    background: radial-gradient(
+      18rem 18rem at var(--mx, 50%) var(--my, 50%),
+      oklch(var(--b-400) / 0.1),
+      transparent 70%
+    );
+  }
+  .spot:hover::after {
+    opacity: 1;
+  }
+  /* Anything the spotlight must not paint over. */
+  .spot > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  /* =====================================================================
+   * CONTROLS.
+   *
+   * Every control ships all six states: default, hover, focus, active,
+   * disabled, loading. The focus ring is inherited from the single
+   * `:focus-visible` rule in the base layer rather than respelled here.
+   * ================================================================== */
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-2 whitespace-nowrap
+           rounded-lg px-4 py-2.5 text-sm font-medium
+           transition-[transform,background-color,box-shadow,border-color,color]
+           duration-[var(--dur-press)] ease-[var(--ease-out)]
+           active:scale-[0.975] disabled:pointer-events-none disabled:opacity-45;
+    /* 44px is the touch-target floor and this is where it is enforced, once,
+       for every control in the console. This class carried NO min-height at
+       all and computed to about 40px, which is a miss with a thumb — and an
+       operator approving a merchant or releasing a payout from a phone is
+       exactly the case where a mis-tap is expensive. Desktop relaxes it to
+       38px at `sm`, where there is a pointer and vertical space is worth more
+       on a screen made of ledgers. */
+    min-height: 44px;
+  }
+  @media (min-width: 640px) {
+    .btn {
+      min-height: 38px;
+    }
+  }
+
+  /**
+   * THE PRIMARY CONTROL — a lit object.
+   *
+   * The fill is a 500 -> 600 gradient and may never reach 400: white text needs
+   * 4.5:1, and 500 (L 0.575) is the lightest step that still clears it at 4.60.
+   * The lift comes from three layers that are each doing a different job — an
+   * inset top highlight (the light catching the bevel), a hairline brand ring
+   * (the edge), and a coloured bloom beneath (the light it throws).
+   */
+  .btn-primary {
+    @apply btn relative overflow-hidden text-white
+           bg-gradient-to-b from-brand-500 to-brand-600
+           shadow-glow-brand hover:from-brand-400 hover:to-brand-500;
+  }
+  /* One pass of light across the face on hover. Not a loop — a loop on a
+     control is a distraction, and this reads as the surface catching the light
+     as the pointer arrives. */
+  .btn-primary::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    /* The rest state is on `transform`, NOT on `translate`. They are separate
+       properties and they COMPOSE — translate resolves first — so resting on
+       `translate: -120%` under a keyframe that animates `transform:
+       translateX(-120% -> 120%)` would sweep from -240% to 0% and finish
+       parked over the face of the button instead of clear of it. */
+    transform: translateX(-120%);
+    pointer-events: none;
+    background: linear-gradient(
+      105deg,
+      transparent 30%,
+      oklch(var(--n-0) / 0.26) 50%,
+      transparent 70%
+    );
+  }
+  .btn-primary:hover::after {
+    animation: theme('animation.sheen');
+  }
+
+  .btn-secondary {
+    @apply btn border text-slate-700 dark:text-slate-200;
+    background-color: var(--surface);
+    border-color: var(--line);
+    box-shadow: theme('boxShadow.soft');
+  }
+  .btn-secondary:hover {
+    border-color: oklch(var(--b-400) / 0.5);
+    color: var(--ink);
+  }
+
+  .btn-ghost {
+    @apply btn text-slate-600 dark:text-slate-400;
+  }
+  .btn-ghost:hover {
+    background-color: var(--hover);
+    color: var(--ink);
+  }
+
+  /* Destructive. Red is a WARNING about the action, which is the same meaning
+     red carries on a failed payment — consistent, not a collision. On this
+     panel it is also the ink for the genuinely dangerous operator verbs:
+     suspending a merchant, rotating live API keys. */
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-500;
+    box-shadow:
+      0 0 0 1px oklch(var(--bad-400) / 0.4),
+      0 6px 20px -8px oklch(var(--bad-500) / 0.7);
+  }
+
+  .btn-lg {
+    @apply btn rounded-xl px-6 py-3 text-base;
+    min-height: 48px;
+  }
+  .btn-primary-lg {
+    @apply btn-primary;
+    border-radius: theme('borderRadius.xl');
+    padding: 0.75rem 1.5rem;
+    font-size: 1rem;
+    min-height: 48px;
+  }
+  .btn-secondary-lg {
+    @apply btn-secondary;
+    border-radius: theme('borderRadius.xl');
+    padding: 0.75rem 1.5rem;
+    font-size: 1rem;
+    min-height: 48px;
+  }
+
+  /**
+   * THE FIELD. A filled input rather than an outlined one: on the near-black
+   * ground an outlined box is four hairlines enclosing nothing, while a fill
+   * one step off the surface reads as a place to put something. The focus
+   * state adds the brand ring the rest of the product uses.
+   */
   .input {
-    @apply w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-soft outline-none transition placeholder:text-slate-400 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-100 dark:placeholder:text-slate-500;
+    @apply w-full rounded-lg px-3.5 py-2.5 text-sm text-slate-900 outline-none
+           transition-[border-color,box-shadow,background-color]
+           duration-[var(--dur-press)] ease-[var(--ease-out)]
+           placeholder:text-slate-400 dark:text-slate-100;
+    /* 16px, NOT 14, below `sm` — and this is a functional rule, not a
+       typographic preference. iOS Safari zooms the whole viewport whenever a
+       focused input is under 16px and does NOT zoom back out afterwards, so an
+       operator who taps a filter field on a phone is left on a page they have
+       to pinch their way out of. This class carried `text-sm` and no
+       min-height, so it hit every field on the console: the login form, every
+       filter bar, the commission tier editor, all thirteen selects. 44px
+       min-height for the same reason the buttons carry it. */
+    font-size: 16px;
+    min-height: 44px;
+    background-color: var(--surface-2);
+    border: 1px solid var(--line);
+  }
+  @media (min-width: 640px) {
+    .input {
+      font-size: 0.875rem;
+      min-height: 38px;
+    }
+  }
+  .input:hover:not(:disabled) {
+    border-color: oklch(var(--n-400) / 0.6);
+  }
+  .input:focus {
+    border-color: oklch(var(--b-500));
+    background-color: var(--surface);
+    box-shadow: 0 0 0 4px oklch(var(--b-500) / 0.16);
+  }
+  .input:disabled {
+    @apply cursor-not-allowed opacity-55;
   }
   .label {
     @apply mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300;
   }
 
-  /* Every control ships all six states: default, hover, focus, active,
-     disabled, loading. The ring is `focus-visible`, not `focus` — a mouse
-     click should not leave a ring behind, but a Tab must always show one. */
-  .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition duration-150 outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 active:scale-[0.98] dark:focus-visible:ring-offset-slate-900;
-  }
-  .btn-primary {
-    @apply btn bg-brand-600 text-white shadow-soft hover:bg-brand-700 hover:shadow-lift focus-visible:ring-brand-500;
-  }
-  .btn-secondary {
-    @apply btn border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 focus-visible:ring-brand-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700;
-  }
-  .btn-ghost {
-    @apply btn text-slate-600 hover:bg-slate-100 focus-visible:ring-brand-500 dark:text-slate-300 dark:hover:bg-slate-800;
-  }
-  /* Destructive. Red here is a WARNING about the action, which is the same
-     meaning red carries on a failed payment — consistent, not a collision. */
-  .btn-danger {
-    @apply btn bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-500;
-  }
-
-  /* Money and any figure read down a column. Tabular numerals hold digits at a
-     fixed width so amounts line up vertically instead of jittering row to row.
-     Money is always set with this — never a bare float. */
-  .num {
-    @apply tabular-nums;
-  }
-
-  /* Inline code inside prose — an identifier, header, address or literal the
-     reader may need to type or match exactly. Slate rather than brand: it is a
-     noun, not something you can click. */
-  .code {
-    @apply rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11.5px] text-slate-800
-           dark:bg-slate-800 dark:text-slate-200;
-  }
-
-  /* ===================================================================
-   * DELETED HERE, DELIBERATELY: `.card-hover`, `.section-label`, `.tile` and
-   * `.skeleton`.
+  /* =====================================================================
+   * TYPE.
    *
-   * All four were residue of the boxed idiom this console was converted OUT of,
-   * and all four had zero call sites left in src/ — the conversion replaced the
-   * bento grid with ruled columns (`.rule` + `.runhead` + Editorial's `Figure`)
-   * and the sweeping placeholder with Editorial's static `Ghost`.
-   *
-   * `.skeleton` was the one that actually mattered: it ran `animate-shimmer`,
-   * an INFINITE loop, and every route in this app is a console route, so there
-   * was nowhere it could ever legally be used. Leaving it defined was an
-   * invitation to reintroduce a banned loop. Editorial.tsx already documents
-   * why the replacement is static; that note is now the only copy.
-   *
-   * Nothing referenced them, so removing them also drops the shimmer keyframes
-   * from the built stylesheet.
-   * =================================================================== */
+   * The display sizes are not here — see the note above this layer. What a
+   * console needs is the working end of the scale: a running head that names a
+   * block, a measure that keeps a paragraph readable, and one figure size that
+   * can carry a number without costing a row of data.
+   * ================================================================== */
 
-  /* ===================================================================
-   * BROADSHEET LAYER
-   * The editorial primitives, ported from the client panel so the operator
-   * console is set in the same idiom as the rest of the product.
-   *
-   *   RULES, NOT BOXES         a hairline divides content; a card is the
-   *                            exception, not the default
-   *   A MEASURE, NOT PADDING   body copy sits on a real reading measure,
-   *                            ranged left, rather than centred in a box
-   *   RUNNING HEADS            every band is labelled like a newspaper section
-   *   ASYMMETRY                a narrow margin column against a wide main one
-   *   ONE ENORMOUS FIGURE      the one number worth stating anchors the section
-   *
-   * BUT THIS IS NOT THE MARKETING SITE. It is a working surface an operator
-   * opens dozens of times a day. Editorial STRUCTURE yes — rules, running
-   * heads, real figures, restraint. Editorial THEATRE no: no giant heroes, no
-   * scroll choreography, no decorative whitespace that costs a row of data.
-   * Density and scanability win every tie on these routes. That is why the
-   * marketing primitives (.reveal, .parallax-slow, .aurora, the marquee and the
-   * mesh) are NOT ported — an orphaned .reveal renders content INVISIBLE where
-   * scroll-driven animation is unsupported, and nothing on this surface earns
-   * that risk.
-   * =================================================================== */
-
-  /* The workhorse. A hairline is how a newspaper separates two ideas — it costs
-     one pixel and no enclosure, where a card costs a border, a radius, a shadow
-     and 24px of padding on all four sides to say the same thing. On a dense
-     console that padding is a row of data. Works on a bare <div> and on an
-     <hr>: preflight has already zeroed the other three edges. */
-  .rule {
-    @apply border-t border-slate-200 dark:border-slate-800;
-  }
-  /* The heavier stroke that OPENS a section, not one that divides within it.
-     Ink rather than the hairline grey, because this is a masthead gesture: it
-     should read at a glance from across the page. Use it once per section. */
-  .rule-strong {
-    @apply border-t-2 border-slate-900 dark:border-slate-100;
+  /**
+   * THE RUNNING HEAD. Small, letter-spaced, quiet — it names the block without
+   * competing with what is in it. Slate rather than brand, deliberately: brand
+   * is reserved for things you can act on, and this labels. It is the most-used
+   * class in this app by some distance, and PageHeader's `eyebrow` prop renders
+   * through it.
+   */
+  .runhead {
+    @apply block text-[10.5px] font-semibold uppercase tracking-[0.16em]
+           text-slate-500 dark:text-slate-400;
   }
 
-  /* THE READING MEASURE. Line length, not font size, is what decides whether a
-     paragraph gets read: past roughly 75 characters the eye loses the return
-     sweep and starts re-reading lines. 62ch is the comfortable centre of that
-     range. Ranged left and explicitly so — centred body copy ragged on both
-     sides is the single loudest tell of a template. */
+  /**
+   * THE READING MEASURE. Line length, not font size, decides whether a
+   * paragraph gets read: past ~75 characters the eye loses the return sweep
+   * and starts re-reading lines. Ranged left and explicitly so — body copy
+   * centred and ragged on both sides is the loudest tell of a template. On a
+   * 1400px console this is what stops an empty-state explanation running the
+   * full width of the window, where it is skipped rather than read.
+   */
   .measure {
     max-width: 62ch;
     text-align: left;
     text-wrap: pretty;
   }
-  /* Wider measure for an intro or a standfirst, read in one gulp rather than
-     paragraph by paragraph, which can carry the longer line. */
   .measure-wide {
     max-width: 78ch;
     text-align: left;
     text-wrap: pretty;
   }
 
-  /* THE RUNNING HEAD. Small, quiet, letter-spaced — it tells you which section
-     of the paper you are in without competing with the heading for the eye.
-     Usually sat above a .rule or alone in the .col-aside margin.
-     Deliberately slate, not brand: brand is reserved for things you can
-     actually click. */
-  .runhead {
-    @apply block text-xs font-medium uppercase tracking-[0.18em]
-           text-slate-500 dark:text-slate-400;
-  }
-
-  /* ONE ENORMOUS FIGURE PER SECTION — and on this surface, read that as a hard
-     ceiling rather than an invitation. Platform volume, an unreconciled
-     balance, a queue depth: set the ONE number a screen exists to answer at
-     display size and let it carry the composition, rather than filing it into a
-     row of identical stat cards where every number is the same size and
-     therefore none of them is the point. A second .figure-xl on the same screen
-     is theatre and costs a row of data.
-     Tabular, lining figures: these are read as quantities, and proportional
-     digits make a big number look hand-set at the wrong widths. */
-  .figure-xl {
-    font-size: clamp(3.25rem, 1.75rem + 6vw, 7.5rem);
-    line-height: 0.88;
-    letter-spacing: -0.045em;
-    font-weight: 640;
-    font-optical-sizing: auto;
+  /**
+   * THE WORKING FIGURE — the one figure size this panel has.
+   *
+   * Platform volume, an unreconciled balance, a queue depth: the number a
+   * screen exists to answer, set large enough to be the point and small enough
+   * that four fit across a stat strip without costing a row of data. The
+   * merchant panel also ships a `.figure-xl` that clamps to 7.5rem; that is a
+   * marketing gesture and it is not ported, because on a console a single
+   * number at 120px costs a whole band of ledger.
+   *
+   * Tabular LINING figures, because these are quantities read down a column
+   * and proportional digits make a big number look hand-set at the wrong
+   * widths.
+   *
+   * DO NOT PUT A `text-*` UTILITY ON THIS. The clamp is a component-layer rule
+   * and a utility wins the cascade, which pins the figure to one size at every
+   * width — a real bug in the outgoing code, and the reason a balance
+   * truncated on a phone.
+   */
+  .figure-lg {
+    font-size: clamp(1.625rem, 1.25rem + 1.1vw, 2.125rem);
+    line-height: 1;
+    letter-spacing: -0.04em;
+    font-weight: 620;
     @apply block tabular-nums lining-nums text-slate-900 dark:text-slate-50;
   }
   /* The caption that says what the figure counts. It has to be small: the
@@ -304,89 +919,546 @@
     @apply mt-3 block text-sm leading-snug text-slate-500 dark:text-slate-400;
   }
 
-  /* A BAND: full-width, opened by a rule, with its own vertical rhythm. The
-     editorial replacement for a card grid — stack bands down a page and it is
-     divided by strokes and space instead of by a dozen rounded boxes.
-
-     Rule on TOP only, so consecutive bands never double up and the last one
-     doesn't leave a stroke hanging under the page. IT DRAWS ITS OWN RULE:
-     pairing .band with a sibling .rule gives you two strokes.
-
-     The padding is the marketing rhythm and is generous for a console; on a
-     dense route override it with a py-* utility rather than reaching for a
-     second band class. */
-  .band {
-    @apply w-full border-t border-slate-200 py-12 sm:py-16 dark:border-slate-800;
+  /**
+   * A gradient fill for the one figure or phrase a block is built around.
+   * Travels brand -> accent (indigo -> cyan) and must NEVER reach green: on a
+   * payments surface green is reserved for "funds arrived".
+   *
+   * `!text-transparent` is load-bearing rather than lazy. These are worn
+   * alongside a figure class that sets its own ink and is defined earlier in
+   * this same layer — without the important flag the figure's opaque glyph
+   * wins the cascade, gets painted over the clipped gradient, and the whole
+   * thing silently renders as plain near-black.
+   *
+   * `in oklab` is not decoration. Tailwind 3's `bg-gradient-to-*` sets NO
+   * interpolation space, so it interpolates in sRGB — and sRGB interpolation
+   * between two saturated hues 66 degrees apart passes through a desaturated
+   * grey trough in the middle, a visible dead band right where the eye lands.
+   * Written out rather than composed from utilities because the space cannot
+   * be expressed as one.
+   */
+  .text-gradient,
+  .figure-accent {
+    background-image: linear-gradient(
+      135deg in oklab,
+      oklch(var(--b-600)),
+      oklch(var(--b-500)) 45%,
+      oklch(var(--a-600))
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent !important;
+  }
+  .dark .text-gradient,
+  .dark .figure-accent {
+    background-image: linear-gradient(
+      135deg in oklab,
+      oklch(var(--b-300)),
+      oklch(var(--b-400)) 45%,
+      oklch(var(--a-400))
+    );
   }
 
-  /* The narrow margin column of the asymmetric grid — running head, timestamp,
-     a one-line gloss on what the main column is doing. Assumes a 12-column
-     grid; the span is a default and a utility on the element overrides it,
-     since utilities win over components. Quiet by design: this column annotates
-     the main one, it does not compete with it. */
-  .col-aside {
-    @apply text-sm leading-relaxed text-slate-500 md:col-span-3 dark:text-slate-400;
+  /* Money and any figure read down a column. Tabular numerals keep digits at a
+     fixed width so amounts line up instead of jittering. Money is always set
+     with this — never a bare float. */
+  .num {
+    @apply tabular-nums lining-nums;
   }
 
-  /* A link inside body copy. Ink text with a 1px brand underline sat 3px off
-     the baseline, so descenders stay legible and the link reads as part of the
-     sentence rather than as a coloured interruption of it.
-     THIS is the sanctioned decorative use of brand: an underline, drawn on
-     something you can genuinely click. Never a fill, never a heading, and never
-     to indicate state. */
+  /* Inline code inside prose — an identifier, header, address or literal the
+     reader may need to type or match exactly. Slate rather than brand: it is a
+     noun, not something you can click. */
+  .code {
+    @apply rounded px-1.5 py-0.5 font-mono text-[11.5px] text-slate-800 dark:text-slate-200;
+    background-color: var(--surface-2);
+    border: 1px solid var(--line-soft);
+  }
+
+  /* A link inside body copy. Ink text with a brand underline sat off the
+     baseline, so descenders stay legible and the link reads as part of the
+     sentence rather than as a coloured interruption of it. THIS is the
+     sanctioned decorative use of brand: an underline, on something you can
+     genuinely click. Never a fill, never a heading, and never to indicate
+     state. */
   .link-ink {
-    @apply text-slate-900 underline decoration-brand-600 decoration-1 underline-offset-[3px]
-           outline-none hover:decoration-brand-700 focus-visible:rounded-sm
-           focus-visible:ring-2 focus-visible:ring-brand-500
-           dark:text-slate-100 dark:decoration-brand-400 dark:hover:decoration-brand-300;
+    @apply rounded-sm text-slate-900 underline decoration-brand-500 decoration-1
+           underline-offset-[3px] transition-colors duration-[var(--dur-press)]
+           hover:decoration-brand-400 dark:text-slate-100 dark:decoration-brand-400
+           dark:hover:decoration-brand-300;
   }
 
-  /* ===================================================================
-   * SEMANTIC COLOUR — meaning, never decoration.
+  /* =====================================================================
+   * RULES. A hairline still divides content inside a surface — what changed
+   * is that a rule is no longer the product's primary structural device.
+   * Surfaces carry structure now; rules divide WITHIN one.
    *
-   *   brand (indigo)  the action you can take
-   *   emerald         money arrived / verified / healthy
-   *   amber           waiting on someone or something
-   *   red             money failed, or you are about to lose something
-   *   slate           everything else
-   *
-   * Colour is never the ONLY carrier of meaning — every status also ships a
-   * word, and a badge adds a dot for shape. Do not add a per-card accent hue.
-   * =================================================================== */
+   * That is the specific thing this console was converted OUT of: it was a
+   * stack of ruled bands printed straight onto the page, which gives the eye
+   * no target because every heading has the same status as every other. If a
+   * `.rule`-divided band is still doing STRUCTURAL work anywhere, it wants to
+   * be a `.surface` instead.
+   * ================================================================== */
+  .rule {
+    border-top: 1px solid var(--line);
+  }
+  .rule-b {
+    border-bottom: 1px solid var(--line);
+  }
+  /* The heavier stroke that OPENS a section. Brand-tinted rather than ink: on
+     a dark ground an ink rule is invisible and a white one is a scar. The
+     outgoing version was `border-slate-900 dark:border-slate-100`, which is
+     precisely the scar. */
+  .rule-strong {
+    border-top: 2px solid transparent;
+    border-image: linear-gradient(
+        90deg,
+        oklch(var(--b-500)),
+        oklch(var(--a-400)),
+        transparent 70%
+      )
+      1;
+  }
+  .rule-b-strong {
+    border-bottom: 2px solid transparent;
+    border-image: linear-gradient(
+        90deg,
+        oklch(var(--b-500)),
+        oklch(var(--a-400)),
+        transparent 70%
+      )
+      1;
+  }
 
-  /* Money that came in, money that went out, money that failed. Each pairs with
-     `.num` so columns of figures stay aligned. */
+  /* =====================================================================
+   * SIGNATURE 3 — THE STATUS LOZENGE.
+   *
+   * The outgoing system set a status as a bare word and a dot, which was
+   * right for a page made of hairlines and wrong for one made of surfaces: on
+   * a lit card a bare word reads as a label, not as a state.
+   *
+   * This is a tinted lozenge with a LIT dot — the dot carries a halo mixed
+   * from its own colour, so it reads as a small light source rather than as a
+   * bullet. Three carriers, none of them colour alone:
+   *   the WORD           always present, and it is what you actually read
+   *   the SHAPE          `.st-live` pulses; terminal states are static
+   *   the COLOUR         confirms the other two
+   *
+   * `color-mix` against `currentColor` is what lets one rule serve every tone:
+   * the tone class sets `color`, and the fill, the ring and the halo all
+   * derive from it.
+   * ================================================================== */
+  .st {
+    @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full
+           py-[3px] pl-[7px] pr-[9px] text-[11px] font-semibold uppercase
+           tracking-[0.07em];
+    background-color: color-mix(in oklab, currentColor 12%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, currentColor 18%, transparent);
+  }
+  .st-dot {
+    @apply h-1.5 w-1.5 shrink-0 rounded-full bg-current;
+    box-shadow: 0 0 0 3px color-mix(in oklab, currentColor 22%, transparent);
+  }
+  /* IN FLIGHT. The one loop this design permits on a console route: it marks
+     the rows an operator is actively waiting on — a payout still broadcasting,
+     a webhook still retrying — which is information. It travels nowhere and
+     animates box-shadow only, so it cannot reflow. */
+  .st-live .st-dot {
+    animation: theme('animation.halo');
+  }
+
+  /* =====================================================================
+   * THE LOADING PLACEHOLDER, and deliberately STATIC.
+   *
+   * This app's ancestor ran `animate-shimmer`, an INFINITE loop, on a
+   * `.skeleton` class. Every route here is a console route, so there was
+   * nowhere it could ever legally be used; it was deleted, and the keyframe
+   * went with it when this file was ported. An operator who opens Transactions
+   * forty times a day should not be shown forty light sweeps. Shape and a
+   * stepped opacity say "not loaded yet" perfectly well without motion.
+   *
+   * `color-mix` against `--ink` rather than a slate step, so one rule covers
+   * both themes and the placeholder is always a fixed distance from whatever
+   * surface it sits on.
+   * ================================================================== */
+  .ghost {
+    @apply block rounded;
+    background-color: color-mix(in oklab, var(--ink) 10%, transparent);
+  }
+
+  /* =====================================================================
+   * THE SPINE — a key/value list as ruled rows. Label ranged left, value
+   * ranged right against the same rule. This is what the detail views are
+   * built from: a merchant record, a payout, a wallet, a webhook attempt.
+   * It is the one place a rule is still the right primitive, because these
+   * rows are a list INSIDE a surface rather than a structure of their own.
+   * ================================================================== */
+  .spine-row {
+    @apply flex items-baseline justify-between gap-4 py-2.5;
+    border-top: 1px solid var(--line-soft);
+  }
+  .spine-label {
+    @apply shrink-0 text-sm text-slate-500 dark:text-slate-400;
+  }
+  .spine-value {
+    @apply min-w-0 text-right text-sm text-slate-900 dark:text-slate-100;
+  }
+
+  /* The signature rail: brand -> accent, on the one element that marks where
+     you are. Brand is correct here and is not a state — it is navigation.
+     The gradient now travels to accent rather than to brand-700, matching the
+     merchant panel, and it throws a glow so the mark reads as lit on the dark
+     ground instead of as a painted stripe. */
+  .rail-brand {
+    @apply bg-gradient-to-b from-brand-400 to-accent-400;
+    box-shadow: 0 0 12px oklch(var(--b-400) / 0.8);
+  }
+
+  /* =====================================================================
+   * THE LEDGER — the table primitive DataTable renders through.
+   *
+   * This console is mostly tables: transactions, merchants, payouts,
+   * commissions, wallet balances, webhook deliveries. None of these classes
+   * existed here before — DataTable hand-rolled its own `<table>` with a
+   * `border-separate` and a stack of utilities, and every page that wanted a
+   * table repeated a slightly different version of it.
+   *
+   * `--ledger-ground` is the opaque fill the sticky header and any frozen
+   * column need in order to hide the rows travelling under them, and it has to
+   * match whatever the table was placed on. One custom property resolves it,
+   * so no page has to pass a prop and neither placement can go wrong.
+   * ================================================================== */
+  :root {
+    --ledger-ground: var(--ground);
+    --ledger-edge: oklch(var(--n-950) / 0.14);
+  }
+  .dark {
+    /* A black edge shadow is invisible on the dark ground — it has to be
+       light. */
+    --ledger-edge: oklch(var(--n-0) / 0.12);
+  }
+  .surface,
+  .card,
+  .glass {
+    --ledger-ground: var(--surface);
+  }
+
+  /* The scroller, with CSS-only scroll shadows: two "cover" layers pinned to
+     the CONTENT (background-attachment: local) sit over two shadow layers
+     pinned to the ELEMENT, so an edge shadow appears only on the side that
+     actually has more table to reach. No JS, no scroll listener.
+
+     ABOUT THE STICKY HEADER — measured, not assumed. An element that scrolls
+     horizontally is ALWAYS a vertical scroll container too: `overflow-x: auto`
+     coerces a `visible` overflow-y to `auto` (CSS Overflow 3 §3.2). So a
+     `position: sticky` header inside this element resolves against THIS box,
+     not against the page — and if this box has no height limit it never
+     scrolls, so the header sticks to nothing and silently does nothing at all.
+     DataTable's `maxHeight` prop is what gives it that height, and it is the
+     one way to get a working sticky header here. */
+  .ledger-scroll {
+    overflow: auto;
+    overscroll-behavior-x: contain;
+    background-image:
+      linear-gradient(to right, var(--ledger-ground) 40%, transparent),
+      linear-gradient(to left, var(--ledger-ground) 40%, transparent),
+      linear-gradient(to right, var(--ledger-edge), transparent),
+      linear-gradient(to left, var(--ledger-edge), transparent);
+    background-position:
+      0 0,
+      100% 0,
+      0 0,
+      100% 0;
+    background-repeat: no-repeat;
+    background-size:
+      32px 100%,
+      32px 100%,
+      16px 100%,
+      16px 100%;
+    background-attachment: local, local, scroll, scroll;
+  }
+
+  /* `border-separate` rather than `collapse`: under `collapse` a browser is
+     free to ignore backgrounds and box-shadows on cells, which is exactly what
+     a sticky column and a hover band need.
+
+     EVERY structural selector below is wrapped in `:where()`, which contributes
+     ZERO specificity. Without it `.ledger > tbody > tr > td` scores (0,1,3) and
+     quietly outranks every utility a page puts on a cell — a column asking for
+     `py-2` or `text-slate-500` would be silently ignored, which is a miserable
+     thing to debug. At (0,1,0) the utilities win on source order, as intended. */
+  .ledger {
+    @apply w-full border-separate text-[13px] text-slate-700 dark:text-slate-300;
+    border-spacing: 0;
+  }
+
+  /* The header, as a running head over the ledger's own rule. Sticky is
+     declared per CELL, not on the row — `position: sticky` on a `<tr>` is
+     still not honoured everywhere. */
+  /* `whitespace-normal` below `sm`, and it is the single highest-leverage
+     table fix in this panel: uppercase + wide tracking + nowrap is what
+     actually sets a ledger's minimum width, and it is why the operator tables
+     dragged sideways on a phone even when their columns would otherwise have
+     fit. The outgoing header was `text-xs` at `tracking-[0.18em]` and
+     `whitespace-nowrap` — wider tracking than the merchant panel's, on the
+     panel with more columns. Above `sm` the header goes back to one line,
+     where there is room for it. */
+  .ledger :where(thead th) {
+    @apply sticky top-0 z-10 whitespace-normal px-3.5 py-2.5 text-left align-middle
+           text-[10.5px] font-semibold uppercase tracking-[0.14em]
+           text-slate-500 sm:whitespace-nowrap dark:text-slate-400;
+    background-color: var(--ledger-ground);
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* Rows. The rule falls BETWEEN rows only — never under the last one, which
+     would leave a stroke hanging under the table, and never above the first,
+     which would double the header's rule. */
+  .ledger :where(tbody td) {
+    @apply px-3.5 py-3 align-middle;
+  }
+  .ledger :where(tbody tr + tr td) {
+    border-top: 1px solid var(--line-soft);
+  }
+
+  /* A clickable row. The tint is set through a custom property as well as
+     directly, so a frozen first column — which must carry its own opaque fill
+     — picks up the same band instead of punching a hole in it. Colour only,
+     120ms: inside the frequency budget, and nothing travels. */
+  .ledger-row {
+    transition: background-color var(--dur-press) var(--ease-out);
+  }
+  .ledger-row-click {
+    @apply cursor-pointer;
+  }
+  .ledger-row-click:hover,
+  .ledger-row-click:focus-visible {
+    background-color: oklch(var(--b-500) / 0.07);
+    --ledger-cell: color-mix(in oklab, oklch(var(--b-500) / 0.07), var(--ledger-ground));
+  }
+
+  /* Frozen identifying column, for a table wider than the viewport. Opt-in per
+     table — it costs an opaque fill, which is only correct where column one is
+     the thing you scroll sideways to keep looking at. On this panel that is
+     usually the merchant name or the transaction id. */
+  .ledger-freeze {
+    position: sticky;
+    left: 0;
+    z-index: 5;
+    background-color: var(--ledger-cell, var(--ledger-ground));
+  }
+  .ledger :where(thead) th.ledger-freeze {
+    z-index: 11;
+  }
+
+  /* =====================================================================
+   * NAVIGATION.
+   *
+   * The active item is marked THREE ways — a lit rail in the margin, a brand
+   * wash behind the row, and `aria-current="page"`, which NavLink sets for us.
+   * Colour is never the only carrier.
+   *
+   * A NOTE FOR WHOEVER CONVERTS Sidebar.tsx: `.nav-item` is currently dead CSS
+   * in this panel, because the nav row spells out its own utilities and never
+   * applies the class. That is also how its touch target ended up at ~36px.
+   * ================================================================== */
+  .nav-item {
+    @apply relative flex items-center gap-3 rounded-lg px-3 py-2 text-[13.5px]
+           font-normal text-slate-600 transition-colors duration-[var(--dur-press)]
+           ease-[var(--ease-out)] dark:text-slate-400;
+    min-height: 38px;
+  }
+  .nav-item:hover {
+    background-color: var(--hover);
+    @apply text-slate-900 dark:text-slate-100;
+  }
+  .nav-item-on {
+    @apply font-medium text-slate-900 dark:text-slate-50;
+    background: linear-gradient(
+      90deg,
+      oklch(var(--b-500) / 0.18),
+      oklch(var(--b-500) / 0.04)
+    );
+    box-shadow: inset 0 0 0 1px oklch(var(--b-400) / 0.2);
+  }
+
+  /* THE MOBILE DOCK — a floating pill of primary destinations, the way a
+     native app does it. Sits above the home indicator via the safe-area inset,
+     which is the whole reason a fixed bottom bar is usually wrong on iOS, and
+     which only resolves at all because index.html now carries
+     `viewport-fit=cover`.
+
+     This panel has no dock yet — its mobile nav is a drawer behind a hamburger.
+     The class ships so that adding one is a component, not a stylesheet
+     negotiation, and so the two panels cannot drift if it does land. */
+  .dock {
+    @apply glass fixed left-1/2 z-40 flex items-center gap-1 rounded-full p-1.5
+           shadow-float lg:hidden;
+    translate: -50% 0;
+    bottom: calc(0.75rem + env(safe-area-inset-bottom));
+  }
+  .dock-item {
+    @apply grid min-w-[3.75rem] justify-items-center gap-1 rounded-full px-3.5 py-2
+           text-[10.5px] font-medium text-slate-500 transition-colors
+           duration-[var(--dur-press)] dark:text-slate-400;
+  }
+  .dock-item-on {
+    @apply text-white;
+    background: linear-gradient(180deg, oklch(var(--b-500)), oklch(var(--b-600)));
+    box-shadow: 0 4px 14px -4px oklch(var(--b-500) / 0.9);
+  }
+
+  /* =====================================================================
+   * SEMANTIC AMOUNTS — meaning, never decoration.
+   *
+   *   brand    the action you can take
+   *   emerald  money arrived / verified / healthy
+   *   amber    waiting on someone or something
+   *   red      money failed, or you are about to lose something
+   *   slate    everything else
+   *
+   * Colour is never the ONLY carrier: every status also ships a word, and
+   * `.st` adds shape. Do not add a per-card accent hue.
+   *
+   * The light step is 600 and the dark step is 400. The outgoing rules used
+   * 700 in light, which was a half-step darker than the merchant panel's for
+   * no reason anybody could state.
+   * ================================================================== */
   .amount-in {
-    @apply num font-medium text-emerald-700 dark:text-emerald-400;
+    @apply num font-medium text-emerald-600 dark:text-emerald-400;
   }
   .amount-out {
     @apply num font-medium text-slate-700 dark:text-slate-300;
   }
   .amount-fail {
-    @apply num font-medium text-red-700 dark:text-red-400;
+    @apply num font-medium text-red-600 dark:text-red-400;
   }
 }
 
-/* Accessibility: honour the OS setting. */
+@layer utilities {
+  /* =====================================================================
+   * SIGNATURE 4 — THE DEPTH FIELD.
+   *
+   * One fixed, pointer-events-none layer behind the entire application: a slow
+   * aurora plus a masked grid. It is what the surfaces float ON, and it is the
+   * difference between "dark theme" and "a lit room".
+   *
+   * WHY THESE HUES AND NOT A RAINBOW. The four semantic hues are spoken for —
+   * emerald means funds arrived, amber means waiting, red means failed, brand
+   * indigo means "you can act on this". A decorative wash must not put a fifth
+   * meaning in play, so the field travels only through brand and accent, which
+   * are the two hues that carry no state.
+   *
+   * These are backgrounds at <=0.22 alpha behind full-contrast type. They are
+   * atmosphere, never information: nothing on any page is distinguished by
+   * where it sits on this wash.
+   *
+   * This panel has no DepthField component yet; the class is what one will
+   * mount. It is a single fixed element for the whole app, so it costs one
+   * compositing layer regardless of how many routes there are.
+   * ================================================================== */
+  .depth-field {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    pointer-events: none;
+    /* `contain` keeps the animated child from invalidating layout on the rest
+       of the page — this element is behind every route in the app. */
+    contain: strict;
+  }
+  .depth-field::before {
+    content: '';
+    position: absolute;
+    inset: -20%;
+    background:
+      radial-gradient(46rem 30rem at 12% -8%, oklch(var(--b-500) / 0.2), transparent 60%),
+      radial-gradient(38rem 26rem at 88% 4%, oklch(var(--a-500) / 0.12), transparent 62%),
+      radial-gradient(42rem 28rem at 62% 96%, oklch(var(--b-600) / 0.14), transparent 62%);
+    animation: theme('animation.drift');
+  }
+  .depth-field::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(to right, var(--grid-ink) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-ink) 1px, transparent 1px);
+    background-size: 64px 64px;
+    -webkit-mask-image: radial-gradient(ellipse 100% 70% at 50% 0%, #000 20%, transparent 85%);
+    mask-image: radial-gradient(ellipse 100% 70% at 50% 0%, #000 20%, transparent 85%);
+  }
+
+  /* =====================================================================
+   * SIGNATURE 5 — GRAIN.
+   *
+   * The cheapest premium signal in the whole file, and it does two jobs:
+   *
+   *   1. IT KILLS GRADIENT BANDING. Every large soft gradient in this design —
+   *      the depth field, the button fill — bands on an 8-bit display, and
+   *      visible banding is the single thing that makes an otherwise good
+   *      gradient look cheap. A little noise dithers it away.
+   *   2. It gives flat vector surfaces a physical quality they cannot get from
+   *      geometry.
+   *
+   * TWO IMPLEMENTATION DETAILS DO ALL THE WORK, and both are commonly got
+   * wrong:
+   *
+   *   THE TILE IS SMALL AND REPEATED. `feTurbulence` evaluated live across a
+   *   full viewport hammers paint on mobile. Baked into a 180x180 data-URI and
+   *   repeated, it is a static image and costs essentially nothing.
+   *
+   *   THE OPACITY IS 0.03. Anything at or above ~0.06 stops reading as a
+   *   surface quality and starts reading as a filter someone applied.
+   *
+   * `mix-blend-mode` differs by theme on purpose: `overlay` lifts and deepens
+   * against a dark ground, while on paper it would crush the whites, so light
+   * mode takes `soft-light`.
+   * ================================================================== */
+  .grain {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    opacity: 0.03;
+    mix-blend-mode: soft-light;
+    background-repeat: repeat;
+    background-size: 180px 180px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  .dark .grain {
+    opacity: 0.035;
+    mix-blend-mode: overlay;
+  }
+
+  /* Dashes travelling along a flow connector in a diagram. Pairs with the
+     `flow` keyframe the shared config ships; kept so the two stylesheets stay
+     comparable line for line, even though nothing on this panel draws one yet. */
+  .animate-flow {
+    stroke-dasharray: 5 7;
+    animation: theme('animation.flow');
+  }
+}
+
+/* Accessibility: honour the OS setting.
+ *
+ * NOTHING HAND-TUNED IS LEFT TO ENUMERATE. The merchant panel's version of this
+ * block starts by naming `.reveal`, `.parallax-slow` and `.scroll-progress`,
+ * because a scroll-driven reveal must be left at its END state rather than its
+ * start — a reveal that is merely stopped leaves the content invisible, and the
+ * failure mode of a scroll animation must never be a blank page. None of the
+ * three is ported here, so none of them needs the correction, and selectors for
+ * animations that cannot exist are dead CSS that reads as coverage — which is
+ * worse than no coverage at all.
+ *
+ * DEFENCE IN DEPTH is therefore the whole block. The catch-all closes every
+ * utility nobody has enumerated, including any added tomorrow.
+ *
+ * `.motion-keep` is the single opt-out, worn by the things that are genuinely
+ * INFORMATION rather than decoration — above all the spinner, because a frozen
+ * spinner reads as a hung request, and on this panel a hung request means an
+ * operator is staring at a payout they cannot tell has been sent. */
 @media (prefers-reduced-motion: reduce) {
-  /* NOTHING HAND-TUNED IS LEFT TO LIST. This block used to enumerate
-     `.animate-pulse`, `.animate-shimmer` and `.animate-fade-up`, but none of
-     the three is generated any more: the console names no Tailwind animation
-     utility anywhere in src/, and `.skeleton` — the last thing that pulled
-     `animate-shimmer` in — was deleted with the boxed idiom (see the note in
-     the components layer). Selectors for animations that cannot exist are dead
-     CSS that reads as coverage, which is worse than no coverage at all.
-
-     The one loop this app does run is the spinner, and it opts OUT below on
-     purpose. Everything else is closed by the catch-all.
-
-     DEFENCE IN DEPTH. The catch-all closes the ~60
-     utilities nobody has enumerated, including any added tomorrow.
-
-     `.motion-keep` is the single opt-out, worn by the things that are genuinely
-     INFORMATION rather than decoration — above all the spinner, because a
-     frozen spinner reads as a hung request, and on this panel a hung request
-     means an operator is staring at a payout they cannot tell has been sent. */
   *:not(.motion-keep),
   *:not(.motion-keep)::before,
   *:not(.motion-keep)::after {
@@ -394,5 +1466,70 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+}
+
+/* ===========================================================================
+ * THE THREE SIGNATURE KEYFRAMES, DECLARED AS PLAIN CSS.
+ *
+ * They are NOT in tailwind.config.js's `keyframes` map, and that is deliberate
+ * rather than an oversight — putting them there is exactly what broke them.
+ *
+ * Tailwind emits an `@keyframes` block only when the matching `animate-*`
+ * UTILITY appears in a scanned content file. These three are used from inside
+ * `@layer components` — `.st-live .st-dot`, `.btn-primary:hover::after`,
+ * `.depth-field::before` — via `theme('animation.x')`, which resolves to the
+ * correct `animation: halo 2.6s …` shorthand and nothing more. Nothing in any
+ * .tsx writes `animate-halo`, so Tailwind had no reason to generate the
+ * keyframes, and all three shipped as no-ops: the shorthand referenced an
+ * animation name that did not exist in the stylesheet.
+ *
+ * It failed SILENTLY, which is why it survived. A missing keyframe does not
+ * error — the element simply sits at its static state, and a status dot that
+ * does not pulse looks exactly like a status dot. Verified by grepping dist:
+ * `@keyframes halo|sheen|drift` appeared 0 times while `animation: halo|sheen|
+ * drift` appeared once each.
+ *
+ * A `safelist` would also fix it, at the cost of shipping three utility classes
+ * nothing uses. Declaring them here instead keeps one definition, puts it next
+ * to the rules that consume it, and cannot be tree-shaken.
+ * ======================================================================== */
+
+/* The halo under a status dot that is still in flight. The one loop this design
+   permits on a dashboard route: it marks the rows a merchant is actively
+   waiting on, which is information rather than decoration. box-shadow only, so
+   it cannot reflow anything. */
+@keyframes halo {
+  0% {
+    box-shadow: 0 0 0 0 currentColor;
+  }
+  70% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* One pass of light across a primary control on hover. Not a loop — a loop on a
+   control is a distraction; this reads as the surface catching the light as the
+   pointer arrives. */
+@keyframes sheen {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(120%);
+  }
+}
+
+/* The depth field drifts. 34 seconds, so it is never seen to move — only felt
+   to have moved. */
+@keyframes drift {
+  from {
+    transform: translate3d(-2%, -1%, 0) scale(1);
+  }
+  to {
+    transform: translate3d(3%, 2%, 0) scale(1.08);
   }
 }

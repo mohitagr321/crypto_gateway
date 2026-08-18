@@ -48,10 +48,32 @@ import { useTheme } from '@/context/ThemeContext';
  * repaints the active row with no transition, because a cursor that eases is a
  * cursor that lags behind the key that moved it.
  *
+ * IT IS A FLOATING PLANE, AND THE ONLY THING THAT CHANGED IS THE MATERIAL.
+ *
+ * Under the z-plane law the palette lives on plane 3 with the topbar, the dock
+ * and every popover — the one plane that gets `.glass` and the one plane that
+ * casts. It used to be an opaque white card with a hairline, which is plane 2's
+ * material: correct for a stat tile, wrong for a sheet suspended over a page
+ * the user has not left. Glass says "this is above, and what you were reading
+ * is still there underneath", which is exactly true of a palette.
+ *
+ * THE SCRIM NO LONGER BLURS. It carried `backdrop-blur-sm` while the panel now
+ * carries a real 16px frost, which stacked two full-viewport backdrop filters
+ * for one effect — and backdrop-filter repaints its whole backdrop, so the
+ * cheapest place to spend it is once. The scrim darkens; the panel frosts.
+ *
  * SET AS A RULED INDEX. Groups are opened by a hairline and named by a running
  * head, the selected row is marked by the same brand rail the sidebar uses for
  * the page you are on, and the empty state is a sentence ranged left on a
  * measure rather than a centred apology. One language across the product.
+ *
+ * IT SURVIVES A SHORT VIEWPORT. `12dvh` and not `12vh`: on mobile Safari `vh`
+ * is measured against the viewport WITH the URL bar collapsed, so it is taller
+ * than what the user can see and pushes the panel down by more than it claims.
+ * The overlay scrolls, and the list is capped against `dvh` as well as against
+ * a fixed height — in a 360px-tall landscape viewport the old fixed
+ * `max-h-[22rem]` list plus the input simply ran off the bottom with no way to
+ * reach it.
  */
 
 interface Command {
@@ -219,21 +241,21 @@ export default function CommandPalette({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-[12vh]"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[8dvh] sm:pt-[12dvh]"
       role="dialog"
       aria-modal="true"
       aria-label="Command palette"
     >
-      <div
-        className="absolute inset-0 bg-slate-950/50 backdrop-blur-sm"
-        onClick={onClose}
-        aria-hidden
-      />
+      {/* `fixed`, not `absolute`: the wrapper scrolls now, and a scrim that
+          scrolls with it leaves the bottom of a long list sitting on the bare
+          page. */}
+      <div className="fixed inset-0 bg-slate-950/55" onClick={onClose} aria-hidden />
 
-      {/* A raised sheet, which is the one thing a border and a shadow describe
-          truthfully. Everything INSIDE it is ruled, not boxed. */}
-      <div className="relative w-full max-w-lg overflow-hidden rounded-lg border border-slate-200 bg-white shadow-float dark:border-slate-800 dark:bg-slate-900">
-        <div className="flex items-center gap-3 border-b border-slate-200 px-4 dark:border-slate-800">
+      {/* Plane 3: glass and a cast. The radius has to clear blur/2 — a 16px
+          frost inside a 12px corner chews the corners — which is why this is
+          `rounded-2xl` (18px) and not the `rounded-lg` it was. */}
+      <div className="glass relative w-full max-w-lg overflow-hidden rounded-2xl shadow-float">
+        <div className="flex items-center gap-3 border-b border-[var(--line)] px-4">
           <Search size={17} className="shrink-0 text-slate-400" aria-hidden />
           <input
             ref={inputRef}
@@ -249,9 +271,19 @@ export default function CommandPalette({
             aria-activedescendant={results[active] ? optionId(active) : undefined}
             autoComplete="off"
             spellCheck={false}
-            className="w-full bg-transparent py-4 text-sm text-slate-900 outline-none placeholder:text-slate-400 dark:text-slate-100"
+            /* 16px BELOW `sm`, and this is functional rather than typographic —
+               the same rule `.input` enforces product-wide, spelled out here
+               because this field is hand-rolled. iOS Safari zooms the viewport
+               whenever a focused input is under 16px and never zooms back out,
+               so a merchant who taps ⌘K's field on a phone is left pinching
+               their way out of the page they were reading. */
+            className="w-full min-w-0 bg-transparent py-4 text-base text-slate-900 outline-none placeholder:text-slate-400 sm:text-sm dark:text-slate-100"
           />
-          <kbd className="hidden shrink-0 text-[10px] font-medium uppercase tracking-[0.14em] text-slate-400 sm:block">
+          {/* slate-500, not slate-400: this is type, and 400 is the step this
+              ramp keeps for borders and decorative marks — it measures 2.74:1
+              on the light page. Hidden below `sm` regardless, since a phone has
+              no Escape key to hint at. */}
+          <kbd className="hidden shrink-0 text-[11px] font-medium uppercase tracking-[0.14em] text-slate-500 sm:block dark:text-slate-400">
             esc
           </kbd>
         </div>
@@ -261,7 +293,7 @@ export default function CommandPalette({
           id={LIST_ID}
           role="listbox"
           aria-label="Pages and actions"
-          className="max-h-[22rem] overflow-y-auto py-1.5"
+          className="max-h-[min(22rem,52dvh)] overflow-y-auto py-1.5"
         >
           {results.length === 0 ? (
             // Ranged left on a measure, with a running head — the same treatment
@@ -298,9 +330,17 @@ export default function CommandPalette({
                       onMouseEnter={() => setActive(index)}
                       // NO transition. The cursor must land the instant the key
                       // is pressed — see the note at the top of this file.
-                      className={`relative flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm outline-none ${
+                      //
+                      // The band is a brand wash rather than a slate one, and
+                      // brand is right: this row is the ACTION Enter will take,
+                      // which is the one thing brand means. It is the same
+                      // tint `.ledger-row-click` uses for the row under the
+                      // pointer, so a marked row reads the same everywhere.
+                      // 44px below `sm` — this list is thumbed as often as it
+                      // is arrowed.
+                      className={`relative flex min-h-[44px] w-full items-center gap-3 px-4 py-2.5 text-left text-sm outline-none sm:min-h-0 ${
                         isActive
-                          ? 'bg-slate-100 text-slate-900 dark:bg-slate-800 dark:text-slate-50'
+                          ? 'bg-brand-500/10 text-slate-900 dark:text-slate-50'
                           : 'text-slate-600 dark:text-slate-400'
                       }`}
                     >

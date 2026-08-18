@@ -10,6 +10,7 @@ import { formatDate, shortHash } from '@/lib/format';
 import type { UnexpectedDeposit } from '@/types';
 import PageHeader from '@/components/PageHeader';
 import DataTable, { type Column } from '@/components/DataTable';
+import Section from '@/components/Section';
 import Badge from '@/components/Badge';
 import Spinner from '@/components/Spinner';
 
@@ -27,12 +28,21 @@ import Spinner from '@/components/Spinner';
  *   - WRONG COIN  — they sent USDC to a USDT invoice.
  *   - LATE PAYMENT — right coin, but the invoice had already expired.
  *
- * SET AS AN EXCEPTION QUEUE, not as a list. The page is split in two: the
- * deposits that still need a decision are entries — one hairline each, the
- * amount set large, the recover action ranged right where the eye lands after
- * reading the row — and the ones already dealt with collapse into a dense
- * ledger underneath. A queue where the outstanding item and the settled one
- * look identical is a queue that gets ignored.
+ * SET AS AN EXCEPTION QUEUE, not as a list, and that survives the redesign
+ * because it is the whole point of the page: a queue where the outstanding item
+ * and the settled one look identical is a queue that gets ignored.
+ *
+ * What carries the split is no longer a hairline. It is two titled surfaces —
+ * "Waiting to recover" holds entries set at reading weight, with the amount
+ * large and a primary control on each; "Recovered" holds a dense ledger of rows
+ * with no controls at all. The difference between a block you act on and a row
+ * you skim is now structural rather than typographic, which is a stronger signal
+ * and one that still reads at a glance on a phone, where the two sections are
+ * stacked and the eye never sees them side by side to compare.
+ *
+ * NOTHING GETS A PER-CARD ACCENT HUE. Amber appears exactly where it means
+ * "waiting on someone" — the callout, the classification badge — and never as
+ * decoration on the surfaces themselves.
  */
 export default function UnexpectedDeposits() {
   const qc = useQueryClient();
@@ -143,25 +153,32 @@ export default function UnexpectedDeposits() {
         }
       />
 
+      {/* Every non-row state takes a surface too, and for the same reason the
+          real content does: a page whose loading, error and empty states are
+          bare text on the canvas looks broken in exactly the moments it most
+          needs to look deliberate. The skeleton draws the surface it resolves
+          into, so nothing steps down the page when the fetch lands. */}
       {q.isLoading ? (
-        <div className="space-y-8" aria-busy="true">
+        <div className="grid gap-3" aria-busy="true">
           <span className="sr-only" role="status">
             Loading unexpected deposits…
           </span>
           {[0, 1].map((i) => (
-            <div key={i} className="rule pt-4">
+            <div key={i} className="surface p-4 sm:p-5">
               <span className="ghost h-3 w-24" aria-hidden />
-              <span className="ghost mt-3 h-8 w-48" aria-hidden />
+              <span className="ghost mt-3 h-8 w-48 max-w-full" aria-hidden />
               <span
                 className="ghost mt-3 h-3 w-2/3"
                 aria-hidden
+                // Stepped down the page so the block reads as "not loaded yet"
+                // without a single frame of animation.
                 style={{ opacity: 1 - i * 0.35 }}
               />
             </div>
           ))}
         </div>
       ) : q.isError ? (
-        <div className="rule pt-3">
+        <div className="surface p-4 sm:p-5">
           <span className="runhead text-red-600 dark:text-red-400">
             Could not load
           </span>
@@ -177,7 +194,7 @@ export default function UnexpectedDeposits() {
           </button>
         </div>
       ) : rows.length === 0 ? (
-        <div className="rule pt-3">
+        <div className="surface p-4 sm:p-5">
           <span className="runhead">Nothing unexpected</span>
           <p className="measure mt-3 text-base leading-relaxed text-slate-700 dark:text-slate-300">
             Every deposit so far has matched a payment.
@@ -191,7 +208,12 @@ export default function UnexpectedDeposits() {
       ) : (
         <>
           {open.length > 0 && (
-            <div className="mb-9 flex gap-3">
+            /* The standing explanation of what "recover" does, on its own
+               surface above the queue. It is read once and then never again,
+               which is exactly why it must not be mistaken for one of the
+               entries below it — a surface with no figure and no control reads
+               as a note rather than as work. */
+            <div className="surface flex gap-3 p-4 sm:p-5">
               {/* amber = waiting on someone. The word "waiting" carries the
                   same meaning for anyone who cannot see the hue. */}
               <AlertTriangle
@@ -215,39 +237,48 @@ export default function UnexpectedDeposits() {
           )}
 
           {open.length > 0 && (
-            <section>
-              <div className="mb-3 flex items-baseline justify-between gap-4">
-                <span className="runhead">Waiting to recover</span>
+            /* ONE surface holding the whole queue, rather than one surface per
+               deposit. Nesting a raised card inside a raised section would put
+               two elevation steps on the same z-plane, which is the fastest way
+               to make a page read as a pile of boxes; the entries are divided
+               from each other by a hairline instead — the job a rule is
+               genuinely good at now that it is no longer carrying the page. */
+            <Section
+              className="mt-3"
+              title="Waiting to recover"
+              aside={
                 <span className="num text-xs text-slate-500 dark:text-slate-400">
                   {open.length}
                 </span>
-              </div>
-              <div className="space-y-7">
-                {open.map((d) => (
-                  <OpenEntry
-                    key={d.id}
-                    d={d}
-                    busy={recover.isPending && recover.variables === d.id}
-                    error={
-                      recover.isError && recover.variables === d.id
-                        ? errorMessage(recover.error)
-                        : null
-                    }
-                    onRecover={() => recover.mutate(d.id)}
-                  />
-                ))}
-              </div>
-            </section>
+              }
+            >
+              {open.map((d) => (
+                <OpenEntry
+                  key={d.id}
+                  d={d}
+                  busy={recover.isPending && recover.variables === d.id}
+                  error={
+                    recover.isError && recover.variables === d.id
+                      ? errorMessage(recover.error)
+                      : null
+                  }
+                  onRecover={() => recover.mutate(d.id)}
+                />
+              ))}
+            </Section>
           )}
 
           {resolved.length > 0 && (
-            <section className={open.length > 0 ? 'mt-14' : ''}>
-              <div className="rule flex items-baseline justify-between gap-4 pb-3 pt-3">
-                <span className="runhead">Recovered</span>
+            <Section
+              className="mt-3"
+              flush
+              title="Recovered"
+              aside={
                 <span className="num text-xs text-slate-500 dark:text-slate-400">
                   {resolved.length} record{resolved.length === 1 ? '' : 's'}
                 </span>
-              </div>
+              }
+            >
               <DataTable
                 columns={resolvedColumns}
                 rows={resolved}
@@ -263,9 +294,25 @@ export default function UnexpectedDeposits() {
                       <p className="num mt-1 text-xs text-slate-500 dark:text-slate-400">
                         {formatDate(d.createdAt)}
                       </p>
+                      {/* WHAT THE MERCHANT ACTUALLY GOT. `Recovered as` is a
+                          `hideOnMobile` column, so the stacked row used to state
+                          the amount that arrived and stay silent about the
+                          amount that was credited — which is the outcome, and
+                          the only reason to read a resolved row at all. */}
+                      {d.convertedTo && (
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                          recovered as{' '}
+                          <span className="num">{trim(d.convertedAmount ?? '0')}</span>{' '}
+                          {d.convertedTo}
+                        </p>
+                      )}
                     </div>
-                    <div className="shrink-0 text-right">
-                      <p className="num lining-nums text-base font-semibold text-slate-900 dark:text-slate-50">
+                    {/* `min-w-0` and `break-words` rather than `shrink-0`: these
+                        are raw chain amounts at full token precision, so a dust
+                        recovery can run to twenty characters. A money figure is
+                        never allowed to be clipped by its own column. */}
+                    <div className="min-w-0 text-right">
+                      <p className="num lining-nums break-words text-base font-semibold text-slate-900 dark:text-slate-50">
                         {trim(d.amount)}
                       </p>
                       <div className="mt-1.5 flex justify-end">
@@ -277,7 +324,7 @@ export default function UnexpectedDeposits() {
                   </div>
                 )}
               />
-            </section>
+            </Section>
           )}
         </>
       )}
@@ -286,13 +333,20 @@ export default function UnexpectedDeposits() {
 }
 
 /**
- * One outstanding deposit, set as an entry rather than a card.
+ * One outstanding deposit, set as an entry inside the queue's surface rather
+ * than as a card of its own — see the note at the call site for why a card
+ * inside a card is the wrong move here.
  *
  * The amount is the largest thing in the block because it is the thing being
  * decided about, and the action is ranged right on the same baseline as the
  * classification so the row reads WHAT HAPPENED → HOW MUCH → WHAT TO DO. On a
  * phone the button drops full-width beneath the explanation rather than
  * shrinking into the corner.
+ *
+ * The dividing rule falls BETWEEN entries only: `first:` drops it on the top
+ * entry, where it would double the stroke the Section header already draws, and
+ * the last entry loses its bottom padding so the surface closes on the button
+ * rather than on a band of empty space.
  */
 function OpenEntry({
   d,
@@ -309,7 +363,7 @@ function OpenEntry({
   const failed = d.status === 'failed';
 
   return (
-    <article className="rule grid gap-x-8 gap-y-4 pt-4 md:grid-cols-12">
+    <article className="rule grid gap-x-8 gap-y-4 py-5 first:border-t-0 first:pt-0 last:pb-0 md:grid-cols-12">
       <div className="min-w-0 md:col-span-8">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
           {/* Both classifications are amber: in each one something is still
@@ -320,7 +374,13 @@ function OpenEntry({
           <Badge tone={failed ? 'failed' : 'neutral'}>{d.status}</Badge>
         </div>
 
-        <p className="figure-lg mt-2.5">
+        {/* `break-words` on the figure, and no `text-*` utility anywhere near
+            it. These are raw chain amounts at full token precision, so this is
+            the one figure in the product that can genuinely run long — and a
+            size utility would beat `.figure-lg`'s clamp in the cascade and pin
+            it to one size at every viewport, which is a bug this codebase has
+            already shipped once. */}
+        <p className="figure-lg mt-2.5 break-words">
           {trim(d.amount)}{' '}
           {/* Asset and network are one label, never two independent facts. */}
           <span className="text-base font-medium tracking-normal text-slate-500 dark:text-slate-400">
@@ -341,15 +401,23 @@ function OpenEntry({
 
         <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
           <span className="num">{formatDate(d.createdAt)}</span>
+          {/* 44px of hit area below `sm`, relaxing to the pointer height at
+              `sm` — the same floor `.btn` enforces. This link is how a merchant
+              checks the deposit on-chain before recovering it, and at its old
+              16px it was a target a thumb could not reliably find. */}
           <a
             href={explorerTx(d.txHash, d.network)}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 hover:text-brand-600 dark:hover:text-brand-400"
+            className="-mx-1 inline-flex min-h-[44px] items-center gap-1 rounded-sm px-1 hover:text-brand-600 sm:min-h-0 dark:hover:text-brand-400"
           >
-            transaction <ExternalLink size={11} aria-hidden />
+            transaction <ExternalLink size={11} className="shrink-0" aria-hidden />
           </a>
-          <code className="font-mono">{shortHash(d.depositAddress, 10, 4)}</code>
+          {/* An address is one unbreakable token; elided here, but `break-all`
+              is what stops it setting the entry's minimum width on a phone. */}
+          <code className="break-all font-mono">
+            {shortHash(d.depositAddress, 10, 4)}
+          </code>
         </div>
 
         {d.error && !busy && (

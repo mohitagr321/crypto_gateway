@@ -1,42 +1,45 @@
 /** @type {import('tailwindcss').Config} */
 
-/**
- * THE GROUND, ported verbatim from client-panel/tailwind.config.js.
+/* ===========================================================================
+ * "INSTRUMENT" — the design system this panel is set in.
  *
- * The operator console and the merchant panel are ONE PRODUCT. Anything that
- * differs between the two files here shows up as a seam the moment somebody
- * has both open, which is most of an operator's day. Read that file before
- * editing this one; the long-form rationale lives there and is not duplicated.
- */
+ * WHAT CHANGED, AND WHY THE COLOURS ARE NOW CUSTOM PROPERTIES.
+ *
+ * Every colour below resolves to `oklch(var(--x) / <alpha-value>)` rather than
+ * to a hex literal. Three things fall out of that, and all three are the reason
+ * it is worth the indirection:
+ *
+ *   1. OKLCH IS PERCEPTUALLY UNIFORM. A hex ramp hand-picked step by step drifts
+ *      in lightness and chroma — that is why the previous ramp needed a
+ *      paragraph of measured WCAG ratios to defend it. Here the L channel IS the
+ *      lightness, so "one step darker" means the same thing at every point on
+ *      the ramp, and a hue rotation cannot accidentally change how dark a step
+ *      reads.
+ *   2. GRADIENTS INTERPOLATE WITHOUT GREY MUD. sRGB interpolation between two
+ *      saturated hues passes through a desaturated middle; the brand -> accent
+ *      gradient this design leans on is the exact case where that shows.
+ *   3. WHITE-LABELLING IS ONE DECLARATION. This gateway ships under an
+ *      operator's own brand (see VITE_BRAND_NAME). Re-hueing the whole product
+ *      is now `--b-500: <L> <C> <their hue>` in one place, not a rebuild of a
+ *      hex ramp.
+ *
+ * THE `<alpha-value>` PLACEHOLDER is what keeps `bg-brand-500/20` working:
+ * Tailwind substitutes the opacity into that slot. It means the custom property
+ * must hold the OKLCH COMPONENTS ("0.575 0.205 269") and NOT a finished
+ * `oklch(...)` string — a finished colour has nowhere for Tailwind to put the
+ * alpha, and every `/N` utility in the codebase would silently render opaque.
+ *
+ * A CONSEQUENCE WORTH KNOWING BEFORE YOU EDIT src/index.css: `theme('colors.x')`
+ * now returns the string `oklch(var(--n-900) / <alpha-value>)`, which is not a
+ * valid colour outside a Tailwind utility. index.css therefore references the
+ * custom properties directly. Do not reintroduce `theme()` for a colour.
+ * ======================================================================== */
 
-// ---------------------------------------------------------------------------
-// GROUND — a warm ink/paper ramp.
-//
-// Low-chroma (hue ~60, near-zero saturation), NOT saturated bone. Saturated
-// bone sits at hue ~40 and amber at 37.7 — two degrees apart, where the old
-// cool ramp gave 172. Warm paper is the escape from the dark-indigo-Inter
-// monoculture our own #6366f1 sits inside, but it only works if "pending" is
-// still instantly separable from the page.
-//
-// Contrast measured with the WCAG relative-luminance formula, on 50.
-//
-// ALL ELEVEN STEPS MUST SHIP TOGETHER. `theme.extend.colors.<name>` deep-merges
-// at the STEP level, so overriding only some leaves the rest at Tailwind's cool
-// defaults and the ramp ends up half warm, half blue.
-// ---------------------------------------------------------------------------
-const ground = {
-  50: '#FBFAFC', //  page
-  100: '#F4F1F7', //  inset
-  200: '#E7E2EC', //  hairline rules
-  300: '#D0C8D9', //  dividers
-  400: '#948CA1', //  3.01:1 — input borders + decorative icons ONLY, never text
-  500: '#6E667D', //  5.01:1 — secondary text
-  600: '#554D61', //  7.31:1 — body text
-  700: '#403A4A', // 10.04:1
-  800: '#292431', //  dark raised
-  900: '#1C1823', //  dark card
-  950: '#131017', //  dark ground
-};
+/**
+ * Wrap a custom property as a Tailwind-consumable colour.
+ * The property holds "L C H"; this adds the function and the alpha slot.
+ */
+const oklch = (v) => `oklch(var(${v}) / <alpha-value>)`;
 
 export default {
   darkMode: 'class',
@@ -45,142 +48,328 @@ export default {
     extend: {
       colors: {
         /**
-         * BRAND — identity and "this is the action to take". Byte-identical to
-         * the client panel's ramp on purpose: an operator moving between the two
-         * panels must not see two different indigos.
+         * GROUND — a violet-tinted ink/paper ramp, shipped under Tailwind's
+         * `slate` name.
          *
-         * Indigo, not green, because green means "funds arrived" on every status
-         * badge in both panels. Brand = interactive; it never indicates state.
+         * KEEPING THE NAME IS THE WHOLE TRICK, and it is the same trick the
+         * previous ramp used: ~1,175 existing `bg-slate-50`, `text-slate-600`,
+         * `dark:bg-slate-950` utilities across 51 files re-ground with zero
+         * component edits.
+         *
+         * ALL STEPS MUST SHIP TOGETHER. `theme.extend.colors.slate` deep-merges
+         * at the STEP level, so overriding only some leaves the rest at
+         * Tailwind's cool defaults and the ramp ends up half violet, half blue.
+         *
+         * HUE 285. Far from every semantic hue (emerald 160, amber 55-80, red
+         * 22-25), so the ground can carry visible colour without ever competing
+         * with a status, and close enough to brand indigo (268) to read as one
+         * family. The chroma is deliberately LOW at the ends and highest in the
+         * middle: a tinted mid-grey reads as a designed neutral, while a tinted
+         * white or a tinted black just reads as a colour cast.
+         *
+         * DARK GROUND IS NOT BLACK. 950 sits at L 0.152, not at 0 — an
+         * "elevated black". True black gives a surface nowhere to be raised
+         * above, which is the single most common reason a dark dashboard reads
+         * flat, and it is the defect this redesign exists to fix. The elevation
+         * ladder in dark is 950 (page) -> 900 (card) -> 850 (raised) -> 800
+         * (border), and in light it is 50 (page) -> white (card) -> 100 (inset)
+         * -> 200 (hairline).
+         *
+         * CONTRAST, measured rather than eyeballed — WCAG 2.1 relative
+         * luminance, computed from the OKLCH triplets by
+         * scratch/contrast.mjs, against the page ground of each theme:
+         *
+         *              light page (50)   dark page (950)
+         *   300              1.68             10.86   <- dark body text
+         *   400              2.74              6.67   <- dark secondary text;
+         *                                              LIGHT: decorative only
+         *   500              4.57              4.00   <- light secondary text
+         *   600              6.95              2.63   <- light body text
+         *
+         * So: light text takes 600 (body) and 500 (secondary); dark text takes
+         * 300 (body) and 400 (secondary). 400 NEVER carries text on the light
+         * ground — it is for input borders and decorative icons, exactly as
+         * before.
+         */
+        slate: {
+          0: oklch('--n-0'), //    pure white — light-mode surface
+          50: oklch('--n-50'), //  light page
+          100: oklch('--n-100'), // light inset
+          200: oklch('--n-200'), // light hairline
+          300: oklch('--n-300'), // light divider / DARK body text
+          400: oklch('--n-400'), // decorative + input borders / DARK secondary
+          500: oklch('--n-500'), // light secondary text
+          600: oklch('--n-600'), // light body text
+          700: oklch('--n-700'),
+          800: oklch('--n-800'), // dark hairline
+          850: oklch('--n-850'), // dark raised surface
+          900: oklch('--n-900'), // dark card
+          950: oklch('--n-950'), // dark page
+          975: oklch('--n-975'), // dark well — the one step BELOW the page
+        },
+
+        /**
+         * BRAND — identity, and "this is the action you can take". Never a
+         * state. That rule predates this redesign and survives it intact: green
+         * means funds arrived, so a green CTA would put the button and "your
+         * money is here" in one hue and colour would carry no information.
+         *
+         * THE STEPS ARE SPLIT BY JOB, and the split is a contrast result, not a
+         * preference. White text on a fill needs 4.5:1, and that puts a hard
+         * ceiling on how light the fill may be:
+         *
+         *   white on 500 (L .575)  4.60  <- the lightest fill that still passes
+         *   white on 600 (L .510)  6.09
+         *
+         * which is why the primary button's gradient runs 500 -> 600 and never
+         * reaches 400. 400 and 300 are for INK and LIGHT — dark-mode text
+         * (8.20:1), focus rings, the glow under a lit control — never for a
+         * surface that carries white type.
          */
         brand: {
-          50: '#eef2ff',
-          100: '#e0e7ff',
-          200: '#c7d2fe',
-          300: '#a5b4fc',
-          400: '#818cf8',
-          500: '#6366f1',
-          600: '#4f46e5',
-          700: '#4338ca',
-          800: '#3730a3',
-          900: '#312e81',
-          950: '#1e1b4b',
+          50: oklch('--b-50'),
+          100: oklch('--b-100'),
+          200: oklch('--b-200'),
+          300: oklch('--b-300'), // dark-mode display ink, glow
+          400: oklch('--b-400'), // dark-mode text/icon — 8.20:1 on the dark page
+          500: oklch('--b-500'), // gradient top; lightest fill that holds white
+          600: oklch('--b-600'), // light-mode text 5.66:1; gradient bottom
+          700: oklch('--b-700'),
+          800: oklch('--b-800'),
+          900: oklch('--b-900'),
+          950: oklch('--b-950'),
         },
+
         /**
-         * Secondary hue, used ONLY to give the brand gradient somewhere to
-         * travel. Never on a control — two interactive colours would undo the
-         * point of the rule above.
+         * ACCENT — cyan. The far end of the brand gradient and nothing else:
+         * headline sweeps, the active-nav rail, a progress track, the mark.
+         * NEVER on a control, because two interactive colours would undo the
+         * rule above, and never as text on the light ground (2.29:1 — it is a
+         * dark-mode and decorative hue only).
          */
         accent: {
-          400: '#a78bfa',
-          500: '#8b5cf6',
-          600: '#7c3aed',
+          300: oklch('--a-300'),
+          400: oklch('--a-400'),
+          500: oklch('--a-500'),
+          600: oklch('--a-600'),
         },
 
         /**
-         * The ramp ships under BOTH names, and that is deliberate.
+         * STATE — overridden in place so every existing `text-emerald-700`,
+         * `bg-amber-100`, `dark:text-red-400` inherits the corrected values.
          *
-         * The client panel remapped Tailwind's `slate` because that is the name
-         * its 1,175 neutral utilities were already written against. This panel
-         * was written against `gray` instead — 227 usages, and not one `slate-*`
-         * anywhere in src/. Remapping only `slate` here would have re-grounded
-         * exactly nothing and left the operator console cool while the merchant
-         * panel went warm: the precise seam this phase exists to close.
+         * THE 500 STEP NEVER CARRIES TEXT, unchanged from the previous system
+         * and for the same measured reason. Light text takes 600, dark text
+         * takes 400:
          *
-         * So `gray` carries the remap for the code that exists, and `slate`
-         * carries it for the code being written now — the house rule is that new
-         * work names `slate-*`, matching the client panel. Same eleven values,
-         * two spellings, so a page part-way through the rename is still visually
-         * whole and the rename itself is a pure no-op.
-         */
-        slate: ground,
-        gray: ground,
-
-        /**
-         * STATE — overridden in place so existing `text-emerald-700`,
-         * `bg-amber-100`, `dark:text-red-400` inherit the corrected values.
+         *            light page   dark page
+         *   ok-600      4.73         —
+         *   ok-400        —        10.81
+         *   warn-600    4.54         —
+         *   warn-400      —        11.49
+         *   bad-600     5.45         —
+         *   bad-400       —         7.64
          *
-         * THE 500 STEP NEVER CARRIES TEXT: measured, emerald-500 lands at 4.27:1
-         * and amber-500 at 3.25:1 on paper — both AA failures, on the money
-         * figure that is the entire point of the screen. Light text takes the
-         * 600 step, dark text takes the 400 step. (Icons at 500 are fine.)
+         * Amber sits at hue 55 on the 600 step rather than the 80 it uses at
+         * 400. Pulling it orange is what buys the contrast: a true yellow
+         * cannot reach 4.5:1 on paper without going brown.
          */
         emerald: {
-          400: '#34D399', //  9.04:1 on the dark ground
-          600: '#047857', //  5.25:1 on paper
+          50: oklch('--ok-50'),
+          300: oklch('--ok-300'),
+          400: oklch('--ok-400'), // dark text — 10.81:1
+          500: oklch('--ok-500'), // dots and fills only
+          600: oklch('--ok-600'), // light text — 4.73:1
+          700: oklch('--ok-700'),
+          950: oklch('--ok-950'),
         },
         amber: {
-          400: '#FBBF24', // 10.41:1 on the dark ground
-          // Pulled to hue 26 — 34 degrees off the warm ground, where the stock
-          // amber-600 would have sat almost on top of it.
-          600: '#B45309', //  4.81:1 on paper
+          50: oklch('--warn-50'),
+          300: oklch('--warn-300'),
+          400: oklch('--warn-400'), // dark text — 11.49:1
+          500: oklch('--warn-500'),
+          600: oklch('--warn-600'), // light text — 4.54:1
+          700: oklch('--warn-700'),
+          950: oklch('--warn-950'),
         },
         red: {
-          400: '#F87171', //  6.28:1 on the dark ground
-          600: '#DC2626', //  4.62:1 on paper
+          50: oklch('--bad-50'),
+          300: oklch('--bad-300'),
+          400: oklch('--bad-400'), // dark text — 7.64:1
+          500: oklch('--bad-500'),
+          600: oklch('--bad-600'), // light text — 5.45:1
+          700: oklch('--bad-700'),
+          950: oklch('--bad-950'),
         },
 
         /**
-         * Semantic aliases, so NEW code names the meaning rather than the hue.
-         * The existing rule still stands and is load-bearing: brand = the action
-         * you can take, and it never indicates state.
+         * CATEGORICAL SERIES hues, for chart dimensions that carry NO status
+         * meaning (per asset, per network, per client). Kept off every semantic
+         * hue on purpose, so a series can never be mistaken for a state.
+         * chartTheme.ts is the only thing that should reach for these.
          */
+        cyan: { 400: oklch('--a-400'), 600: oklch('--a-600') },
+        teal: { 400: oklch('--s-teal-400'), 600: oklch('--s-teal-600') },
+        fuchsia: { 400: oklch('--s-fuchsia-400'), 600: oklch('--s-fuchsia-600') },
+        sky: { 300: oklch('--s-sky-300'), 700: oklch('--s-sky-700') },
+
+        /** Semantic aliases, so new code can name the meaning, not the hue. */
         state: {
-          settled: '#047857',
-          pending: '#B45309',
-          failed: '#DC2626',
-          neutral: '#6E667D',
+          settled: oklch('--ok-600'),
+          pending: oklch('--warn-600'),
+          failed: oklch('--bad-600'),
         },
       },
+
       fontFamily: {
-        // 'Inter Variable' is the family name @fontsource-variable/inter
-        // actually registers. Asking for plain 'Inter' silently fell through to
-        // system-ui on every screen — see the note at the top of src/index.css.
-        sans: ['Inter Variable', 'Inter', 'system-ui', 'sans-serif'],
-        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        /**
+         * GEIST. Replaces Inter as the UI face and Newsreader as the display
+         * face, and collapsing two families into one is most of why the product
+         * now reads as a single instrument rather than as a newspaper.
+         *
+         * Geist is drawn for interfaces at small sizes AND holds up set large
+         * and tight, which is exactly the range this product needs: an 11px
+         * uppercase running head, a 13px table cell, and a 3.4rem money figure
+         * on the checkout. Its digits are the reason it wins over the
+         * alternatives here — near-monospaced by default, with a genuine
+         * `tnum`, on a product where every screen is a column of amounts.
+         *
+         * THE FAMILY NAME IS 'Geist Variable', NOT 'Geist'. Read out of
+         * node_modules/@fontsource-variable/geist/wght.css, not guessed — this
+         * repo has been bitten three times by exactly this, and the failure is
+         * SILENT: the page renders in system-ui and merely looks a bit plain.
+         */
+        sans: ['Geist Variable', 'Geist', 'Inter Variable', 'system-ui', 'sans-serif'],
+
+        /**
+         * GEIST MONO, on 55+ call sites carrying wallet addresses, transaction
+         * hashes, API keys and order ids.
+         *
+         * `zero` and `tnum` are switched on for EVERY font-mono site rather than
+         * left to the page. A slashed zero is the difference between 0 and O on
+         * an address, and `tnum` keeps hashes from jittering down a column. On a
+         * product where a misread address loses the money permanently, both are
+         * free once a real mono is loaded, and both are exactly the kind of
+         * detail that never gets applied consistently if it must be remembered.
+         */
+        mono: [
+          ['Geist Mono Variable', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+          { fontFeatureSettings: '"zero", "tnum"' },
+        ],
+
+        /**
+         * DISPLAY. Routed through one custom property rather than repeating a
+         * stack, so the whole display bet reverts by editing one line in
+         * index.css — the same discipline the outgoing serif was held to.
+         * It now points AT Geist: this design gets its display presence from
+         * size, weight and tracking, not from a second typeface.
+         */
+        display: ['var(--font-display)'],
       },
-      // Elevation as soft, low-opacity shadows rather than the default hard
-      // grey — on a dark surface the stock Tailwind shadows are invisible,
-      // which is why this panel read flat.
-      boxShadow: {
-        soft: '0 1px 2px 0 rgb(15 23 42 / 0.04), 0 1px 3px 0 rgb(15 23 42 / 0.06)',
-        lift: '0 2px 4px -1px rgb(15 23 42 / 0.06), 0 8px 24px -4px rgb(15 23 42 / 0.10)',
-        float: '0 8px 16px -4px rgb(15 23 42 / 0.10), 0 24px 48px -12px rgb(15 23 42 / 0.18)',
-        'glow-brand': '0 0 0 1px rgb(79 70 229 / 0.20), 0 8px 24px -6px rgb(79 70 229 / 0.35)',
-      },
+
       /**
-       * RADIUS — collapsed onto a real three-step scale.
+       * ELEVATION — rim light, not drop shadow.
        *
-       * Multiple radii coexisting is what makes surfaces read as assembled from
-       * different kits. Remapping the SCALE rather than editing call sites
-       * collapses them with zero component edits.
+       * A drop shadow is how a surface floats on PAPER. On the near-black ground
+       * this design is built on there is nothing for a shadow to fall on, which
+       * is precisely why the old dark theme read flat: every card was a slightly
+       * different grey rectangle with an invisible shadow under it.
        *
-       * `borderRadius` merges per-key exactly like colours, so every key the
-       * codebase actually uses is overridden — leaving one out is what would
-       * reintroduce the problem it fixes. `rounded-full` is untouched and stays
-       * correct on status dots, avatars and chips.
+       * What replaces it is how a real object reads in a dark room — it catches
+       * light on its top edge. Every shadow below therefore leads with an INSET
+       * highlight and only then casts. The cast half still does its job in light
+       * mode; the inset half is what makes the dark mode look built.
+       */
+      boxShadow: {
+        soft: 'var(--shadow-soft)',
+        lift: 'var(--shadow-lift)',
+        float: 'var(--shadow-float)',
+        rim: 'var(--shadow-rim)',
+        /**
+         * A lit control: a brand ring plus the bloom it throws. This one is NOT
+         * theme-split, because it is not elevation — it is the light the button
+         * itself emits, and a light source looks the same in both rooms.
+         */
+        'glow-brand':
+          '0 0 0 1px oklch(var(--b-400) / 0.45), 0 6px 20px -8px oklch(var(--b-500) / 0.85), inset 0 1px 0 oklch(var(--n-0) / 0.22)',
+      },
+
+      /**
+       * RADIUS — one scale, three real steps, remapped rather than re-called.
+       *
+       * The codebase names six radii across ~150 call sites. Remapping the SCALE
+       * collapses them with zero component edits, which is the same move the
+       * previous system made — only the values are new. They are LARGER here:
+       * the outgoing 3-10px scale was drawn for a hairline-and-rules design
+       * where a radius was an apology, and this one is drawn for surfaces that
+       * are meant to read as objects.
+       *
+       * Every key the codebase uses must be overridden. Leaving one out is what
+       * reintroduces the mixed-kit look this fixes. `rounded-full` is untouched
+       * and stays correct on dots, avatars and pills.
        */
       borderRadius: {
-        sm: '3px',
-        DEFAULT: '5px',
-        md: '6px',
-        lg: '8px',
-        xl: '8px',
-        '2xl': '10px',
-        '3xl': '12px',
-        '4xl': '12px',
+        sm: '6px',
+        DEFAULT: '8px',
+        md: '10px',
+        lg: '12px',
+        xl: '14px',
+        '2xl': '18px',
+        '3xl': '24px',
+        '4xl': '28px',
       },
+
       keyframes: {
+        /**
+         * `halo`, `sheen` and `drift` are DELIBERATELY ABSENT from this map and
+         * are declared as plain CSS in src/index.css instead. Putting them here
+         * is what broke them: Tailwind emits an `@keyframes` block only when the
+         * matching `animate-*` UTILITY appears in a scanned file, and all three
+         * are used from inside `@layer components` via `theme('animation.x')`.
+         * Nothing writes `animate-halo`, so the keyframes were never generated
+         * and the shorthand referenced an animation that did not exist — a
+         * silent no-op, because a missing keyframe does not error.
+         *
+         * The entries below are all reached through a real `animate-*` utility
+         * in a .tsx file, which is what keeps them emitted. Check that before
+         * adding a fourth.
+         */
+
+        /** Entry: never from scale(0), never travelling more than 8px on a
+         *  dashboard surface. */
         'fade-up': {
           from: { opacity: '0', transform: 'translateY(6px)' },
           to: { opacity: '1', transform: 'none' },
         },
-        shimmer: {
-          '100%': { transform: 'translateX(100%)' },
+        marquee: {
+          from: { transform: 'translateX(0)' },
+          to: { transform: 'translateX(-50%)' },
+        },
+        flow: { to: { strokeDashoffset: '-24' } },
+        /**
+         * The two modal entrances, and they are deliberately different shapes.
+         * A SHEET travels, because that is what tells you which edge it came
+         * from and therefore where dismissing it sends it back to. A DIALOG
+         * does not: a modal that slides in on a desktop reads as a
+         * notification arriving rather than as the thing you just asked for.
+         * Never `scale(0)` — entry is 0.98 and opacity, per the craft rules.
+         */
+        'sheet-in': {
+          from: { opacity: '0', transform: 'translateY(12px)' },
+          to: { opacity: '1', transform: 'none' },
+        },
+        'dialog-in': {
+          from: { opacity: '0', transform: 'scale(0.98)' },
+          to: { opacity: '1', transform: 'none' },
         },
       },
       animation: {
         'fade-up': 'fade-up 0.35s cubic-bezier(0.22, 1, 0.36, 1) both',
-        shimmer: 'shimmer 1.6s infinite',
+        halo: 'halo 2.6s cubic-bezier(0, 0, 0.2, 1) infinite',
+        sheen: 'sheen 0.75s cubic-bezier(0.22, 1, 0.36, 1)',
+        drift: 'drift 34s ease-in-out infinite alternate',
+        marquee: 'marquee 38s linear infinite',
+        flow: 'flow 1.1s linear infinite',
       },
     },
   },

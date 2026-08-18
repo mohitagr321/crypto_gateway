@@ -47,13 +47,20 @@ export default function AssetPicker({
   if (!isLoading && forNetwork.length <= 1) {
     const only = forNetwork[0]?.symbol ?? 'USDT';
     return (
-      <div>
-        <label className="label" htmlFor={id}>
-          Asset
-        </label>
-        <div className="input flex items-center justify-between bg-slate-50 dark:bg-slate-800/60">
-          <span className="font-medium">{only}</span>
-          <span className="text-xs text-slate-500">
+      <div className="min-w-0">
+        {/* A `<span>`, not a `<label htmlFor>`. There is no control in this
+            branch to label, and an `htmlFor` pointing at a plain `<div>` is a
+            dangling reference a screen reader follows to nothing. `.label`
+            still carries the type, so the two branches look identical. */}
+        <span className="label">Asset</span>
+        {/* `.input` already fills from `--surface-2`, so the slate utilities
+            that used to sit here were painting the same colour twice in light
+            and fighting it in dark. It wraps rather than squeezing: at 360px
+            the reason and the ticker cannot share a line, and the ticker is the
+            half that must never be the one that shrinks. */}
+        <div className="input flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5">
+          <span className="font-medium text-slate-900 dark:text-slate-100">{only}</span>
+          <span className="min-w-0 text-xs text-slate-500 dark:text-slate-400">
             the only asset enabled on {network}
           </span>
         </div>
@@ -62,7 +69,7 @@ export default function AssetPicker({
   }
 
   return (
-    <div>
+    <div className="min-w-0">
       <label className="label" htmlFor={id}>
         Asset
       </label>
@@ -84,7 +91,7 @@ export default function AssetPicker({
           ))
         )}
       </select>
-      <p className="mt-1 text-xs text-slate-500">
+      <p className="measure mt-1.5 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
         {context === 'payment' ? (
           selected?.isNative ? (
             // A native coin is not a token, and the difference is not academic:
@@ -112,7 +119,20 @@ export default function AssetPicker({
   );
 }
 
-/** Compact asset+network label for tables. */
+/**
+ * Compact asset+network label for tables.
+ *
+ * NOT a `<Badge>`, and the distinction is the colour law rather than a
+ * shortcut: `.st` is the status lozenge and everything wearing it is read as a
+ * STATE. A network is a fact about the payment, not something that happened to
+ * it, so it takes the neutral inset pill — `--surface-2` inside a `--line`
+ * hairline, the same two tokens `.chip` is built from, at the smaller scale a
+ * ledger cell can afford.
+ *
+ * 11px rather than the 10px it was. 10px uppercase with tracking is a print
+ * gesture that does not survive a phone, and this sits in a table cell a
+ * merchant reads down a column.
+ */
 export function AssetBadge({
   asset,
   network,
@@ -126,7 +146,7 @@ export function AssetBadge({
         {asset ?? 'USDT'}
       </span>
       {network && (
-        <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+        <span className="rounded-full border border-[var(--line)] bg-[var(--surface-2)] px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
           {network}
         </span>
       )}

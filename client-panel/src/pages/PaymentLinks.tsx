@@ -20,6 +20,7 @@ import {
 import { formatDateShort } from '@/lib/format';
 import type { PaymentLink } from '@/types';
 import PageHeader from '@/components/PageHeader';
+import Section from '@/components/Section';
 import DataTable, { type Column } from '@/components/DataTable';
 import Badge from '@/components/Badge';
 import CopyButton from '@/components/CopyButton';
@@ -38,6 +39,11 @@ import AssetPicker from '@/components/AssetPicker';
  * the enclosure cost 20px of padding on four sides of each one to say something
  * a hairline says for nothing. Ruled rows keep the copy affordance and give
  * back the comparison the grid never allowed.
+ *
+ * ONE ENCLOSURE, NOT THIRTY. That is the distinction the redesign turns on:
+ * the ledger now sits on a single lit surface, so the page has exactly one
+ * object on it and the rows inside it stay divided by hairlines. Thirty
+ * surfaces would be the card grid again wearing better shadows.
  *
  * Links are DISABLED, never deleted: the URL may already be sitting in a
  * customer's inbox, and a disabled link can explain itself where a 404 cannot.
@@ -106,7 +112,7 @@ export default function PaymentLinks() {
 
   /** QR + enable/disable, shared by the table row and the stacked mobile row. */
   const rowActions = (l: PaymentLink) => (
-    <div className="inline-flex items-center gap-0.5">
+    <div className="inline-flex items-center">
       <IconAction label="Show QR code" onClick={() => setQrFor(l)}>
         <QrCode size={16} />
       </IconAction>
@@ -123,18 +129,21 @@ export default function PaymentLinks() {
   const urlCell = (l: PaymentLink, className = 'max-w-[20ch] lg:max-w-[30ch]') => {
     const url = checkoutUrl(l.token);
     return (
-      <div className="flex items-center gap-0.5">
+      <div className="flex items-center">
         <code
           className={`min-w-0 truncate font-mono text-xs text-slate-600 dark:text-slate-400 ${className}`}
         >
           {url}
         </code>
         <CopyButton value={url} />
+        {/* Was `p-1` around a 14px glyph — a 22px target, the smallest control
+            in the panel and the one that opens the page a customer will pay on.
+            The glyph is unchanged; the box around it is now the 44px floor. */}
         <a
           href={url}
           target="_blank"
           rel="noopener noreferrer"
-          className="rounded p-1 text-slate-400 outline-none transition-colors duration-100 hover:text-brand-600 focus-visible:ring-2 focus-visible:ring-brand-500 dark:hover:text-brand-400"
+          className={`${ICON_ACTION} hover:text-brand-600 focus-visible:ring-2 focus-visible:ring-brand-500 dark:hover:text-brand-400`}
           aria-label={`Open checkout for ${l.title}`}
           title="Open checkout"
         >
@@ -227,59 +236,71 @@ export default function PaymentLinks() {
       />
 
       {/* A failed enable/disable used to vanish silently, leaving the row
-          showing the state the merchant had just tried to change. */}
+          showing the state the merchant had just tried to change. On its own
+          surface now, because it has to read as a separate object from the row
+          it contradicts. */}
       {toggle.isError && (
-        <p
-          role="alert"
-          className="mb-4 inline-flex items-start gap-1.5 text-sm text-red-600 dark:text-red-400"
-        >
-          <AlertCircle size={15} className="mt-0.5 shrink-0" aria-hidden />
-          <span>Could not change that link: {errorMessage(toggle.error)}</span>
-        </p>
+        <div role="alert" className="surface mb-4 flex items-start gap-2 p-4">
+          <AlertCircle
+            size={15}
+            className="mt-0.5 shrink-0 text-red-600 dark:text-red-400"
+            aria-hidden
+          />
+          <p className="measure-wide text-sm leading-relaxed text-red-600 dark:text-red-400">
+            Could not change that link: {errorMessage(toggle.error)}
+          </p>
+        </div>
       )}
 
-      <DataTable
-        columns={columns}
-        rows={rows}
-        rowKey={(l) => l.id}
-        loading={links.isLoading}
-        error={links.isError ? errorMessage(links.error) : null}
-        onRetry={() => links.refetch()}
-        defaultSortKey="created"
-        defaultSortDir="desc"
-        label="Payment links"
-        emptyLabel="No payment links yet."
-        emptyHint="Create one and send the URL to a customer. They open it, choose a coin and pay — you don't need to write any code."
-        emptyAction={
-          <button className="btn-primary" onClick={() => setCreateOpen(true)}>
-            <Plus size={16} /> Create your first link
-          </button>
-        }
-        renderMobile={(l) => (
-          <div className="flex flex-col gap-2">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="truncate font-medium text-slate-900 dark:text-slate-100">
-                  {l.title}
+      {/* The ledger, on its own titled surface. `flush` because a table ranges
+          to the edges of the surface it sits on. */}
+      <Section flush title="All links">
+        <DataTable
+          columns={columns}
+          rows={rows}
+          rowKey={(l) => l.id}
+          loading={links.isLoading}
+          error={links.isError ? errorMessage(links.error) : null}
+          onRetry={() => links.refetch()}
+          defaultSortKey="created"
+          defaultSortDir="desc"
+          label="Payment links"
+          emptyLabel="No payment links yet."
+          emptyHint="Create one and send the URL to a customer. They open it, choose a coin and pay — you don't need to write any code."
+          emptyAction={
+            <button className="btn-primary" onClick={() => setCreateOpen(true)}>
+              <Plus size={16} /> Create your first link
+            </button>
+          }
+          renderMobile={(l) => (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate font-medium text-slate-900 dark:text-slate-100">
+                    {l.title}
+                  </div>
+                  <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                    {priceLabel(l)}
+                  </div>
                 </div>
-                <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                  {priceLabel(l)}
-                </div>
+                <LinkStateBadge link={l} />
               </div>
-              <LinkStateBadge link={l} />
+              {/* The URL row wraps rather than squeezing: two 44px controls and
+                  a copy button beside a truncating URL is more than 320px of
+                  content, and the URL is what has to stay readable. */}
+              <div className="flex flex-wrap items-center justify-between gap-x-2">
+                {urlCell(l, 'max-w-[24ch]')}
+                {rowActions(l)}
+              </div>
+              <div className="num text-xs text-slate-500 dark:text-slate-400">
+                {l.useCount} started
+                {l.maxUses !== null ? ` of ${l.maxUses}` : ''} · created{' '}
+                {formatDateShort(l.createdAt)}
+              </div>
             </div>
-            <div className="flex items-center justify-between gap-2">
-              {urlCell(l, 'max-w-[24ch]')}
-              {rowActions(l)}
-            </div>
-            <div className="num text-xs text-slate-500 dark:text-slate-400">
-              {l.useCount} started
-              {l.maxUses !== null ? ` of ${l.maxUses}` : ''} · created{' '}
-              {formatDateShort(l.createdAt)}
-            </div>
-          </div>
-        )}
-      />
+          )}
+        />
+      </Section>
 
       {/* ---------------- Create ---------------- */}
       <Modal
@@ -305,8 +326,13 @@ export default function PaymentLinks() {
           </>
         }
       >
-        {/* Ruled rows, same as every field group in the product. */}
-        <div className="divide-y divide-slate-200 dark:divide-slate-800">
+        {/* Ruled rows, same as every field group in the product — and rules
+            rather than surfaces for the same reason they are rules in the
+            invoice and subscription dialogs: the dialog is already a surface,
+            and a rule is what divides WITHIN one. `--line-soft` rather than a
+            hard-coded slate pair so the stroke follows the theme from the token
+            layer instead of from two utilities that have to agree. */}
+        <div className="divide-y divide-[var(--line-soft)]">
           <ModalField id="link-title" label="What is this for?" hint="Shown to the customer on the checkout page.">
             <input
               id="link-title"
@@ -323,7 +349,7 @@ export default function PaymentLinks() {
             id="link-desc"
             label={
               <>
-                Description <span className="font-normal text-slate-400">(optional)</span>
+                Description <span className="font-normal text-slate-500 dark:text-slate-400">(optional)</span>
               </>
             }
           >
@@ -341,7 +367,7 @@ export default function PaymentLinks() {
             id="link-amount"
             label={
               <>
-                Amount <span className="font-normal text-slate-400">(optional)</span>
+                Amount <span className="font-normal text-slate-500 dark:text-slate-400">(optional)</span>
               </>
             }
             hint="A fixed amount cannot be changed by the customer. Leave it empty for tips or donations."
@@ -477,6 +503,19 @@ function priceLabel(l: PaymentLink): string {
   return `Customer enters the amount · ${pairLabel(l)}`;
 }
 
+/**
+ * The 44px box every icon control on this page is drawn inside, at module scope
+ * so the row actions and the open-checkout anchor cannot drift apart. `sm:`
+ * relaxes it to 36 where there is a pointer and vertical space is worth more —
+ * the same trade `.btn` makes at the same breakpoint.
+ *
+ * `place-items-center` on a grid rather than padding: padding sized to reach
+ * 44px would differ for a 14px glyph and a 16px one, and the two would then sit
+ * at different widths in the same row.
+ */
+const ICON_ACTION =
+  'grid h-11 w-11 shrink-0 place-items-center rounded-lg text-slate-400 outline-none transition-colors duration-100 sm:h-9 sm:w-9';
+
 /** A quiet icon control. Ink change only — nothing travels, nothing loops. */
 function IconAction({
   label,
@@ -493,7 +532,7 @@ function IconAction({
       onClick={onClick}
       aria-label={label}
       title={label}
-      className="rounded p-1.5 text-slate-400 outline-none transition-colors duration-100 hover:text-slate-900 focus-visible:ring-2 focus-visible:ring-brand-500 dark:hover:text-slate-100"
+      className={`${ICON_ACTION} hover:bg-[var(--hover)] hover:text-slate-900 focus-visible:ring-2 focus-visible:ring-brand-500 dark:hover:text-slate-100`}
     >
       {children}
     </button>

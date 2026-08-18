@@ -18,6 +18,7 @@ import type { CreatePayoutInput, Payout } from '@/types';
 import PageHeader from '@/components/PageHeader';
 import AssetPicker from '@/components/AssetPicker';
 import DataTable, { type Column } from '@/components/DataTable';
+import Section from '@/components/Section';
 import { PayoutStatusBadge } from '@/components/Badge';
 import StatCard from '@/components/StatCard';
 import Spinner from '@/components/Spinner';
@@ -227,10 +228,14 @@ export default function Payouts() {
         }
       />
 
-      {/* Asymmetric spread: the instrument in the narrow margin column, the
-          ledger it writes into across the wide one. */}
-      <div className="grid grid-cols-1 gap-x-10 gap-y-10 lg:grid-cols-12">
-        <div className="min-w-0 lg:col-span-4">
+      {/* Asymmetric spread, now in surfaces rather than in white space: the
+          instrument in the narrow margin column, the ledger it writes into
+          across the wide one. The gutter drops from `gap-10` to `gap-3` — a
+          wide gutter was how the outgoing design separated two blocks that had
+          no edges of their own, and once each block is a lit surface the same
+          gap reads as the page falling apart. */}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
+        <div className="grid min-w-0 content-start gap-3 lg:col-span-4">
           {/* Scoped to the SELECTED pair. The combined figure the legacy
               /balance returns sums every asset and labels the total USDT, which
               is a number the merchant could never withdraw in one payout. */}
@@ -243,158 +248,179 @@ export default function Payouts() {
             sub="available to withdraw — settles separately from every other asset"
           />
 
-          <form onSubmit={onSubmit} className="rule mt-9 pt-3">
-            <span className="runhead">Request payout</span>
-
-            {mutation.isError && (
-              <div className="mt-4" role="alert">
-                <span className="runhead text-red-600 dark:text-red-400">
-                  Not created
-                </span>
-                <p className="measure mt-1.5 text-sm leading-relaxed text-slate-700 dark:text-slate-300">
-                  {errorMessage(mutation.error)}
-                </p>
-              </div>
-            )}
-            {mutation.isSuccess && (
-              <div className="mt-4" role="status">
-                <span className="runhead text-emerald-600 dark:text-emerald-400">
-                  Queued
-                </span>
-                <p className="measure mt-1.5 text-sm leading-relaxed text-slate-700 dark:text-slate-300">
-                  The payout appears in the history as soon as the gateway picks
-                  it up.
-                </p>
-              </div>
-            )}
-
-            <div className="mt-5 space-y-4">
-              {networks.length > 1 && (
-                <div>
-                  <label className="label" htmlFor="payout-network">
-                    Network
-                  </label>
-                  <select
-                    id="payout-network"
-                    className="input"
-                    {...register('network')}
-                  >
-                    {networks.map((n) => (
-                      <option key={n} value={n}>
-                        {n}
-                      </option>
-                    ))}
-                  </select>
+          {/* THE FORM, ON A SURFACE. A form is the densest concentration of
+              controls in the product and the one place the contract's rule
+              bites hardest: a column of fields printed on the bare canvas has
+              nothing saying where the instrument starts and stops, so the
+              submit button at the bottom looks like it belongs to the page
+              rather than to the four fields above it. `Section` supplies the
+              running head that `.rule` + `.runhead` used to draw by hand. */}
+          <Section title="Request payout">
+            <form onSubmit={onSubmit}>
+              {/* Outcome messages sit in a `.well` — inset rather than raised.
+                  They are a report about what just happened, not another
+                  control, and dropping them a step below the surface is what
+                  keeps them from competing with the fields underneath. */}
+              {mutation.isError && (
+                <div className="well mb-5 p-3" role="alert">
+                  <span className="runhead text-red-600 dark:text-red-400">
+                    Not created
+                  </span>
+                  <p className="measure mt-1.5 text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                    {errorMessage(mutation.error)}
+                  </p>
+                </div>
+              )}
+              {mutation.isSuccess && (
+                <div className="well mb-5 p-3" role="status">
+                  <span className="runhead text-emerald-600 dark:text-emerald-400">
+                    Queued
+                  </span>
+                  <p className="measure mt-1.5 text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                    The payout appears in the history as soon as the gateway picks
+                    it up.
+                  </p>
                 </div>
               )}
 
-              <AssetPicker
-                id="payout-asset"
-                network={selectedNetwork}
-                value={selectedAsset}
-                onChange={(sym) => setValue('asset', sym, { shouldDirty: true })}
-                context="payout"
-              />
+              <div className="space-y-4">
+                {networks.length > 1 && (
+                  <div>
+                    <label className="label" htmlFor="payout-network">
+                      Network
+                    </label>
+                    <select
+                      id="payout-network"
+                      className="input"
+                      {...register('network')}
+                    >
+                      {networks.map((n) => (
+                        <option key={n} value={n}>
+                          {n}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
 
-              <div>
-                <label className="label" htmlFor="amount">
-                  Amount ({selectedAsset})
-                </label>
-                <input
-                  id="amount"
-                  className="input num"
-                  inputMode="decimal"
-                  placeholder="100.00"
-                  {...register('amount', {
-                    required: 'Amount is required',
-                    pattern: {
-                      value: /^\d+(\.\d{1,6})?$/,
-                      message: 'Enter a valid amount',
-                    },
-                    validate: (v) =>
-                      Number(v) > 0 || 'Amount must be greater than zero',
-                  })}
+                <AssetPicker
+                  id="payout-asset"
+                  network={selectedNetwork}
+                  value={selectedAsset}
+                  onChange={(sym) => setValue('asset', sym, { shouldDirty: true })}
+                  context="payout"
                 />
-                {errors.amount && (
-                  <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">
-                    {errors.amount.message}
-                  </p>
-                )}
-                {availableHere !== undefined && (
-                  <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
-                    <span className="num">{formatAmount(availableHere)}</span>{' '}
-                    {selectedAsset} available on {selectedNetwork}
-                  </p>
-                )}
-              </div>
-            </div>
 
-            {/* The destination, as ruled key/value rows rather than a tinted
-                panel. The network is named because the wallet is per-network. */}
-            <dl className="mt-6">
-              <div className="spine-row">
-                <dt className="spine-label">Destination</dt>
-                <dd className="spine-value">
-                  {wallet ? (
-                    <code className="font-mono text-xs">
-                      {shortHash(wallet, 10, 8)}
-                    </code>
-                  ) : (
-                    <span className="text-amber-600 dark:text-amber-400">
-                      Not configured
-                    </span>
+                <div>
+                  <label className="label" htmlFor="amount">
+                    Amount ({selectedAsset})
+                  </label>
+                  <input
+                    id="amount"
+                    className="input num"
+                    inputMode="decimal"
+                    placeholder="100.00"
+                    {...register('amount', {
+                      required: 'Amount is required',
+                      pattern: {
+                        value: /^\d+(\.\d{1,6})?$/,
+                        message: 'Enter a valid amount',
+                      },
+                      validate: (v) =>
+                        Number(v) > 0 || 'Amount must be greater than zero',
+                    })}
+                  />
+                  {errors.amount && (
+                    <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">
+                      {errors.amount.message}
+                    </p>
                   )}
-                </dd>
+                  {availableHere !== undefined && (
+                    <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
+                      <span className="num">{formatAmount(availableHere)}</span>{' '}
+                      {selectedAsset} available on {selectedNetwork}
+                    </p>
+                  )}
+                </div>
               </div>
-              <div className="spine-row">
-                <dt className="spine-label">Settles on</dt>
-                <dd className="spine-value">
-                  {selectedAsset} · {selectedNetwork}
-                </dd>
-              </div>
-            </dl>
 
-            {!wallet && !settingsQuery.isLoading && (
-              <p className="measure mt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                No {selectedNetwork} payout wallet is set, so there is nowhere to
-                send the funds.{' '}
-                <Link to="/settings" className="link-ink">
-                  Set one in Settings
-                </Link>
-                .
-              </p>
-            )}
+              {/* The destination, as ruled key/value rows rather than a tinted
+                  panel. The spine is exactly right for two facts that answer
+                  "where is this going" — and inside a surface the hairlines are
+                  dividing within a block rather than pretending to be one. The
+                  network is named because the wallet is per-network. */}
+              <dl className="mt-6">
+                <div className="spine-row">
+                  <dt className="spine-label">Destination</dt>
+                  <dd className="spine-value">
+                    {wallet ? (
+                      // A wallet address is one unbreakable token. It is elided
+                      // here, but `break-all` is what guarantees the narrow
+                      // margin column can never be widened by it.
+                      <code className="break-all font-mono text-xs">
+                        {shortHash(wallet, 10, 8)}
+                      </code>
+                    ) : (
+                      <span className="text-amber-600 dark:text-amber-400">
+                        Not configured
+                      </span>
+                    )}
+                  </dd>
+                </div>
+                <div className="spine-row">
+                  <dt className="spine-label">Settles on</dt>
+                  <dd className="spine-value">
+                    {selectedAsset} · {selectedNetwork}
+                  </dd>
+                </div>
+              </dl>
 
-            <button
-              type="submit"
-              className="btn-primary mt-6 w-full"
-              disabled={mutation.isPending || !wallet}
-            >
-              {mutation.isPending ? (
-                <Spinner size={16} />
-              ) : (
-                <>
-                  <Send size={16} aria-hidden /> Request payout
-                </>
+              {!wallet && !settingsQuery.isLoading && (
+                <p className="measure mt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                  No {selectedNetwork} payout wallet is set, so there is nowhere to
+                  send the funds.{' '}
+                  <Link to="/settings" className="link-ink">
+                    Set one in Settings
+                  </Link>
+                  .
+                </p>
               )}
-            </button>
-          </form>
+
+              <button
+                type="submit"
+                className="btn-primary mt-6 w-full"
+                disabled={mutation.isPending || !wallet}
+              >
+                {mutation.isPending ? (
+                  <Spinner size={16} />
+                ) : (
+                  <>
+                    <Send size={16} aria-hidden /> Request payout
+                  </>
+                )}
+              </button>
+            </form>
+          </Section>
         </div>
 
-        <div className="min-w-0 lg:col-span-8">
-          {/* Running head over the ledger. The table draws its own ink rule
-              under the column heads, so nothing is added below this line. */}
-          <div className="rule flex items-baseline justify-between gap-4 pb-3 pt-3">
-            <span className="runhead">Payout history</span>
-            {payouts && payouts.length > 0 && (
+        {/* The ledger's running head and its record count are the Section's
+            title and aside — the same two pieces of information the hand-drawn
+            `.rule` header carried, on a primitive that puts them at a fixed
+            height on every page in the product instead of a per-page guess. */}
+        <Section
+          className="min-w-0 lg:col-span-8"
+          flush
+          title="Payout history"
+          aside={
+            payouts && payouts.length > 0 ? (
               <span className="num text-xs text-slate-500 dark:text-slate-400">
                 {payoutsTruncated
                   ? `${payouts.length} most recent of ${payoutTotal}`
                   : `${payouts.length} record${payouts.length === 1 ? '' : 's'}`}
               </span>
-            )}
-          </div>
-
+            ) : undefined
+          }
+        >
           <DataTable
             columns={columns}
             rows={payouts ?? []}
@@ -414,7 +440,7 @@ export default function Payouts() {
             renderMobile={(p) => (
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="truncate font-mono text-xs text-slate-500 dark:text-slate-400">
+                  <p className="break-all font-mono text-xs text-slate-500 dark:text-slate-400">
                     {shortHash(p.payoutId, 10, 4)}
                   </p>
                   <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
@@ -423,9 +449,29 @@ export default function Payouts() {
                   <p className="num mt-1 text-xs text-slate-500 dark:text-slate-400">
                     {formatDate(p.createdAt)}
                   </p>
+                  {/* THE PROOF, PROMOTED ONTO THE PHONE. `Transaction` is a
+                      `hideOnMobile` column, so the stacked row used to drop the
+                      one fact that answers "did the money actually leave" — the
+                      question this page exists for. It is a real link with a
+                      44px target rather than a hover affordance, because touch
+                      has no hover. */}
+                  {p.txHash && (
+                    <a
+                      href={explorerTx(p.txHash, p.network)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="link-ink -ml-1 mt-0.5 inline-flex min-h-[44px] items-center gap-1 break-all px-1 font-mono text-xs"
+                    >
+                      {shortHash(p.txHash)}
+                      <ExternalLink size={11} className="shrink-0" aria-hidden />
+                    </a>
+                  )}
                 </div>
-                <div className="shrink-0 text-right">
-                  <p className="num lining-nums text-base font-semibold text-slate-900 dark:text-slate-50">
+                {/* `min-w-0` rather than `shrink-0`: a payout amount must never
+                    be clipped by the column it is set in. It yields width and
+                    wraps instead. */}
+                <div className="min-w-0 text-right">
+                  <p className="num lining-nums break-words text-base font-semibold text-slate-900 dark:text-slate-50">
                     {formatAmount(p.amount)}
                   </p>
                   <div className="mt-1.5 flex justify-end">
@@ -437,9 +483,12 @@ export default function Payouts() {
             // The identifier stays put while the rest of the row scrolls, and
             // the box gets a height so its header genuinely pins.
             stickyFirstColumn
-            maxHeight="65vh"
+            // `dvh`, not `vh`: on mobile Safari `vh` is measured against the
+            // taller pre-collapse viewport, so `65vh` is more of the screen than
+            // the merchant can actually see.
+            maxHeight="65dvh"
           />
-        </div>
+        </Section>
       </div>
     </>
   );

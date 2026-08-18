@@ -1,25 +1,35 @@
 /**
- * The hero illustration: an actual payment moving through the gateway.
+ * The payment lifecycle, drawn: an actual payment moving through the gateway.
  *
- * Inline SVG rather than an image so it inherits the theme (every colour is
- * `currentColor` or a Tailwind class), stays sharp at any size, costs no extra
- * request, and can animate the connectors with pure CSS. The dashes travelling
- * along the paths are the whole point — they show direction of flow, which a
- * static box diagram cannot.
+ * Inline SVG rather than an image so it inherits the theme (every colour is a
+ * Tailwind class or a token), stays sharp at any size, costs no extra request,
+ * and can animate the connectors with pure CSS. The dashes travelling along the
+ * paths are the whole point — they show DIRECTION of flow, and they show that
+ * the confirmation and the money go to two different places, which is the one
+ * thing a numbered list of steps genuinely cannot say.
  *
- * Decorative: the surrounding section carries the real text, so this is hidden
- * from assistive tech via role/aria on the wrapper.
+ * IT IS A SURFACE, NOT GLASS. It used to wear `.glass-card`, which broke the
+ * z-plane law: glass means "this is chrome floating above the page" and is
+ * budgeted at 3-4 elements per viewport because each one repaints its backdrop
+ * every scroll frame. This is a card. Cards get `.surface` — raised, rim-lit,
+ * and free.
+ *
+ * Decorative: the surrounding section carries the real text, so the whole
+ * drawing is described once by the SVG's own aria-label and nothing inside it
+ * is exposed separately.
  */
 export default function PaymentFlowDiagram() {
   return (
-    <div className="glass-card p-5 sm:p-7">
-      <div className="mb-5 flex items-center justify-between">
-        <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-          Payment lifecycle
-        </span>
-        <span className="chip">
-          <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
-          live
+    <div className="surface spot p-5 sm:p-7">
+      <div className="mb-5 flex items-center justify-between gap-3">
+        <h3 className="runhead">Payment lifecycle</h3>
+        {/* emerald, and the word "live" beside it. This chip used to carry a
+            BRAND dot, which put the interactive colour on a state — the one
+            thing the palette forbids outright. Brand means "you can act on
+            this"; nothing in a diagram can be acted on. */}
+        <span className="st text-emerald-600 dark:text-emerald-400">
+          <span className="st-dot" aria-hidden />
+          Live
         </span>
       </div>
 
@@ -65,10 +75,13 @@ export default function PaymentFlowDiagram() {
             className="stroke-brand-500/40"
             strokeWidth="1.5"
           />
-          <text x={210} y={58} textAnchor="middle" className="fill-slate-900 dark:fill-slate-100" fontSize="11" fontWeight="650">
+          <text x={210} y={58} textAnchor="middle" className="fill-slate-900 dark:fill-slate-100" fontSize="11.5" fontWeight="650">
             Deposit address
           </text>
-          <text x={210} y={72} textAnchor="middle" className="fill-slate-500" fontSize="9.5" fontFamily="ui-monospace, monospace">
+          {/* The secondary ink follows the ramp's own steps — 500 on paper, 400
+              on the dark ground. A single `fill-slate-500` reads correctly in
+              light and sits at 4.00:1 in dark, which is under the floor. */}
+          <text x={210} y={72} textAnchor="middle" className="fill-slate-500 dark:fill-slate-400" fontSize="10" fontFamily="ui-monospace, monospace">
             0x8842…2FCB
           </text>
         </g>
@@ -81,10 +94,10 @@ export default function PaymentFlowDiagram() {
             width={120}
             height={40}
             rx={11}
-            className="fill-white stroke-slate-200 dark:fill-slate-900 dark:stroke-slate-700"
+            className="fill-[var(--surface-2)] stroke-[var(--line)]"
             strokeWidth="1.5"
           />
-          <text x={210} y={133} textAnchor="middle" className="fill-slate-900 dark:fill-slate-100" fontSize="11" fontWeight="650">
+          <text x={210} y={133} textAnchor="middle" className="fill-slate-900 dark:fill-slate-100" fontSize="11.5" fontWeight="650">
             Confirming
           </text>
           {/* Confirmation pips, filling left to right. */}
@@ -95,7 +108,7 @@ export default function PaymentFlowDiagram() {
                 cx={182 + i * 11}
                 cy={146}
                 r={3}
-                className={i < 4 ? 'fill-brand-500' : 'fill-slate-300 dark:fill-slate-600'}
+                className={i < 4 ? 'fill-brand-500' : 'fill-slate-300 dark:fill-slate-700'}
               >
                 {i < 4 && (
                   <animate
@@ -123,10 +136,10 @@ export default function PaymentFlowDiagram() {
             className="stroke-brand-500/50"
             strokeWidth="1.5"
           />
-          <text x={222} y={195} textAnchor="middle" className="fill-slate-900 dark:fill-slate-100" fontSize="11" fontWeight="650">
+          <text x={222} y={195} textAnchor="middle" className="fill-slate-900 dark:fill-slate-100" fontSize="11.5" fontWeight="650">
             Gateway
           </text>
-          <text x={222} y={208} textAnchor="middle" className="fill-slate-500" fontSize="9">
+          <text x={222} y={208} textAnchor="middle" className="fill-slate-500 dark:fill-slate-400" fontSize="9.5">
             confirmed
           </text>
         </g>
@@ -141,13 +154,13 @@ export default function PaymentFlowDiagram() {
              x=127 is the midpoint of the exposed span between the customer box
              (ends at 104) and the deposit box (starts at 150). Centring on the
              whole connector instead would put this on top of the box. */}
-        <text x={127} y={54} textAnchor="middle" className="fill-slate-400" fontSize="8.5">
+        <text x={127} y={54} textAnchor="middle" className="fill-slate-500 dark:fill-slate-400" fontSize="9.5">
           pays
         </text>
-        <text x={66} y={236} textAnchor="middle" className="fill-slate-400" fontSize="8.5">
+        <text x={66} y={236} textAnchor="middle" className="fill-slate-500 dark:fill-slate-400" fontSize="9.5">
           payment.confirmed
         </text>
-        <text x={362} y={236} textAnchor="middle" className="fill-slate-400" fontSize="8.5">
+        <text x={362} y={236} textAnchor="middle" className="fill-slate-500 dark:fill-slate-400" fontSize="9.5">
           net amount
         </text>
       </svg>
@@ -181,7 +194,7 @@ function Node({
         className={
           accent
             ? 'fill-brand-600/10 stroke-brand-500/50 dark:fill-brand-400/10'
-            : 'fill-white stroke-slate-200 dark:fill-slate-900 dark:stroke-slate-700'
+            : 'fill-[var(--surface-2)] stroke-[var(--line)]'
         }
         strokeWidth="1.5"
       />
@@ -190,7 +203,7 @@ function Node({
         y={y + 19}
         textAnchor="middle"
         className="fill-slate-900 dark:fill-slate-100"
-        fontSize="11"
+        fontSize="11.5"
         fontWeight="650"
       >
         {label}
@@ -199,8 +212,8 @@ function Node({
         x={x + w / 2}
         y={y + 32}
         textAnchor="middle"
-        className="fill-slate-500"
-        fontSize="9"
+        className="fill-slate-500 dark:fill-slate-400"
+        fontSize="9.5"
       >
         {sub}
       </text>

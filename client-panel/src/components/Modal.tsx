@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 
@@ -58,16 +58,83 @@ export default function Modal({
   size = 'md',
   dismissable = true,
 }: ModalProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * FOCUS MANAGEMENT, SCROLL LOCK AND ESCAPE — all three, because a dialog with
+   * only some of them is a dialog that fails a keyboard user in a way nobody
+   * notices with a mouse.
+   *
+   * The trap is the part that was missing. Without it, Tab walks straight out of
+   * the panel and into the page behind it: the user is still looking at a modal,
+   * their focus ring has vanished somewhere under the scrim, and on a sheet that
+   * holds a one-time API secret they can tab to controls they were never meant
+   * to reach while it is open. `aria-modal` tells assistive tech the rest of the
+   * page is inert; it does not make it inert for the Tab key, which is a common
+   * and reasonable thing to assume and is wrong.
+   *
+   * FOCUS IS RESTORED to whatever opened the dialog. Losing it to `<body>` on
+   * close means the next Tab starts from the top of the document, which on this
+   * product means crossing the whole navigation rail to get back to the button
+   * the user just pressed.
+   *
+   * The selector deliberately excludes `[tabindex="-1"]` — programmatically
+   * focusable, but not part of the tab ring — and the panel itself takes
+   * `tabIndex={-1}` so it can receive focus when it contains no focusable child
+   * at all, which is the case for a purely informational dialog.
+   */
   useEffect(() => {
     if (!open) return;
+
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+
+    const focusable = () =>
+      Array.from(
+        panelRef.current?.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      ).filter((el) => el.offsetParent !== null || el === document.activeElement);
+
+    // Focus the first control rather than the panel where there is one: on a
+    // form dialog that puts the caret in the first field, which is what the
+    // user came to do.
+    const first = focusable()[0];
+    (first ?? panelRef.current)?.focus();
+
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && dismissable) onClose();
+      if (e.key === 'Escape' && dismissable) {
+        onClose();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+
+      const items = focusable();
+      if (items.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const firstItem = items[0];
+      const lastItem = items[items.length - 1];
+      const active = document.activeElement;
+
+      // Wrap at both ends, and also catch the case where focus has somehow
+      // already escaped the panel — pull it back rather than letting Tab
+      // continue through the page.
+      if (e.shiftKey && (active === firstItem || !panelRef.current?.contains(active))) {
+        e.preventDefault();
+        lastItem.focus();
+      } else if (!e.shiftKey && (active === lastItem || !panelRef.current?.contains(active))) {
+        e.preventDefault();
+        firstItem.focus();
+      }
     };
+
     document.addEventListener('keydown', onKey);
     document.body.style.overflow = 'hidden';
     return () => {
       document.removeEventListener('keydown', onKey);
       document.body.style.overflow = '';
+      previouslyFocused?.focus?.();
     };
   }, [open, onClose, dismissable]);
 
@@ -81,9 +148,11 @@ export default function Modal({
         aria-hidden
       />
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
-        className={`surface relative z-10 flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-b-none rounded-t-3xl shadow-float sm:max-h-[88dvh] sm:rounded-2xl ${sizes[size]} motion-safe:animate-[sheet-in_var(--dur-modal)_var(--ease-out)] sm:motion-safe:animate-[dialog-in_var(--dur-modal)_var(--ease-out)]`}
+        tabIndex={-1}
+        className={`surface relative z-10 flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-b-none rounded-t-3xl shadow-float outline-none sm:max-h-[88dvh] sm:rounded-2xl ${sizes[size]} motion-safe:animate-[sheet-in_var(--dur-modal)_var(--ease-out)] sm:motion-safe:animate-[dialog-in_var(--dur-modal)_var(--ease-out)]`}
       >
         {(title || dismissable) && (
           <div className="flex shrink-0 items-start justify-between gap-4 px-5 pb-3 pt-5 sm:px-6">

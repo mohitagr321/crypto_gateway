@@ -16,7 +16,7 @@ import {
   Eye,
   EyeOff,
 } from 'lucide-react';
-import AuthShell from '@/components/AuthShell';
+import AuthShell, { Notice } from '@/components/AuthShell';
 import { LoadingPanel } from '@/components/Spinner';
 import { errorMessage, getSignupStatus, register as registerApi } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
@@ -35,18 +35,35 @@ import type { RegisterInput } from '@/types';
  * identical whether or not the address is already registered, so this page can
  * never say "that email is taken" — it always routes to "check your inbox".
  *
- * SET AS A BROADSHEET, like the rest of the public funnel. The form is not a
- * card: AuthShell supplies the masthead, the running head and the reading
- * measure, and every field here is a RULED ROW in a ledger rather than a boxed
- * group. Three things changed beyond the styling, and each was a rule break:
+ * SET ON A SURFACE, like the rest of the funnel. AuthShell supplies the depth
+ * field, the masthead, the running head, the headline and the panel; this file
+ * is the form on it. The fields used to be RULED ROWS in a ledger, which was
+ * the broadsheet idiom — six hairlines stacked down a column, each one drawing
+ * a line the eye has to cross to reach the next input. Inside a lit panel the
+ * panel is the enclosure, so the rules are gone and the fields are simply a
+ * stack. That also makes this screen and /login the same object, which they
+ * were never quite before.
+ *
+ * Four things beyond the reskin, each of which was a rule break or a defect:
  *
  *   THE STEP INDEX no longer fills with brand. It used to be two brand-600
  *   discs and a brand-600 progress bar, which is the brand hue indicating
- *   STATE — the one thing it may never do. Progress is now carried by stroke
+ *   STATE — the one thing it may never do. Progress is carried by stroke
  *   weight (hairline -> ink), by the label going from slate to ink, and by a
- *   tick on the step you have finished. Three carriers, none of them hue.
+ *   tick on the step you have finished. Three carriers, none of them hue. It is
+ *   also no longer a hard `grid-cols-2`: below ~19rem the two labels stack
+ *   rather than being squeezed into 9rem each.
  *
- *   THE STRENGTH READOUT still leads with the WORD, and the word now takes the
+ *   THE ACKNOWLEDGEMENT MOVED INTO A `.well`. It is the one thing on this page
+ *   a merchant can be held to, and an inset group says "read this" on a lit
+ *   panel in a way a hairline above a checkbox does not. The checkbox also
+ *   takes `accent-*` now: without the forms plugin, `text-brand-600` on a
+ *   native checkbox styled nothing at all, so the control rendered in the UA's
+ *   own blue in both themes.
+ *
+ *   THE PASSWORD REVEAL IS A 44px TARGET. It was a bare 16px glyph.
+ *
+ *   THE STRENGTH READOUT still leads with the WORD, and the word takes the
  *   semantic ink as well, so the meaning survives with the bars unseen.
  *
  *   THE FIELDS ARE DESCRIBED. Hints and errors are wired to their input with
@@ -54,12 +71,12 @@ import type { RegisterInput } from '@/types';
  *   a sighted user saw "Enter a valid email address", a screen-reader user
  *   heard only "Work email, invalid entry".
  *
- * NO `.reveal` ANYWHERE IN THE FORM, on purpose and by rule. AuthShell's
- * useReveal() collects its targets once on mount, so anything rendered
- * conditionally — every field on step 2, the strength meter, the error alert —
- * would never be observed and would sit at opacity 0 in a browser without
- * scroll-driven animation. The form is also the thing the visitor came for and
- * should not be faded in at them. Reveals live only in the margin column.
+ * NO `.reveal` ANYWHERE IN THE FORM, and that is now enforced by the shell
+ * rather than by this comment: AuthShell scopes its reveal observer to the
+ * supporting column, so a `.reveal` on a conditionally-rendered field here
+ * would simply do nothing rather than pinning the field at opacity 0. The form
+ * is the thing the visitor came for and should not be faded in at them; the
+ * expressiveness this route earns lives in the column beside it.
  */
 
 interface FormValues extends RegisterInput {
@@ -199,11 +216,18 @@ export default function Signup() {
       }
     >
       {/* ========================= THE STEP INDEX =========================
-          A newspaper contents line, not a widget. The rule over a step you
-          have reached is INK; the one ahead of you stays a hairline. A
-          finished step also carries a tick, so progress reads without any
-          reliance on hue — which is what let the brand-filled discs go. */}
-      <ol className="grid grid-cols-2 gap-x-4">
+          A contents line, not a widget. The rule over a step you have reached
+          is INK; the one ahead of you stays a hairline. A finished step also
+          carries a tick, so progress reads without any reliance on hue — which
+          is what let the brand-filled discs go.
+
+          `auto-fit` rather than `grid-cols-2`. At 360px, inside the panel's own
+          padding, a hard two-column split gives each label about 9rem, and
+          "Sign-in details" then sets on two cramped lines beside a heading that
+          has room to spare. `minmax(min(100%,9rem),1fr)` keeps the index
+          horizontal wherever two columns genuinely fit and stacks it where they
+          do not, with no breakpoint to keep in step with the copy. */}
+      <ol className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,9rem),1fr))] gap-x-4 gap-y-3">
         {STEPS.map((label, i) => {
           const n = i + 1;
           const reached = step >= n;
@@ -212,7 +236,7 @@ export default function Signup() {
             <li
               key={label}
               aria-current={step === n ? 'step' : undefined}
-              className={`pt-2.5 ${
+              className={`min-w-0 pt-2.5 ${
                 reached
                   ? 'border-t border-slate-900 dark:border-slate-100'
                   : 'rule'
@@ -244,22 +268,14 @@ export default function Signup() {
         Step {step} of 2
       </p>
 
-      <form onSubmit={onSubmit} className="mt-7" noValidate>
-        {/* A stroke and a word, not a tinted box. Red is the state; the icon
-            and the sentence are what actually carry it. */}
+      <form onSubmit={onSubmit} className="mt-6" noValidate>
+        {/* The funnel's shared notice. Red is the state; the icon and the
+            sentence are what actually carry it. */}
         {error && (
-          <div
-            role="alert"
-            className="flex gap-2.5 border-t-2 border-red-600 pt-3 dark:border-red-400"
-          >
-            <AlertCircle
-              size={16}
-              className="mt-0.5 shrink-0 text-red-600 dark:text-red-400"
-              aria-hidden
-            />
-            <p className="text-sm leading-relaxed text-red-700 dark:text-red-400">
+          <div className="mb-5">
+            <Notice tone="failed" icon={AlertCircle}>
               {error}
-            </p>
+            </Notice>
           </div>
         )}
 
@@ -269,7 +285,7 @@ export default function Signup() {
             node, and the value typed into "email" reappears in
             "businessName" — the field arrives pre-filled with the address. */}
         {step === 1 ? (
-          <div key="step-1">
+          <div key="step-1" className="space-y-5">
             <Field
               id="email"
               label="Work email"
@@ -338,7 +354,7 @@ export default function Signup() {
                 id="password"
                 type={showPassword ? 'text' : 'password'}
                 autoComplete="new-password"
-                className="input pl-9 pr-10"
+                className="input pl-9 pr-12"
                 placeholder="At least 10 characters"
                 aria-invalid={errors.password ? true : undefined}
                 aria-describedby={
@@ -349,17 +365,24 @@ export default function Signup() {
                   minLength: { value: 10, message: 'Use at least 10 characters' },
                 })}
               />
+              {/* A 44px target around a 16px glyph — the box is transparent
+                  and the icon has not moved. The hand-rolled focus ring is
+                  gone with it: `:focus-visible` is defined once in the base
+                  layer, and a second spelling of it is how one control ends up
+                  with a different ring from the other eight. */}
               <button
                 type="button"
                 onClick={() => setShowPassword((v) => !v)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 rounded text-slate-400 outline-none hover:text-slate-600 focus-visible:ring-2 focus-visible:ring-brand-500 dark:hover:text-slate-300"
+                className="absolute right-0.5 top-1/2 grid h-11 w-11 -translate-y-1/2 place-items-center rounded-lg text-slate-400 transition-colors duration-[var(--dur-press)] hover:text-slate-700 sm:h-9 sm:w-9 dark:hover:text-slate-200"
                 aria-label={showPassword ? 'Hide password' : 'Show password'}
               >
                 {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
               </button>
             </Field>
 
-            <div className="rule pt-6">
+            {/* The commit row, divided from the fields by the one kind of rule
+                this system still keeps: a hairline dividing WITHIN a surface. */}
+            <div className="rule pt-5">
               <button type="button" onClick={goToStep2} className="btn-primary w-full">
                 Continue <ArrowRight size={16} />
               </button>
@@ -370,7 +393,7 @@ export default function Signup() {
             </div>
           </div>
         ) : (
-          <div key="step-2">
+          <div key="step-2" className="space-y-5">
             <Field
               id="businessName"
               label="Business name"
@@ -431,15 +454,25 @@ export default function Signup() {
               />
             </Field>
 
-            {/* The acknowledgement gets its own ruled group and its own running
-                head. It is the one thing on this page a merchant may be held
-                to, and burying it as a trailing checkbox reads as a trick. */}
-            <div className="rule py-5">
+            {/* THE ACKNOWLEDGEMENT, IN A WELL. It is the one thing on this page
+                a merchant may be held to, and burying it as a trailing checkbox
+                reads as a trick. An inset group is the system's way of saying
+                "this is set into the panel, read it" — a raised surface inside
+                a raised surface would just be two cards.
+
+                The whole label is the target, which is what keeps this over the
+                44px floor: an 18px box with a two-line sentence beside it is a
+                ~48px row, all of it clickable. */}
+            <div className="well p-4">
               <span className="runhead">Before you start</span>
-              <label className="mt-3 flex items-start gap-2.5 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+              <label className="mt-3 flex cursor-pointer items-start gap-2.5 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+                {/* `accent-*`, not `text-*`. There is no forms plugin in this
+                    build, so the control is a NATIVE checkbox and `text-brand-600`
+                    styled precisely nothing — it rendered in the UA's own blue,
+                    in both themes, on the one control this page requires. */}
                 <input
                   type="checkbox"
-                  className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-brand-600 focus:ring-brand-500 dark:border-slate-600 dark:bg-slate-800"
+                  className="mt-0.5 h-[18px] w-[18px] shrink-0 accent-brand-600"
                   aria-invalid={errors.acceptTerms ? true : undefined}
                   aria-describedby={errors.acceptTerms ? 'acceptTerms-error' : undefined}
                   {...register('acceptTerms', { required: true })}
@@ -459,8 +492,8 @@ export default function Signup() {
               )}
             </div>
 
-            <div className="rule pt-6">
-              <div className="flex gap-3">
+            <div className="rule pt-5">
+              <div className="flex flex-wrap gap-3">
                 <button
                   type="button"
                   onClick={() => setStep(1)}
@@ -507,14 +540,21 @@ function Optional() {
 }
 
 /**
- * One field, set as a RULED ROW rather than a boxed group — the hairline does
- * the separating a border-and-padding card was doing, for a pixel.
+ * One field: label, hint, leading icon, control, inline error — the same parts
+ * in the same order as Login's local Field, so the two screens are one design.
+ *
+ * IT USED TO BE A RULED ROW and is now just a stack. The hairline was doing the
+ * enclosing on a page printed straight onto paper; the panel does it now, and
+ * six stacked rules inside a lit surface read as a table someone forgot to fill
+ * in. Kept local to each page rather than lifted into components/: the two
+ * funnel screens are the only callers, and a shared "form field" abstraction is
+ * the thing that quietly grows six props.
  *
  * `hint` and `error` both get a stable id so the caller can point
  * aria-describedby at them; the caller owns that wiring because the <input> is
  * passed in as children and cannot be reached from here.
  *
- * `after` is the slot under the input, inside the same ruled row — the password
+ * `after` is the slot under the input, still inside the field — the password
  * strength meter belongs to its field, not to the gap beneath it.
  */
 function Field({
@@ -535,7 +575,7 @@ function Field({
   children: ReactNode;
 }) {
   return (
-    <div className="rule py-5">
+    <div>
       <label className="label mb-0" htmlFor={id}>
         {label}
       </label>
@@ -580,13 +620,22 @@ const afterSignup = [
 ];
 
 /**
- * The margin column for this step. It replaces the shell's default standing
+ * The supporting column for this step. It replaces the shell's default standing
  * matter because a registration form has one question the reader actually
  * wants answered — what happens after I press the button — and answering it is
  * worth more here than a second recital of the product's virtues.
  *
+ * IT STAYS ON THE CANVAS. This is the most expressive route in the funnel and
+ * it still does not get a surface of its own: two lit panels would be two
+ * offers, and the reader is here to take one. The `.rule-strong` that opened it
+ * is gone with the rest of the broadsheet furniture — a running head above a
+ * 7.5rem figure does not need a stroke to announce it.
+ *
  * The figure is `0`, and it is the one this page is arguing: there is no review
- * queue between submitting and being live.
+ * queue between submitting and being live. It carries the brand -> accent
+ * gradient because signup is a marketing-frequency route and this is the single
+ * figure the column is built around, which is the whole brief for
+ * `.text-gradient`.
  *
  * REVEALS HERE ARE SAFE because this markup mounts with the shell and never
  * changes with `step`. Nothing conditional in this component, ever — AuthShell's
@@ -597,11 +646,10 @@ function WhatHappensNext() {
   return (
     <>
       <span className="runhead">What happens next</span>
-      <div className="rule-strong mt-3" aria-hidden />
 
-      <div className="reveal mt-8">
-        <span className="figure-xl">0</span>
-        <span className="figure-label">
+      <div className="reveal mt-6">
+        <span className="figure-xl text-gradient">0</span>
+        <span className="figure-label measure">
           approvals to wait for. No review queue and no sales call — confirm your
           email and the account is live.
         </span>
@@ -609,7 +657,11 @@ function WhatHappensNext() {
 
       <ol className="mt-10">
         {afterSignup.map((s, i) => (
-          <li key={s.title} className="reveal rule py-5" style={revealDelay(i + 1)}>
+          <li
+            key={s.title}
+            className="reveal rule py-5 first:border-t-0 first:pt-0"
+            style={revealDelay(i + 1)}
+          >
             <div className="flex items-baseline gap-2.5">
               <span className="runhead num shrink-0">{ord(i)}</span>
               <span className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">

@@ -16,27 +16,40 @@ import type { ApiError } from '@/lib/api';
 import { isValidBep20Address, isValidTrc20Address, isValidUrl } from '@/lib/format';
 import type { ChangePasswordInput, UpdateAccountSettings } from '@/types';
 import PageHeader from '@/components/PageHeader';
+import Section from '@/components/Section';
 import Spinner from '@/components/Spinner';
 import IpAllowlistCard from '@/components/IpAllowlistCard';
 
 /**
- * Account settings — set as RULED FIELD GROUPS, not as a column of cards.
+ * Account settings — one titled surface per group of related fields.
  *
- * The old page was four white boxes stacked down a centred 672px column, each
- * one repeating the same border/radius/shadow/24px-padding to say "these three
- * fields belong together" — something a running head in the margin and a
- * hairline between rows say for free, and say better, because the margin column
- * can also carry the one sentence explaining what the group is FOR.
+ * WHAT THE REDESIGN CHANGED. The page was a ruled spread: a narrow margin
+ * column of running heads against a wide column of fields, divided by
+ * hairlines. That reads correctly in a design made of rules, and in one made of
+ * lit surfaces it reads as a page that was never finished — a settings form
+ * printed straight onto the depth field. Each group is a `Section` now, which
+ * is the same primitive every other page in the product is assembled from, so
+ * "these three fields belong together" is said by a surface rather than by an
+ * indent.
  *
- * Asymmetric on purpose: a narrow margin column of running heads against a wide
- * field column, ranged left. A settings page centred in the viewport reads as a
- * form someone has to fill in; ranged against a spine it reads as a record of
- * an account, which is what it is.
+ * THE GLOSS MOVED UNDER THE HEAD instead of into a margin column beside it.
+ * With the running head lifted into the Section's own head strip, a lone
+ * sentence stranded in a narrow left column would be an annotation with nothing
+ * to annotate. It reads in order now: what this group is, what it is for, then
+ * the fields.
  *
- * HINTS SIT ABOVE THE INPUT, not below it. "On-chain transfers are irreversible"
- * is not a footnote about what you typed, it is a warning to read before you
- * type, and it is wired to the field with aria-describedby so it is announced
- * that way too.
+ * WHAT DID NOT CHANGE, AND MUST NOT. Every validation rule, every
+ * `aria-describedby` wiring, every warning and its ink. This is the page where a
+ * merchant types the address their money will be swept to, so:
+ *
+ *   HINTS SIT ABOVE THE INPUT, not below it. "On-chain transfers are
+ *   irreversible" is not a footnote about what you typed, it is a warning to
+ *   read before you type, and it is wired to the field with `aria-describedby`
+ *   so it is announced in that order too.
+ *
+ *   THE SIGNING-SECRET STATE IS A SENTENCE AND AN ICON, never colour alone —
+ *   "no signing secret set" is the configuration a merchant most needs to
+ *   notice, and it must survive greyscale.
  */
 
 interface FormValues {
@@ -52,44 +65,24 @@ interface PasswordFormValues {
 }
 
 /**
- * A group of related fields: running head and gloss in the margin column, the
- * fields ruled apart in the main one. `ruled` is off for the first group on the
- * page, where PageHeader's ink rule has already opened the block and a hairline
- * 24px under it would read as a doubled stroke.
+ * The gloss under a group's running head: what this block of settings is FOR,
+ * on a real measure so it is read rather than skipped.
  */
-function Group({
-  runhead,
-  gloss,
-  ruled = true,
-  children,
-}: {
-  runhead: string;
-  gloss?: ReactNode;
-  ruled?: boolean;
-  children: ReactNode;
-}) {
+function Gloss({ children }: { children: ReactNode }) {
   return (
-    <section
-      className={`grid gap-x-10 gap-y-4 lg:grid-cols-12 ${ruled ? 'rule pt-6' : ''}`}
-    >
-      <div className="lg:col-span-3">
-        <h2 className="runhead">{runhead}</h2>
-        {gloss && (
-          <p className="mt-2 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-            {gloss}
-          </p>
-        )}
-      </div>
-      <div className="lg:col-span-9">
-        {/* Hairlines BETWEEN rows only — never above the first, which would
-            double whatever opened the group, and never under the last, which
-            would leave a stroke hanging. */}
-        <div className="divide-y divide-slate-200 dark:divide-slate-800">
-          {children}
-        </div>
-      </div>
-    </section>
+    <p className="measure text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+      {children}
+    </p>
   );
+}
+
+/**
+ * The field stack inside a group. Hairlines BETWEEN rows only — never above the
+ * first, which would double the Section's own head rule, and never under the
+ * last, which would leave a stroke hanging inside the surface.
+ */
+function Fields({ children }: { children: ReactNode }) {
+  return <div className="mt-4 divide-y divide-[var(--line-soft)]">{children}</div>;
 }
 
 /** One ruled field row: label, hint, control, error — in reading order. */
@@ -156,7 +149,7 @@ function Notice({ tone, children }: { tone: 'ok' | 'bad'; children: ReactNode })
 /** Page-level load failure, set the way DataTable sets its own: no icon, no box. */
 function LoadFailure({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <div>
+    <div className="surface p-5">
       <span className="runhead text-red-600 dark:text-red-400">Could not load</span>
       <p className="measure mt-3 text-base leading-relaxed text-slate-700 dark:text-slate-300">
         {message}
@@ -169,8 +162,10 @@ function LoadFailure({ message, onRetry }: { message: string; onRetry: () => voi
 }
 
 /**
- * Static placeholder in the shape of the real groups. `.ghost`, not `.skeleton`
- * — the frequency boundary bans looping animation on a dashboard route.
+ * Static placeholder in the shape of the real groups — surfaces included, since
+ * the surfaces appearing under the placeholder text would be a larger movement
+ * than the text landing in them. `.ghost`, not a shimmer: the frequency
+ * boundary bans looping animation on a dashboard route.
  */
 function SettingsGhost() {
   return (
@@ -178,13 +173,12 @@ function SettingsGhost() {
       <span className="sr-only" role="status">
         Loading…
       </span>
-      <div className="space-y-8" aria-busy="true">
+      <div className="space-y-4" aria-busy="true">
         {[0, 1].map((g) => (
-          <div key={g} className="grid gap-x-10 gap-y-4 lg:grid-cols-12">
-            <div className="lg:col-span-3">
-              <span className="ghost h-3 w-28" aria-hidden />
-            </div>
-            <div className="lg:col-span-9 space-y-6">
+          <div key={g} className="surface p-4 sm:p-5">
+            <span className="ghost h-3 w-28" aria-hidden />
+            <span className="ghost mt-4 h-3 w-full max-w-sm" aria-hidden />
+            <div className="mt-6 space-y-6">
               <div className="space-y-2">
                 <span className="ghost h-3 w-32" aria-hidden />
                 <span className="ghost h-10 w-full max-w-xl" aria-hidden />
@@ -234,17 +228,14 @@ function PasswordSection() {
       : errorMessage(mutation.error);
 
   return (
-    <form onSubmit={onSubmit} className="rule grid gap-x-10 gap-y-4 pt-6 lg:grid-cols-12">
-      <div className="lg:col-span-3">
-        <h2 className="runhead">Password</h2>
-        <p className="mt-2 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+    <form onSubmit={onSubmit}>
+      <Section title="Password">
+        <Gloss>
           Your dashboard sign-in. API keys are issued and revoked separately, on
           the API keys page.
-        </p>
-      </div>
+        </Gloss>
 
-      <div className="lg:col-span-9">
-        <div className="divide-y divide-slate-200 dark:divide-slate-800">
+        <Fields>
           <Field
             id="currentPassword"
             label="Current password"
@@ -311,9 +302,9 @@ function PasswordSection() {
               })}
             />
           </Field>
-        </div>
+        </Fields>
 
-        <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-3">
+        <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-[var(--line-soft)] pt-5">
           <button type="submit" className="btn-primary" disabled={mutation.isPending}>
             {mutation.isPending ? (
               <Spinner size={16} />
@@ -326,7 +317,7 @@ function PasswordSection() {
           {mutation.isError && <Notice tone="bad">{errText}</Notice>}
           {mutation.isSuccess && <Notice tone="ok">Password updated.</Notice>}
         </div>
-      </div>
+      </Section>
     </form>
   );
 }
@@ -406,162 +397,167 @@ export default function Settings() {
           onRetry={() => query.refetch()}
         />
       ) : (
-        <div className="space-y-8">
-          <form onSubmit={onSubmit} className="space-y-8">
-            <Group
-              runhead="Webhook"
-              gloss="Where the gateway tells your server that money arrived."
-              ruled={false}
-            >
-              <Field
-                id="webhookUrl"
-                label="Webhook URL"
-                hint={
-                  <>
-                    We POST <code className="code">payment.confirmed</code> events
-                    here. Leave it empty to receive none.
-                  </>
-                }
-                error={errors.webhookUrl?.message}
-              >
-                <input
-                  id="webhookUrl"
-                  className="input"
-                  placeholder="https://your-app.com/webhooks/gateway"
-                  aria-invalid={errors.webhookUrl ? true : undefined}
-                  aria-describedby={`webhookUrl-hint${
-                    errors.webhookUrl ? ' webhookUrl-error' : ''
-                  }`}
-                  {...register('webhookUrl', {
-                    validate: (v) =>
-                      !v || isValidUrl(v) || 'Must be a valid http(s) URL',
-                  })}
-                />
-              </Field>
+        <div className="space-y-4">
+          <form onSubmit={onSubmit} className="space-y-4">
+            <Section title="Webhook">
+              <Gloss>Where the gateway tells your server that money arrived.</Gloss>
 
-              {/* Not a field — a FACT about the account, which is why it is
-                  stated as one line you can scan rather than buried at the end
-                  of a paragraph in a tinted box, where it was before. */}
-              <div className="py-4 first:pt-0 last:pb-0">
-                <span className="label mb-0 block">Payload signing</span>
-                <p className="measure mt-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                  Every webhook body is signed with your webhook secret using
-                  HMAC-SHA256 (hex), sent in the{' '}
-                  <code className="code">signature</code> field. Always verify it
-                  before trusting a webhook — see the{' '}
-                  <Link to="/docs" className="link-ink">
-                    API docs
-                  </Link>
-                  .
-                </p>
-                <p
-                  className={`mt-2.5 inline-flex items-center gap-2 text-sm ${
-                    secretSet
-                      ? 'text-emerald-600 dark:text-emerald-400'
-                      : 'text-amber-600 dark:text-amber-400'
-                  }`}
-                >
-                  {secretSet ? (
-                    <ShieldCheck size={15} className="shrink-0" aria-hidden />
-                  ) : (
-                    <ShieldAlert size={15} className="shrink-0" aria-hidden />
-                  )}
-                  <span>
-                    {secretSet
-                      ? 'Signing secret configured'
-                      : 'No signing secret set — contact support to provision one'}
-                  </span>
-                </p>
-              </div>
-            </Group>
-
-            <Group
-              runhead={trc20Enabled ? 'Payout wallets' : 'Payout wallet'}
-              gloss="The addresses every settled payment is swept to. One per network — funds are never moved between chains."
-            >
-              <Field
-                id="payoutWallet"
-                label="BEP20 wallet address"
-                hint="BEP20 payouts are sent here. Check every character: on-chain transfers are irreversible and cannot be recalled."
-                error={errors.payoutWallet?.message}
-              >
-                <input
-                  id="payoutWallet"
-                  className="input font-mono"
-                  placeholder="0x…"
-                  aria-invalid={errors.payoutWallet ? true : undefined}
-                  aria-describedby={`payoutWallet-hint${
-                    errors.payoutWallet ? ' payoutWallet-error' : ''
-                  }`}
-                  {...register('payoutWallet', {
-                    validate: (v) =>
-                      !v ||
-                      isValidBep20Address(v) ||
-                      'Must be a valid BEP20 (0x…40 hex) address',
-                  })}
-                />
-              </Field>
-
-              {trc20Enabled && (
+              <Fields>
                 <Field
-                  id="payoutWalletTrc20"
-                  label="TRC20 (Tron) wallet address"
-                  hint="Required only if you accept TRC20 payments; leave blank to disable TRC20 settlements. It must be a Tron (T…) address — never a BEP20 0x… one."
-                  error={errors.payoutWalletTrc20?.message}
+                  id="webhookUrl"
+                  label="Webhook URL"
+                  hint={
+                    <>
+                      We POST <code className="code">payment.confirmed</code> events
+                      here. Leave it empty to receive none.
+                    </>
+                  }
+                  error={errors.webhookUrl?.message}
                 >
                   <input
-                    id="payoutWalletTrc20"
-                    className="input font-mono"
-                    placeholder="T…"
-                    aria-invalid={errors.payoutWalletTrc20 ? true : undefined}
-                    aria-describedby={`payoutWalletTrc20-hint${
-                      errors.payoutWalletTrc20 ? ' payoutWalletTrc20-error' : ''
+                    id="webhookUrl"
+                    className="input"
+                    placeholder="https://your-app.com/webhooks/gateway"
+                    aria-invalid={errors.webhookUrl ? true : undefined}
+                    aria-describedby={`webhookUrl-hint${
+                      errors.webhookUrl ? ' webhookUrl-error' : ''
                     }`}
-                    {...register('payoutWalletTrc20', {
+                    {...register('webhookUrl', {
                       validate: (v) =>
-                        !v ||
-                        isValidTrc20Address(v) ||
-                        'Must be a valid TRC20 (T…) address',
+                        !v || isValidUrl(v) || 'Must be a valid http(s) URL',
                     })}
                   />
                 </Field>
-              )}
-            </Group>
 
-            {/* The action ranges under the field column, not against the right
-                edge of a 1280px page where it would sit a long way from the
-                last thing the merchant touched. */}
-            <div className="rule grid gap-x-10 pt-5 lg:grid-cols-12">
-              <div className="flex flex-wrap items-center gap-x-5 gap-y-3 lg:col-span-9 lg:col-start-4">
-                <button
-                  type="submit"
-                  className="btn-primary"
-                  disabled={mutation.isPending || !isDirty}
+                {/* Not a field — a FACT about the account, which is why it is
+                    stated as one line you can scan rather than buried at the end
+                    of a paragraph in a tinted box, where it was before. */}
+                <div className="py-4 first:pt-0 last:pb-0">
+                  <span className="label mb-0 block">Payload signing</span>
+                  <p className="measure mt-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                    Every webhook body is signed with your webhook secret using
+                    HMAC-SHA256 (hex), sent in the{' '}
+                    <code className="code">signature</code> field. Always verify it
+                    before trusting a webhook — see the{' '}
+                    <Link to="/docs" className="link-ink">
+                      API docs
+                    </Link>
+                    .
+                  </p>
+                  <p
+                    className={`mt-2.5 inline-flex items-center gap-2 text-sm ${
+                      secretSet
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-amber-600 dark:text-amber-400'
+                    }`}
+                  >
+                    {secretSet ? (
+                      <ShieldCheck size={15} className="shrink-0" aria-hidden />
+                    ) : (
+                      <ShieldAlert size={15} className="shrink-0" aria-hidden />
+                    )}
+                    <span>
+                      {secretSet
+                        ? 'Signing secret configured'
+                        : 'No signing secret set — contact support to provision one'}
+                    </span>
+                  </p>
+                </div>
+              </Fields>
+            </Section>
+
+            <Section title={trc20Enabled ? 'Payout wallets' : 'Payout wallet'}>
+              <Gloss>
+                The addresses every settled payment is swept to. One per network —
+                funds are never moved between chains.
+              </Gloss>
+
+              <Fields>
+                <Field
+                  id="payoutWallet"
+                  label="BEP20 wallet address"
+                  hint="BEP20 payouts are sent here. Check every character: on-chain transfers are irreversible and cannot be recalled."
+                  error={errors.payoutWallet?.message}
                 >
-                  {mutation.isPending ? (
-                    <Spinner size={16} />
-                  ) : (
-                    <>
-                      <Save size={16} /> Save changes
-                    </>
-                  )}
-                </button>
-                {mutation.isError && (
-                  <Notice tone="bad">{errorMessage(mutation.error)}</Notice>
+                  <input
+                    id="payoutWallet"
+                    className="input font-mono"
+                    placeholder="0x…"
+                    aria-invalid={errors.payoutWallet ? true : undefined}
+                    aria-describedby={`payoutWallet-hint${
+                      errors.payoutWallet ? ' payoutWallet-error' : ''
+                    }`}
+                    {...register('payoutWallet', {
+                      validate: (v) =>
+                        !v ||
+                        isValidBep20Address(v) ||
+                        'Must be a valid BEP20 (0x…40 hex) address',
+                    })}
+                  />
+                </Field>
+
+                {trc20Enabled && (
+                  <Field
+                    id="payoutWalletTrc20"
+                    label="TRC20 (Tron) wallet address"
+                    hint="Required only if you accept TRC20 payments; leave blank to disable TRC20 settlements. It must be a Tron (T…) address — never a BEP20 0x… one."
+                    error={errors.payoutWalletTrc20?.message}
+                  >
+                    <input
+                      id="payoutWalletTrc20"
+                      className="input font-mono"
+                      placeholder="T…"
+                      aria-invalid={errors.payoutWalletTrc20 ? true : undefined}
+                      aria-describedby={`payoutWalletTrc20-hint${
+                        errors.payoutWalletTrc20 ? ' payoutWalletTrc20-error' : ''
+                      }`}
+                      {...register('payoutWalletTrc20', {
+                        validate: (v) =>
+                          !v ||
+                          isValidTrc20Address(v) ||
+                          'Must be a valid TRC20 (T…) address',
+                      })}
+                    />
+                  </Field>
                 )}
-                {mutation.isSuccess && !isDirty && (
-                  <Notice tone="ok">Settings saved.</Notice>
+              </Fields>
+            </Section>
+
+            {/* THE ACTION, on a surface of its own.
+                It commits BOTH groups above, so it cannot live inside either of
+                them without implying it saves only that one. A bare button
+                floating on the canvas would read as unfinished, so it gets the
+                smallest surface on the page — enough to say "this belongs to
+                the two blocks above" and nothing more. */}
+            <div className="surface flex flex-wrap items-center gap-x-5 gap-y-3 p-4">
+              <button
+                type="submit"
+                className="btn-primary"
+                disabled={mutation.isPending || !isDirty}
+              >
+                {mutation.isPending ? (
+                  <Spinner size={16} />
+                ) : (
+                  <>
+                    <Save size={16} /> Save changes
+                  </>
                 )}
-              </div>
+              </button>
+              {mutation.isError && (
+                <Notice tone="bad">{errorMessage(mutation.error)}</Notice>
+              )}
+              {mutation.isSuccess && !isDirty && (
+                <Notice tone="ok">Settings saved.</Notice>
+              )}
             </div>
           </form>
 
-          {/* Rendered bare, with no wrapper of its own. IpAllowlistCard now
-              draws its OWN `.rule` and its OWN running head — putting it inside
-              a ruled section headed "API access" produced two hairlines 30px
-              apart and two running heads for one block, which is exactly the
-              doubling `.band` is warned about. It is built to sit directly in
-              this stack, so it sits directly in this stack. */}
+          {/* Rendered bare, with no wrapper of its own — the same way Dashboard
+              renders OnboardingChecklist. IpAllowlistCard draws its own block
+              and its own running head, and it is not this page's file to
+              convert; wrapping it here would either double the head or nest a
+              surface inside a surface, depending on what its own conversion
+              lands on. It is left to present itself. */}
           <IpAllowlistCard
             value={query.data?.ipWhitelist ?? []}
             hasBearerKey={hasBearerKey}

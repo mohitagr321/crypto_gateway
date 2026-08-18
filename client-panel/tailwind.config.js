@@ -320,30 +320,45 @@ export default {
       },
 
       keyframes: {
+        /**
+         * `halo`, `sheen` and `drift` are DELIBERATELY ABSENT from this map and
+         * are declared as plain CSS in src/index.css instead. Putting them here
+         * is what broke them: Tailwind emits an `@keyframes` block only when the
+         * matching `animate-*` UTILITY appears in a scanned file, and all three
+         * are used from inside `@layer components` via `theme('animation.x')`.
+         * Nothing writes `animate-halo`, so the keyframes were never generated
+         * and the shorthand referenced an animation that did not exist — a
+         * silent no-op, because a missing keyframe does not error.
+         *
+         * The entries below are all reached through a real `animate-*` utility
+         * in a .tsx file, which is what keeps them emitted. Check that before
+         * adding a fourth.
+         */
+
         /** Entry: never from scale(0), never travelling more than 8px on a
          *  dashboard surface. */
         'fade-up': {
           from: { opacity: '0', transform: 'translateY(6px)' },
           to: { opacity: '1', transform: 'none' },
         },
-        /** The halo under a status dot that is still in flight. The ONE loop
-         *  permitted on a dashboard route, because it marks rows the merchant is
-         *  actively waiting on. Opacity + box-shadow only: nothing reflows. */
-        halo: {
-          '0%': { boxShadow: '0 0 0 0 currentColor' },
-          '70%': { boxShadow: '0 0 0 7px transparent' },
-          '100%': { boxShadow: '0 0 0 0 transparent' },
-        },
-        /** One pass of light across a primary control on hover. Not a loop. */
-        sheen: {
-          from: { transform: 'translateX(-120%)' },
-          to: { transform: 'translateX(120%)' },
-        },
-        /** The depth field behind the app drifts. 34s, so it is never seen to
-         *  move — only felt to have moved. */
-        drift: {
-          from: { transform: 'translate3d(-2%, -1%, 0) scale(1)' },
-          to: { transform: 'translate3d(3%, 2%, 0) scale(1.08)' },
+        /**
+         * The expanding ring under a "live" dot on the MARKETING surfaces.
+         *
+         * Distinct from `halo`, and both are needed. `halo` grows a box-shadow
+         * on a 6px status dot inside a lozenge; this scales a whole element and
+         * is what the landing page's live indicator and the checkout demo's
+         * status dot are built from. They were written against a class that the
+         * token rewrite dropped, which left two "live" indicators rendering an
+         * invisible static span — a silent failure, since the dot underneath
+         * still painted and nothing looked broken.
+         *
+         * It loops, which is only permissible because both call sites are
+         * marketing routes. The reduced-motion catch-all in index.css covers it.
+         */
+        'pulse-ring': {
+          '0%': { transform: 'scale(0.85)', opacity: '0.55' },
+          '70%': { transform: 'scale(1.5)', opacity: '0' },
+          '100%': { opacity: '0' },
         },
         marquee: {
           from: { transform: 'translateX(0)' },
@@ -371,6 +386,7 @@ export default {
         'fade-up': 'fade-up 0.35s cubic-bezier(0.22, 1, 0.36, 1) both',
         halo: 'halo 2.6s cubic-bezier(0, 0, 0.2, 1) infinite',
         sheen: 'sheen 0.75s cubic-bezier(0.22, 1, 0.36, 1)',
+        'pulse-ring': 'pulse-ring 2.4s cubic-bezier(0, 0, 0.2, 1) infinite',
         drift: 'drift 34s ease-in-out infinite alternate',
         marquee: 'marquee 38s linear infinite',
         flow: 'flow 1.1s linear infinite',

@@ -1,13 +1,16 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   AlertTriangle,
+  ChevronDown,
   KeyRound,
   ShieldCheck,
 } from 'lucide-react';
 import { API_BASE_URL, getAssets } from '@/lib/api';
+import type { AssetInfo } from '@/types';
 import PageHeader from '@/components/PageHeader';
 import CodeBlock from '@/components/CodeBlock';
+import type { CodeTab } from '@/components/CodeBlock';
 
 /**
  * The authenticated API reference.
@@ -38,29 +41,38 @@ import CodeBlock from '@/components/CodeBlock';
  * page that is confidently wrong costs more than no docs page.
  *
  * ---------------------------------------------------------------------------
- * SET AS A REFERENCE WORK. The prose is unchanged; the STRUCTURE around it is
- * what was rebuilt, because at 900 lines this page's real failure was that
- * everything looked equally important:
+ * SET AS A REFERENCE WORK, ON SURFACES. The prose is unchanged; the STRUCTURE
+ * around it is what this pass rebuilt. The page is dense reference material a
+ * developer reads with their editor open beside it, so every decision below
+ * resolves in favour of reading over decoration:
  *
- *   - The contents column is now a numbered index with a live position rail.
- *     Brand on the rail is the sanctioned "active nav" use — it marks the one
- *     entry you can see rather than decorating all eight.
- *   - Sections are numbered and opened by a hairline, so the reader always
- *     knows how far in they are. The masthead's heavy rule is the only strong
- *     stroke on the page and is not doubled by the first section.
- *   - The four reference tables are LEDGERS (`.ledger`), the same primitive
- *     DataTable renders through, instead of four cards with tinted header bars.
- *     Column headers sit over an ink rule; rows are separated by hairlines.
- *   - Callouts are ruled notes with a word, not tinted rounded boxes. Amber and
- *     red still mean what they mean everywhere else in the product, and each
- *     one now ships a label so the meaning survives in greyscale.
- *   - Every code specimen is introduced by a running head naming what it is,
- *     and the two long ones carry the route in the block's own chrome.
+ *   - EIGHT CHAPTERS, EIGHT SURFACES. The outgoing version set them as a single
+ *     column of hairline-opened bands, which gave the eye nothing to land on:
+ *     every heading had exactly the status of every other. A raised block per
+ *     chapter, separated by ground rather than by a rule, is what lets somebody
+ *     scanning for "Webhooks" find it without reading. Rules survive INSIDE a
+ *     chapter, which is the job they are actually good at.
+ *   - THE INDEX IS NAVIGATION, so it sits on a surface and wears `.nav-item` /
+ *     `.nav-item-on` — the product's own rail classes. Brand marks the one
+ *     entry you can see rather than decorating all eight. Below `lg` it
+ *     collapses into a native `<details>`, because 14rem of permanent furniture
+ *     in front of the document is not a reasonable trade on a 360px screen.
+ *   - CODE SITS IN A `.well`, the inset surface. A sample is a window cut into
+ *     the chapter, not an object resting on it.
+ *   - THE FOUR REFERENCE TABLES ARE NO LONGER TABLES. A table cannot restack,
+ *     so at 360px the verb, the path and the sentence explaining it fought over
+ *     one line and the reader dragged the page sideways to read a reference.
+ *     They are grid rows that reflow instead. Nothing on this page scrolls
+ *     horizontally except code, where horizontal is the honest shape.
+ *   - CALLOUTS keep their word AND their hue. Amber and red mean here what they
+ *     mean everywhere else in the product, and the label carries the meaning on
+ *     its own, so it survives in greyscale.
  *
- * MOTION: none. The one moving part is the position rail, which is driven by an
- * IntersectionObserver and changes a colour — no transform, no entrance, no
- * loop. The loading placeholder is `.ghost`, not `.skeleton`: this is a
- * dashboard route and `.skeleton` shimmers forever.
+ * MOTION: none on mount. The two moving parts are the position rail, driven by
+ * an IntersectionObserver and changing a colour, and the disclosure chevron on
+ * the phone index — both 120ms, both responses to something the reader did.
+ * The loading placeholder is `.ghost`, which is static by design: this is a
+ * dashboard route and a shimmer loop is banned on one.
  */
 
 const BASE = API_BASE_URL;
@@ -78,7 +90,16 @@ const PATH_PREFIX = new URL(BASE, window.location.origin).pathname.replace(/\/+$
 // Snippets
 // ---------------------------------------------------------------------------
 
-const createPaymentTabs = [
+interface SpecimenProps {
+  /** The caption over the block. Every specimen gets one: an unlabelled snippet
+   *  in a 1,400-line reference is a puzzle. */
+  runhead: string;
+  tabs: CodeTab[];
+  /** The route the sample calls, printed small in the block's own chrome. */
+  title?: string;
+}
+
+const createPaymentTabs: CodeTab[] = [
   {
     label: 'curl',
     code: `# v2 signed string: "<ts>.<METHOD>.<path>.<sha256(body)>".
@@ -280,7 +301,7 @@ const fiatRequest = `{
   "asset":        "USDT"
 }`;
 
-const webhookVerifyTabs = [
+const webhookVerifyTabs: CodeTab[] = [
   {
     label: 'JavaScript',
     code: `import crypto from 'node:crypto';
@@ -493,6 +514,8 @@ const SECTIONS = [
   ['errors', 'Errors & limits'],
 ] as const;
 
+type SectionId = (typeof SECTIONS)[number][0];
+
 /** Stable array identity, so the observer below is not torn down every render. */
 const SECTION_IDS: string[] = SECTIONS.map(([id]) => id);
 
@@ -500,6 +523,42 @@ const ENDPOINT_COUNT = ENDPOINTS.reduce((n, g) => n + g.rows.length, 0);
 
 /** Two-digit index, tabular, so the numerals line up down the contents column. */
 const ord = (i: number) => String(i + 1).padStart(2, '0');
+
+/**
+ * Numeral and title per chapter, derived from the SAME array the index is built
+ * from. They used to be typed twice — once in the contents column, once as a
+ * literal `n="03"` on the heading — and a reference work whose index disagrees
+ * with its body is worse than one with no index at all.
+ *
+ * The cast is what `Object.fromEntries` costs: it types its result as an open
+ * string map, and this one has exactly the eight keys of `SectionId`.
+ */
+const CHAPTER = Object.fromEntries(
+  SECTIONS.map(([id, label], i) => [id, { n: ord(i), label }]),
+) as Record<SectionId, { n: string; label: string }>;
+
+/**
+ * Grid templates for the two three-field reference lists, written out as whole
+ * class strings rather than composed at runtime. Tailwind scans this file as
+ * TEXT: a class assembled from fragments never appears in the stylesheet, and
+ * the failure is silent — the row simply falls back to its base layout at every
+ * width, which looks like a design choice rather than a missing rule.
+ *
+ * THREE STEPS, AND THE MIDDLE ONE GOES BACKWARDS. That is not a mistake. What
+ * decides whether a description fits beside a path is not the viewport, it is
+ * the column the chapter is in — and at exactly `lg` the sticky index appears
+ * and takes 244px of it WITHOUT the page getting any wider. Measured at 1024:
+ * the body column is 460px, of which the verb and the path want 404, leaving
+ * the sentence six pixels and pushing the row out of its surface.
+ *
+ * So the three-across layout is on from `md` (768, no index yet, ~690px of
+ * body), OFF again at `lg` where the index has just eaten the difference, and
+ * back on at `xl` where there is genuinely room for both.
+ */
+const ROUTE_COLS =
+  'md:grid-cols-[3.25rem_minmax(0,20rem)_minmax(0,1fr)] lg:grid-cols-[3.25rem_minmax(0,1fr)] xl:grid-cols-[3.25rem_minmax(0,20rem)_minmax(0,1fr)]';
+const ERROR_COLS =
+  'md:grid-cols-[3.25rem_minmax(0,11rem)_minmax(0,1fr)] lg:grid-cols-[3.25rem_minmax(0,1fr)] xl:grid-cols-[3.25rem_minmax(0,11rem)_minmax(0,1fr)]';
 
 /**
  * Which section the reader is actually looking at.
@@ -546,7 +605,6 @@ function useActiveSection(ids: string[]): string | null {
 
 // ---------------------------------------------------------------------------
 
-
 export default function ApiDocs() {
   // The asset matrix is READ FROM THE GATEWAY, not hardcoded. A static table
   // silently lies the moment an operator enables or disables a chain.
@@ -556,16 +614,27 @@ export default function ApiDocs() {
     staleTime: 5 * 60_000,
   });
 
-  const byNetwork = (assets ?? []).reduce<Record<string, typeof assets>>(
-    (acc, a) => {
-      (acc[a.network] ||= []).push(a);
-      return acc;
-    },
-    {},
-  );
+  const byNetwork = (assets ?? []).reduce<Record<string, AssetInfo[]>>((acc, a) => {
+    (acc[a.network] ||= []).push(a);
+    return acc;
+  }, {});
 
   const pairCount = assets?.length ?? 0;
   const active = useActiveSection(SECTION_IDS);
+
+  /**
+   * The phone index closes itself once it has done its job. A disclosure that
+   * stays open after the reader has jumped leaves a 400px menu sitting between
+   * them and the paragraph they just asked for.
+   *
+   * Driven through a ref rather than by holding `open` in state: `<details>`
+   * toggles itself natively, and taking that over would mean re-implementing
+   * the keyboard and pointer behaviour the element already has.
+   */
+  const tocRef = useRef<HTMLDetailsElement>(null);
+  const closeToc = () => {
+    if (tocRef.current) tocRef.current.open = false;
+  };
 
   return (
     <>
@@ -580,63 +649,103 @@ export default function ApiDocs() {
         }
       />
 
-      <div className="lg:flex lg:gap-12">
-        {/* THE INDEX. Sticky, so the reader never loses their place in a long
-            reference — the single biggest usability win on a docs page — and
-            numbered, so "how much of this is left" is answerable at a glance.
-            The lit rail is brand because an active nav marker is one of the
-            four sanctioned uses of the interactive colour; the seven unlit
-            rails are the hairline, not a dimmed brand. */}
+      {/* ================================================================
+          THE READING FRAME.
+          A fixed 14rem index beside a `minmax(0,1fr)` body, and the zero
+          minimum is doing real work: a grid track defaults to `min-content`,
+          so without it a single unbreakable path or hash in the body sets the
+          column's floor and pushes the whole page sideways.
+
+          `items-start` is what makes the index sticky at all. A grid item
+          stretches to the row height by default, which leaves a `position:
+          sticky` element nothing to travel inside — it pins to a box it
+          already fills and never moves. Start-aligning it keeps the grid AREA
+          full height while the nav box itself stays short.
+          ================================================================ */}
+      <div className="lg:grid lg:grid-cols-[14rem_minmax(0,1fr)] lg:items-start lg:gap-5">
+        {/* ---- THE INDEX ON A PHONE ----------------------------------
+            The desktop rail is 14rem of permanent furniture; on a 360px
+            screen that is a screenful of links in front of the document.
+            So below `lg` the same index collapses into a disclosure that
+            costs one row and opens on a tap.
+
+            A `<details>` rather than a state-driven panel: it needs no
+            JavaScript to work, it is a native disclosure to a screen reader,
+            and the browser's own find-in-page can open it. ---- */}
+        <details
+          ref={tocRef}
+          className="group surface mb-4 overflow-hidden lg:hidden"
+        >
+          <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-3 px-4 py-3 [&::-webkit-details-marker]:hidden">
+            <span className="runhead">On this page</span>
+            <span className="num ml-auto text-xs text-slate-500 dark:text-slate-400">
+              {SECTIONS.length} sections
+            </span>
+            <ChevronDown
+              size={16}
+              aria-hidden
+              className="shrink-0 text-slate-400 transition-transform duration-[var(--dur-press)] ease-[var(--ease-out)] group-open:rotate-180"
+            />
+          </summary>
+          <nav
+            aria-label="On this page"
+            className="border-t border-[var(--line-soft)] p-2"
+          >
+            <TocList active={active} onNavigate={closeToc} />
+          </nav>
+        </details>
+
+        {/* ---- THE INDEX ON A DESKTOP --------------------------------
+            Sticky, so the reader never loses their place in a long reference —
+            the single biggest usability win on a docs page — and numbered, so
+            "how much of this is left" is answerable at a glance.
+
+            It sits on a surface rather than on the bare canvas because it is
+            navigation, and a control floating loose on the ground reads as
+            unfinished. The lit entry is `.nav-item-on`, the same marker the
+            product's own rail uses: brand ink on the thing you are looking at
+            is one of the four sanctioned uses of the interactive colour. ---- */}
         <nav
           aria-label="On this page"
-          className="hidden shrink-0 lg:sticky lg:top-6 lg:block lg:h-fit lg:w-56"
+          className="hidden lg:sticky lg:top-2 lg:block lg:self-start"
         >
-          <span className="runhead">Contents</span>
-          <ol className="mt-3">
-            {SECTIONS.map(([id, label], i) => {
-              const on = active === id;
-              return (
-                <li key={id}>
-                  <a
-                    href={`#${id}`}
-                    aria-current={on ? 'true' : undefined}
-                    className={`flex items-baseline gap-3 border-l-2 py-1.5 pl-3 text-sm outline-none transition-colors duration-[var(--dur-press)] focus-visible:ring-2 focus-visible:ring-brand-500 ${
-                      on
-                        ? 'border-brand-600 font-medium text-slate-900 dark:border-brand-400 dark:text-slate-50'
-                        : 'border-slate-200 text-slate-600 hover:text-slate-900 dark:border-slate-800 dark:text-slate-400 dark:hover:text-slate-100'
-                    }`}
-                  >
-                    <span className="num shrink-0 text-[10px] tracking-[0.14em] text-slate-400 dark:text-slate-500">
-                      {ord(i)}
-                    </span>
-                    {label}
-                  </a>
-                </li>
-              );
-            })}
-          </ol>
+          <div className="surface p-2">
+            <span className="runhead px-2.5 pb-1.5 pt-1">Contents</span>
+            <TocList active={active} />
+          </div>
         </nav>
 
-        <div className="min-w-0 flex-1 space-y-12">
+        {/* ================================================================
+            THE DOCUMENT. Eight chapters, each on its own surface, separated by
+            ground rather than by a rule. The outgoing version set them as
+            hairline-opened bands in one continuous column, which gave the eye
+            no target: every heading had exactly the status of every other and
+            the page read as one 4,000-word run. A raised block per chapter is
+            what lets somebody scanning for "Webhooks" find it without reading.
+            ================================================================ */}
+        <div className="min-w-0 space-y-4">
           {/* ---------------- AUTH ---------------- */}
-          <section id="auth" className="scroll-mt-6">
-            <SectionHeading n="01" first>
-              Authentication
-            </SectionHeading>
-            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
-              Base URL <code className="code">{BASE}</code>. Keys come in two
-              modes and the mode is fixed when the key is created — a signed
-              request with a bearer key, or an unsigned request with an HMAC key,
-              is rejected rather than downgraded.
+          <Chapter id="auth">
+            <p className="measure-wide text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+              Base URL <code className="code break-all">{BASE}</code>. Keys come
+              in two modes and the mode is fixed when the key is created — a
+              signed request with a bearer key, or an unsigned request with an
+              HMAC key, is rejected rather than downgraded.
             </p>
 
-            {/* The two key modes as two ruled columns rather than two cards.
-                Icons are slate-400, the documented step for a decorative mark —
-                a shield that is not a button has no business wearing brand. */}
-            <div className="mt-8 grid gap-x-12 gap-y-10 lg:grid-cols-2">
-              <div className="min-w-0">
+            {/* The two key modes side by side, divided by a hairline INSIDE the
+                chapter. This is what a rule is for now: dividing within a
+                surface, rather than standing in for one. Icons are slate-400,
+                the documented step for a decorative mark — a shield that is not
+                a button has no business wearing brand. */}
+            <div className="mt-6 grid gap-6 xl:grid-cols-2 xl:gap-0">
+              <div className="min-w-0 xl:pr-8">
                 <h3 className="rule-b flex items-baseline gap-2.5 pb-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  <ShieldCheck size={15} className="shrink-0 translate-y-0.5 text-slate-400" aria-hidden />
+                  <ShieldCheck
+                    size={15}
+                    className="shrink-0 translate-y-0.5 text-slate-400"
+                    aria-hidden
+                  />
                   <span>
                     HMAC-signed{' '}
                     <span className="font-mono text-xs font-normal text-slate-500 dark:text-slate-400">
@@ -644,38 +753,43 @@ export default function ApiDocs() {
                     </span>
                   </span>
                 </h3>
-                <dl className="text-sm">
-                  <Header name="X-Api-Key">your public key id</Header>
-                  <Header name="X-Timestamp">
+                <dl className="mt-1 text-sm">
+                  <HeaderRow name="X-Api-Key">your public key id</HeaderRow>
+                  <HeaderRow name="X-Timestamp">
                     unix <strong>seconds</strong>
-                  </Header>
-                  <Header name="X-Signature">
-                    <code className="code">
+                  </HeaderRow>
+                  <HeaderRow name="X-Signature">
+                    {/* `break-words` rather than `break-all`: the expression has
+                        spaces in it, so it should break at those first and only
+                        split the quoted string — which is 45 unbreakable
+                        characters and cannot fit a 360px line — when it has to.
+                        `break-all` breaks greedily and mid-token even where a
+                        space was available a few characters earlier. */}
+                    <code className="code break-words">
                       hex( HMAC_SHA256( secret,
                       "&#123;ts&#125;.&#123;METHOD&#125;.&#123;path&#125;.&#123;sha256(body)&#125;"
                       ) )
                     </code>
-                  </Header>
+                  </HeaderRow>
                 </dl>
-                <p className="measure mt-4 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                <p className="measure mt-4 text-[13px] leading-relaxed text-slate-500 dark:text-slate-400">
                   Required for <code className="code">POST /payouts</code>.{' '}
                   <code className="code">&#123;path&#125;</code> is the request
-                  target exactly as sent — prefix and query string included,
-                  e.g. <code className="code">{`${PATH_PREFIX}/payouts?page=2`}</code>.
-                  A body-less request hashes the empty string. Requests more
+                  target exactly as sent — prefix and query string included, e.g.{' '}
+                  <code className="code break-all">{`${PATH_PREFIX}/payouts?page=2`}</code>
+                  . A body-less request hashes the empty string. Requests more
                   than 5 minutes from server time are rejected — keep your clock
                   on NTP.
                 </p>
-                <p className="measure mt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                <p className="measure mt-3 text-[13px] leading-relaxed text-slate-500 dark:text-slate-400">
                   Older keys also accept the legacy{' '}
-                  <code className="code">
-                    hex( HMAC_SHA256( secret,
-                    "&#123;ts&#125;.&#123;rawBody&#125;" ) )
+                  <code className="code break-words">
+                    hex( HMAC_SHA256( secret, "&#123;ts&#125;.&#123;rawBody&#125;" ) )
                   </code>
                   , which binds neither the verb nor the path. Move to the form
                   above — it is what new keys will require.
                 </p>
-                <p className="measure mt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                <p className="measure mt-3 text-[13px] leading-relaxed text-slate-500 dark:text-slate-400">
                   A signature sent on a <strong>write</strong> is single-use:
                   resending the identical request returns{' '}
                   <code className="code">401 Signature already used</code>. Retry
@@ -685,9 +799,13 @@ export default function ApiDocs() {
                 </p>
               </div>
 
-              <div className="min-w-0">
+              <div className="min-w-0 border-t border-[var(--line-soft)] pt-6 xl:border-l xl:border-t-0 xl:pl-8 xl:pt-0">
                 <h3 className="rule-b flex items-baseline gap-2.5 pb-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  <KeyRound size={15} className="shrink-0 translate-y-0.5 text-slate-400" aria-hidden />
+                  <KeyRound
+                    size={15}
+                    className="shrink-0 translate-y-0.5 text-slate-400"
+                    aria-hidden
+                  />
                   <span>
                     Bearer{' '}
                     <span className="font-mono text-xs font-normal text-slate-500 dark:text-slate-400">
@@ -700,23 +818,25 @@ export default function ApiDocs() {
                   to sign. Simpler, and strictly weaker: the credential is on the
                   wire every request.
                 </p>
-                <div className="mt-4">
-                  <CodeBlock
-                    tabs={[{ label: 'curl', code: bearerSnippet }]}
-                    title="POST /payments"
-                  />
-                </div>
-                <p className="measure mt-4 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                  Bearer keys cannot hold <code className="code">payouts:write</code>,
-                  so a leaked one can read data and create payments but cannot
-                  move funds. Pair it with an IP allowlist.
+                <Specimen
+                  runhead="Request · bearer mode"
+                  title="POST /payments"
+                  tabs={[{ label: 'curl', code: bearerSnippet }]}
+                />
+                <p className="measure mt-4 text-[13px] leading-relaxed text-slate-500 dark:text-slate-400">
+                  Bearer keys cannot hold{' '}
+                  <code className="code">payouts:write</code>, so a leaked one
+                  can read data and create payments but cannot move funds. Pair
+                  it with an IP allowlist.
                 </p>
               </div>
             </div>
 
-            <Callout tone="warn" className="mt-8">
-              <strong>If you integrated before August 2026, re-check your
-              signing.</strong> An earlier version of this page documented{' '}
+            <Callout tone="warn" className="mt-6">
+              <strong>
+                If you integrated before August 2026, re-check your signing.
+              </strong>{' '}
+              An earlier version of this page documented{' '}
               <code className="code">timestamp + body</code> with a{' '}
               <em>millisecond</em> timestamp. The gateway has always expected{' '}
               <code className="code">timestamp + "." + body</code> with{' '}
@@ -730,12 +850,11 @@ export default function ApiDocs() {
               session. That is what stops a stolen key from redirecting your
               money.
             </p>
-          </section>
+          </Chapter>
 
           {/* ---------------- ASSETS ---------------- */}
-          <section id="assets" className="scroll-mt-6">
-            <SectionHeading n="02">Networks &amp; assets</SectionHeading>
-            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+          <Chapter id="assets">
+            <p className="measure-wide text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               A payment is a <strong>(network, asset)</strong> pair, fixed at
               creation. Omit <code className="code">network</code> for BEP20 and{' '}
               <code className="code">asset</code> for USDT, so existing
@@ -744,28 +863,31 @@ export default function ApiDocs() {
             </p>
 
             {assetsLoading ? (
-              // `.ghost`, not `.skeleton`: static by design. See the motion note
+              // `.ghost`, not a shimmer: static by design. See the motion note
               // at the top of this file.
-              <div className="mt-8 grid gap-x-12 gap-y-8 sm:grid-cols-2">
+              <div className="mt-6 grid grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] gap-x-8 gap-y-6">
                 {[0, 1].map((i) => (
                   <div key={i}>
-                    <div className="ghost h-4 w-20" />
-                    <div className="ghost mt-4 h-3 w-full" />
-                    <div className="ghost mt-3 h-3 w-4/5" />
-                    <div className="ghost mt-3 h-3 w-3/5" />
+                    <span className="ghost h-4 w-20" />
+                    <span className="ghost mt-4 h-3 w-full" />
+                    <span className="ghost mt-3 h-3 w-4/5" />
+                    <span className="ghost mt-3 h-3 w-3/5" />
                   </div>
                 ))}
               </div>
             ) : Object.keys(byNetwork).length === 0 ? (
-              <p className="measure mt-6 text-sm text-slate-500 dark:text-slate-400">
+              <p className="measure mt-5 text-sm text-slate-500 dark:text-slate-400">
                 Could not read the asset catalogue from the gateway.
               </p>
             ) : (
-              <div className="mt-8 grid gap-x-12 gap-y-8 md:grid-cols-12">
+              <div className="mt-6 grid gap-x-8 gap-y-6 md:grid-cols-[minmax(0,11rem)_minmax(0,1fr)]">
                 {/* THE FIGURE. The live pair count, and deliberately absent
                     until /assets answers — a placeholder zero on a page about
-                    what you can charge is a claim, and the wrong one. */}
-                <div className="md:col-span-3">
+                    what you can charge is a claim, and the wrong one. No
+                    utility touches `.figure-lg`'s size: it is a fluid clamp,
+                    and a `text-*` utility beside it would pin the number to one
+                    size at every width. */}
+                <div className="min-w-0">
                   <span className="runhead">Settleable now</span>
                   <span className="figure-lg mt-2">{pairCount}</span>
                   <span className="figure-label measure">
@@ -775,32 +897,40 @@ export default function ApiDocs() {
                   </span>
                 </div>
 
-                <div className="grid gap-x-12 gap-y-8 sm:grid-cols-2 md:col-span-9">
+                {/* `auto-fit` with a `min(100%, …)` floor rather than a column
+                    count: the network panels reflow from three across to one
+                    without a breakpoint, and the floor can never exceed the
+                    track, so a narrow screen gets one full-width column instead
+                    of a 13rem one overflowing a 12rem space. */}
+                <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] gap-x-8 gap-y-6">
                   {Object.entries(byNetwork).map(([network, list]) => (
                     <div key={network} className="min-w-0">
-                      <div className="flex items-baseline justify-between gap-3">
-                        <h3 className="font-mono text-sm font-semibold text-slate-900 dark:text-slate-100">
+                      <div className="rule-b flex items-baseline justify-between gap-3 pb-1.5">
+                        <h3 className="font-mono text-[13px] font-semibold text-slate-900 dark:text-slate-100">
                           {network}
                         </h3>
-                        <span className="num text-xs text-slate-500 dark:text-slate-400">
-                          {list?.length} asset{list?.length === 1 ? '' : 's'}
+                        <span className="num shrink-0 text-xs text-slate-500 dark:text-slate-400">
+                          {list.length} asset{list.length === 1 ? '' : 's'}
                         </span>
                       </div>
-                      <ul className="mt-2 border-b border-slate-200 dark:border-slate-800">
-                        {list?.map((a) => (
+                      <ul>
+                        {list.map((a) => (
                           <li
                             key={a.symbol}
-                            className="rule flex items-baseline justify-between gap-3 py-2"
+                            className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 border-t border-[var(--line-soft)] py-2 first:border-t-0"
                           >
-                            <span className="font-mono text-xs text-slate-800 dark:text-slate-200">
+                            <span className="font-mono text-[13px] text-slate-800 dark:text-slate-200">
                               {a.symbol}
                               {a.isNative && (
-                                <span className="ml-1.5 text-[10px] uppercase tracking-[0.14em] text-slate-400 dark:text-slate-500">
+                                <span className="ml-1.5 text-[11px] uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
                                   native
                                 </span>
                               )}
                             </span>
-                            <span className="truncate text-xs text-slate-500 dark:text-slate-400">
+                            {/* Wraps rather than truncates. An asset name
+                                clipped to "Binance-Peg BSC-U…" is a name the
+                                reader cannot check against their wallet. */}
+                            <span className="min-w-0 break-words text-right text-[13px] text-slate-500 dark:text-slate-400">
                               {a.name}
                             </span>
                           </li>
@@ -812,7 +942,7 @@ export default function ApiDocs() {
               </div>
             )}
 
-            <Callout tone="danger" className="mt-8">
+            <Callout tone="danger" className="mt-6">
               A deposit address is valid <strong>only</strong> for the network it
               was issued on. Sending TRC20 funds to a BEP20 address — or any
               other cross-network mix-up — is unrecoverable. Never reuse an
@@ -821,12 +951,11 @@ export default function ApiDocs() {
               <code className="code">amount</code> as a human string like{' '}
               <code className="code">"50.00"</code> and let the gateway scale it.
             </Callout>
-          </section>
+          </Chapter>
 
           {/* ---------------- CREATE ---------------- */}
-          <section id="create" className="scroll-mt-6">
-            <SectionHeading n="03">Create a payment</SectionHeading>
-            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+          <Chapter id="create">
+            <p className="measure-wide text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               <code className="code">POST /payments</code> returns a fresh
               deposit address and QR for the chosen pair. Always send an{' '}
               <code className="code">Idempotency-Key</code> — retrying without
@@ -834,24 +963,24 @@ export default function ApiDocs() {
               order.
             </p>
 
-            <Specimen runhead="Request · four languages, one signature">
-              <CodeBlock tabs={createPaymentTabs} title="POST /payments" />
-            </Specimen>
+            <Specimen
+              runhead="Request · four languages, one signature"
+              title="POST /payments"
+              tabs={createPaymentTabs}
+            />
 
-            <Specimen runhead="Response · 201 Created">
-              <CodeBlock
-                tabs={[
-                  { label: 'Crypto-priced', code: responseCrypto },
-                  { label: 'Fiat-priced', code: responseFiat },
-                ]}
-              />
-            </Specimen>
-          </section>
+            <Specimen
+              runhead="Response · 201 Created"
+              tabs={[
+                { label: 'Crypto-priced', code: responseCrypto },
+                { label: 'Fiat-priced', code: responseFiat },
+              ]}
+            />
+          </Chapter>
 
           {/* ---------------- FIAT ---------------- */}
-          <section id="fiat" className="scroll-mt-6">
-            <SectionHeading n="04">Pricing in fiat</SectionHeading>
-            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+          <Chapter id="fiat">
+            <p className="measure-wide text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               Send <code className="code">fiatAmount</code> and{' '}
               <code className="code">fiatCurrency</code> <em>instead of</em>{' '}
               <code className="code">amount</code> — supplying both, or neither,
@@ -860,72 +989,72 @@ export default function ApiDocs() {
               figure you reconcile.
             </p>
 
-            <Specimen runhead="Request body">
-              <CodeBlock tabs={[{ label: 'Request body', code: fiatRequest }]} />
-            </Specimen>
+            <Specimen
+              runhead="Request body"
+              tabs={[{ label: 'JSON', code: fiatRequest }]}
+            />
 
-            <p className="measure-wide mt-5 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+            <p className="measure-wide mt-5 text-[13px] leading-relaxed text-slate-500 dark:text-slate-400">
               <code className="code">GET /rates</code> lists the currencies this
               gateway can price in, plus the rate source and its age in seconds.
               Check the age before showing a converted price — a stale quote is
               still a quote, and the caller is entitled to know.
             </p>
-          </section>
+          </Chapter>
 
           {/* ---------------- ENDPOINTS ---------------- */}
-          <section id="endpoints" className="scroll-mt-6">
-            <SectionHeading n="05">Endpoint reference</SectionHeading>
-            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+          <Chapter id="endpoints">
+            <p className="measure-wide text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               Every endpoint a merchant can reach. List endpoints accept{' '}
               <code className="code">?page</code> and{' '}
               <code className="code">?limit</code> and return{' '}
               <code className="code">&#123; data, page, total &#125;</code>.
             </p>
 
-            {/* Seven ledgers rather than seven cards. The group name is the
-                running head and it sits over the ink rule the ledger's own
-                header would otherwise draw, so the column headers are not
-                repeated seven times down the page. */}
-            <div className="mt-8 space-y-8">
+            {/* SEVEN RULED LISTS, NOT SEVEN TABLES.
+                This block used to be seven `<table class="ledger">`s inside
+                horizontal scrollers, and a table cannot restack: at 360px the
+                method, the path and the sentence explaining it competed for
+                one line and the reader dragged the page sideways to read a
+                reference. A grid row reflows instead — path beside the verb,
+                description under it on a phone and beside it from `md` up — so
+                nothing on this page scrolls horizontally except code, where
+                horizontal is the honest shape.
+
+                The group name is the running head over the rule the ledger's
+                own header would have drawn, which is also why the column
+                headings are not repeated seven times down the page. */}
+            <div className="mt-6 space-y-7">
               {ENDPOINTS.map((g) => (
                 <div key={g.group}>
-                  <div className="flex items-baseline justify-between gap-4 border-b border-slate-900 pb-1.5 dark:border-slate-100">
-                    <h3 className="runhead text-slate-900 dark:text-slate-100">
+                  <div className="rule-b flex items-baseline justify-between gap-4 pb-1.5">
+                    <h3 className="runhead text-slate-700 dark:text-slate-200">
                       {g.group}
                     </h3>
-                    <span className="num text-xs text-slate-500 dark:text-slate-400">
+                    <span className="num shrink-0 text-xs text-slate-500 dark:text-slate-400">
                       {g.rows.length}
                     </span>
                   </div>
-                  <div className="ledger-scroll">
-                    <table className="ledger">
-                      <caption className="sr-only">{g.group} endpoints</caption>
-                      <tbody>
-                        {g.rows.map(([method, path, desc]) => (
-                          <tr key={method + path}>
-                            <td className="w-0 whitespace-nowrap py-2.5 align-top">
-                              <MethodBadge method={method} />
-                            </td>
-                            <td className="whitespace-nowrap py-2.5 align-top font-mono text-xs text-slate-900 dark:text-slate-100">
-                              {path}
-                            </td>
-                            <td className="py-2.5 align-top text-xs leading-relaxed text-slate-600 dark:text-slate-400">
-                              {desc}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  <ul>
+                    {g.rows.map(([method, path, desc]) => (
+                      <RefRow
+                        key={method + path}
+                        cols={ROUTE_COLS}
+                        lead={<MethodBadge method={method} />}
+                        term={path}
+                      >
+                        <Ticks text={desc} />
+                      </RefRow>
+                    ))}
+                  </ul>
                 </div>
               ))}
             </div>
-          </section>
+          </Chapter>
 
           {/* ---------------- WEBHOOKS ---------------- */}
-          <section id="webhooks" className="scroll-mt-6">
-            <SectionHeading n="06">Webhooks</SectionHeading>
-            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+          <Chapter id="webhooks">
+            <p className="measure-wide text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               We POST to your configured URL as a payment moves. The hex
               signature arrives twice — in the{' '}
               <code className="code">signature</code> field of the body and in
@@ -934,132 +1063,98 @@ export default function ApiDocs() {
               <code className="code">X-Gateway-Event</code>.
             </p>
 
-            <Callout tone="warn" className="mt-6">
+            <Callout tone="warn" className="mt-5">
               <strong>The signature does not cover the raw bytes.</strong> It is
-              computed over the body with{' '}
-              <code className="code">signature</code> set to{' '}
-              <code className="code">""</code>. To verify: parse, blank the
-              field, re-serialize compactly preserving key order, HMAC that, and
-              compare in constant time. Hashing the raw body will never match.
+              computed over the body with <code className="code">signature</code>{' '}
+              set to <code className="code">""</code>. To verify: parse, blank
+              the field, re-serialize compactly preserving key order, HMAC that,
+              and compare in constant time. Hashing the raw body will never
+              match.
             </Callout>
 
-            <Specimen runhead="Verifying a delivery">
-              <CodeBlock tabs={webhookVerifyTabs} title="your endpoint" />
-            </Specimen>
+            <Specimen
+              runhead="Verifying a delivery"
+              title="your endpoint"
+              tabs={webhookVerifyTabs}
+            />
 
-            <div className="ledger-scroll mt-8">
-              <table className="ledger">
-                <thead>
-                  <tr>
-                    <th scope="col">Event</th>
-                    <th scope="col">Meaning</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {WEBHOOK_EVENTS.map(([name, desc]) => (
-                    <tr key={name}>
-                      <td className="whitespace-nowrap py-2.5 align-top font-mono text-xs text-slate-900 dark:text-slate-100">
-                        {name}
-                      </td>
-                      <td className="py-2.5 align-top text-xs leading-relaxed text-slate-600 dark:text-slate-400">
-                        {desc}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <h3 className="runhead rule-b mt-7 pb-1.5 text-slate-700 dark:text-slate-200">
+              Events
+            </h3>
+            <dl>
+              {WEBHOOK_EVENTS.map(([name, desc]) => (
+                <TermRow key={name} term={name}>
+                  {desc}
+                </TermRow>
+              ))}
+            </dl>
 
-            <p className="measure-wide mt-5 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+            <p className="measure-wide mt-5 text-[13px] leading-relaxed text-slate-500 dark:text-slate-400">
               Deliveries retry with exponential backoff until they get a 2xx.
               Return 2xx immediately and do the work asynchronously; every
               attempt, status code and response body is recorded under{' '}
               <strong>Webhook logs</strong>. Fulfil idempotently — the same event
               can arrive more than once.
             </p>
-          </section>
+          </Chapter>
 
           {/* ---------------- STATUSES ---------------- */}
-          <section id="statuses" className="scroll-mt-6">
-            <SectionHeading n="07">Payment statuses</SectionHeading>
-            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+          <Chapter id="statuses">
+            <p className="measure-wide text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               Fulfil on <code className="code">confirmed</code>, never earlier.
               Everything before it can still change.
             </p>
-            <div className="ledger-scroll mt-6">
-              <table className="ledger">
-                <thead>
-                  <tr>
-                    <th scope="col">Status</th>
-                    <th scope="col">Meaning</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {STATUSES.map(([status, desc]) => (
-                    <tr key={status}>
-                      <td className="whitespace-nowrap py-2.5 align-top font-mono text-xs text-slate-900 dark:text-slate-100">
-                        {status}
-                      </td>
-                      <td className="py-2.5 align-top text-xs leading-relaxed text-slate-600 dark:text-slate-400">
-                        {desc}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
+            <h3 className="runhead rule-b mt-6 pb-1.5 text-slate-700 dark:text-slate-200">
+              Statuses
+            </h3>
+            <dl>
+              {STATUSES.map(([status, desc]) => (
+                <TermRow key={status} term={status}>
+                  {desc}
+                </TermRow>
+              ))}
+            </dl>
+          </Chapter>
 
           {/* ---------------- ERRORS ---------------- */}
-          <section id="errors" className="scroll-mt-6">
-            <SectionHeading n="08">Errors &amp; limits</SectionHeading>
-            <p className="measure-wide mt-4 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+          <Chapter id="errors">
+            <p className="measure-wide text-sm leading-relaxed text-slate-600 dark:text-slate-300">
               Every failure returns{' '}
-              <code className="code">
+              <code className="code break-words">
                 &#123; "error": "code", "message": "…" &#125;
               </code>{' '}
               with a matching HTTP status. Branch on{' '}
               <code className="code">error</code>, not on the message text.
             </p>
-            <div className="ledger-scroll mt-6">
-              <table className="ledger">
-                <thead>
-                  <tr>
-                    <th scope="col" className="num">
-                      HTTP
-                    </th>
-                    <th scope="col">Code</th>
-                    <th scope="col">Meaning</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {ERRORS.map(([status, code, desc]) => (
-                    <tr key={code}>
-                      <td className="num w-0 whitespace-nowrap py-2.5 align-top font-mono text-xs text-slate-500 dark:text-slate-400">
-                        {status}
-                      </td>
-                      <td className="whitespace-nowrap py-2.5 align-top font-mono text-xs text-slate-900 dark:text-slate-100">
-                        {code}
-                      </td>
-                      <td className="py-2.5 align-top text-xs leading-relaxed text-slate-600 dark:text-slate-400">
-                        {desc}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <p className="measure-wide mt-5 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+            <h3 className="runhead rule-b mt-6 pb-1.5 text-slate-700 dark:text-slate-200">
+              HTTP · code · meaning
+            </h3>
+            <ul>
+              {ERRORS.map(([status, code, desc]) => (
+                <RefRow
+                  key={code}
+                  cols={ERROR_COLS}
+                  lead={
+                    <span className="num font-mono text-[13px] text-slate-500 dark:text-slate-400">
+                      {status}
+                    </span>
+                  }
+                  term={code}
+                >
+                  {desc}
+                </RefRow>
+              ))}
+            </ul>
+            <p className="measure-wide mt-5 text-[13px] leading-relaxed text-slate-500 dark:text-slate-400">
               Authenticated calls are throttled per API key (120 requests per
               minute by default) and responses carry the standard{' '}
               <code className="code">RateLimit-*</code> headers. On a{' '}
               <code className="code">429</code> or{' '}
-              <code className="code">500</code>, retry with the{' '}
-              <em>same</em> <code className="code">Idempotency-Key</code> — the
-              gateway replays the original response instead of creating a second
-              payment.
+              <code className="code">500</code>, retry with the <em>same</em>{' '}
+              <code className="code">Idempotency-Key</code> — the gateway replays
+              the original response instead of creating a second payment.
             </p>
-          </section>
+          </Chapter>
         </div>
       </div>
     </>
@@ -1067,70 +1162,214 @@ export default function ApiDocs() {
 }
 
 // ---------------------------------------------------------------------------
-// Small presentational helpers
+// Page furniture
 // ---------------------------------------------------------------------------
 
 /**
- * A section opener: the numeral as a running head, the title under it, and a
- * hairline above the whole block.
+ * THE CHAPTER — one titled surface per section of the reference.
  *
- * `first` drops the hairline on section 01, which otherwise sits a few
- * millimetres under PageHeader's heavy masthead rule and reads as a stutter.
- * That masthead stroke is the only strong rule the page gets.
+ * It takes only an id and reads its own numeral and title out of `SECTIONS`,
+ * which is the same array the index is built from. That is deliberate: the
+ * numbers used to be typed twice, once in the contents column and once as a
+ * literal on the heading, and a reference work whose index disagrees with its
+ * body is worse than one with no index.
+ *
+ * The heading is a real `<h2>` at 18-20px rather than the `.runhead` a
+ * dashboard `<Section>` carries. A running head names a block of data you can
+ * see all of; a chapter of a document is a destination, and it has to be
+ * findable by someone scrolling past at speed.
  */
-function SectionHeading({
-  n,
-  first = false,
-  children,
+function Chapter({ id, children }: { id: SectionId; children: ReactNode }) {
+  const { n, label } = CHAPTER[id];
+  return (
+    <section
+      id={id}
+      aria-labelledby={`${id}-title`}
+      className="surface scroll-mt-4 px-4 py-5 sm:px-6 sm:py-6"
+    >
+      <div className="flex items-baseline gap-3">
+        <span className="runhead num shrink-0">{n}</span>
+        <h2
+          id={`${id}-title`}
+          className="text-lg font-semibold tracking-[-0.025em] text-slate-900 sm:text-xl dark:text-slate-50"
+        >
+          {label}
+        </h2>
+      </div>
+      <div className="mt-4">{children}</div>
+    </section>
+  );
+}
+
+/**
+ * The index, rendered twice — once in the sticky desktop rail, once inside the
+ * phone disclosure. One component rather than two copies, because an index that
+ * lists eight sections on a laptop and seven on a phone is exactly the bug
+ * nobody notices until a reader reports it.
+ *
+ * Only one of the two is ever in the accessibility tree: the other's ancestor
+ * is `display: none`, so there is no duplicate landmark to tab through.
+ */
+function TocList({
+  active,
+  onNavigate,
 }: {
-  n: string;
-  first?: boolean;
-  children: ReactNode;
+  active: string | null;
+  onNavigate?: () => void;
 }) {
   return (
-    <div className={first ? '' : 'rule pt-8'}>
-      <span className="runhead num">{n}</span>
-      <h2 className="mt-1.5 text-xl font-semibold tracking-[-0.02em] text-slate-900 dark:text-slate-50">
-        {children}
-      </h2>
+    <ol>
+      {SECTIONS.map(([id, label], i) => {
+        const on = active === id;
+        return (
+          <li key={id}>
+            <a
+              href={`#${id}`}
+              onClick={onNavigate}
+              aria-current={on ? 'true' : undefined}
+              // `.nav-item` is the product's own navigation row, so the index
+              // reads as navigation rather than as a second, invented control.
+              // Its 38px floor is a desktop measurement; on a phone this list
+              // is thumbed, so it is lifted to the 44px touch floor and only
+              // relaxes where there is a pointer.
+              className={`nav-item min-h-[44px] lg:min-h-[38px] ${on ? 'nav-item-on' : ''}`}
+            >
+              <span className="num shrink-0 text-[11px] tracking-[0.12em] text-slate-400 dark:text-slate-500">
+                {ord(i)}
+              </span>
+              <span className="min-w-0">{label}</span>
+            </a>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/**
+ * A CODE SPECIMEN — the shared `<CodeBlock>` with a caption over it.
+ *
+ * The block itself is `.well`, the inset surface, and that is the right reading
+ * of what a snippet is: the chapter around it is the object, and the sample is
+ * a window cut into it. A raised, shadowed card would put the code on the same
+ * plane as the section containing it.
+ *
+ * All this component adds is the running head. An unlabelled snippet in a
+ * reference this long is a puzzle — "which of the four things I just read is
+ * this?" — and the caption is also what carries the route for the two blocks
+ * whose chrome has no room for it on a phone.
+ */
+function Specimen({ runhead, tabs, title }: SpecimenProps) {
+  return (
+    <div className="mt-5">
+      <span className="runhead mb-1.5">{runhead}</span>
+      <CodeBlock tabs={tabs} title={title} />
     </div>
   );
 }
 
 /**
- * A code specimen with a running head naming what it is. The block itself is
- * CodeBlock — dark chrome, language tabs, one copy control — and this only
- * gives it a caption, because an unlabelled snippet in a long reference is a
- * puzzle.
+ * One request header, as a label/value row.
+ *
+ * The label column used to be a fixed `7.25rem` at every width, which on a
+ * 360px screen left about 130px for a value that is sometimes a 90-character
+ * HMAC expression. It is one column below `sm` and a fixed pair only where
+ * there is room for one — and the values that need it carry their own wrapping
+ * at the call site, because a signed string is 45 unbreakable characters and
+ * would otherwise set the whole page's minimum width on its own.
  */
-function Specimen({ runhead, children }: { runhead: string; children: ReactNode }) {
+function HeaderRow({ name, children }: { name: string; children: ReactNode }) {
   return (
-    <div className="mt-6">
-      <span className="runhead mb-2">{runhead}</span>
-      {children}
+    <div className="grid gap-x-3 gap-y-1 border-t border-[var(--line-soft)] py-2 first:border-t-0 sm:grid-cols-[7.5rem_minmax(0,1fr)]">
+      <dt className="min-w-0">
+        <code className="code">{name}</code>
+      </dt>
+      <dd className="min-w-0 text-slate-600 dark:text-slate-300">{children}</dd>
     </div>
   );
 }
 
-/** One request header, as a ruled label/value row. */
-function Header({ name, children }: { name: string; children: ReactNode }) {
+/**
+ * A three-field reference row: a short lead (the verb, the status), the thing
+ * being named, and a sentence about it.
+ *
+ * The whole responsive trick is two grid placements. Where the row is narrow
+ * the description is pushed to `col-start-2`, so it drops onto a second row and
+ * aligns under the path rather than under the verb; where it is wide it is
+ * pulled back up to `row-start-1` in a third column. One row of markup, two
+ * shapes, and the path never has to be truncated or scrolled to fit.
+ *
+ * The placement follows ROUTE_COLS / ERROR_COLS step for step, including the
+ * reversal at `lg` — see the note on those constants.
+ */
+function RefRow({
+  lead,
+  term,
+  cols,
+  children,
+}: {
+  lead: ReactNode;
+  term: string;
+  cols: string;
+  children: ReactNode;
+}) {
   return (
-    <div className="rule flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2">
-      <dt className="w-[7.25rem] shrink-0">
-        <code className="code">{name}</code>
+    <li
+      className={`grid grid-cols-[3.25rem_minmax(0,1fr)] items-baseline gap-x-3 gap-y-1 border-t border-[var(--line-soft)] py-2.5 first:border-t-0 md:gap-x-4 ${cols}`}
+    >
+      {lead}
+      <code className="min-w-0 break-all font-mono text-[13px] text-slate-900 dark:text-slate-100">
+        {term}
+      </code>
+      <p className="col-start-2 min-w-0 text-[13px] leading-relaxed text-slate-600 dark:text-slate-400 md:col-start-3 md:row-start-1 lg:col-start-2 lg:row-start-auto xl:col-start-3 xl:row-start-1">
+        {children}
+      </p>
+    </li>
+  );
+}
+
+/** A two-field reference row — an event name or a status, and what it means. */
+function TermRow({ term, children }: { term: string; children: ReactNode }) {
+  return (
+    <div className="grid gap-x-4 gap-y-1 border-t border-[var(--line-soft)] py-2.5 first:border-t-0 md:grid-cols-[minmax(0,13rem)_minmax(0,1fr)]">
+      <dt className="min-w-0 break-all font-mono text-[13px] text-slate-900 dark:text-slate-100">
+        {term}
       </dt>
-      <dd className="min-w-0 flex-1 text-slate-600 dark:text-slate-300">{children}</dd>
+      <dd className="min-w-0 text-[13px] leading-relaxed text-slate-600 dark:text-slate-400">
+        {children}
+      </dd>
     </div>
+  );
+}
+
+/**
+ * Renders the backticks the endpoint descriptions are already written with as
+ * real inline code. The copy is unchanged — it was always marked up this way,
+ * and the marks were simply being printed as literal characters.
+ */
+function Ticks({ text }: { text: string }) {
+  return (
+    <>
+      {text.split('`').map((part, i) =>
+        i % 2 === 1 ? (
+          <code key={i} className="code break-all">
+            {part}
+          </code>
+        ) : (
+          part
+        ),
+      )}
+    </>
   );
 }
 
 function MethodBadge({ method }: { method: string }) {
   // Method colour is structural, not semantic-financial: it says "this reads"
   // vs "this writes". Green stays out of it — on this product green means money
-  // arrived, and a GET badge is not a settled payment. Brand is out of it too,
-  // now: an indigo fill on a label nobody can click spends the interactive
-  // colour on decoration. The word is the carrier, weight is the emphasis, and
-  // the mark survives in greyscale.
+  // arrived, and a GET badge is not a settled payment. Brand is out of it too:
+  // an indigo fill on a label nobody can click spends the interactive colour on
+  // decoration. The word is the carrier, weight is the emphasis, and the mark
+  // survives in greyscale.
   const tone =
     method === 'GET'
       ? 'text-slate-500 dark:text-slate-400'
@@ -1138,21 +1377,26 @@ function MethodBadge({ method }: { method: string }) {
         ? 'text-red-600 dark:text-red-400'
         : 'text-slate-900 dark:text-slate-100';
   return (
-    <span className={`font-mono text-[10px] font-semibold uppercase tracking-[0.12em] ${tone}`}>
+    <span
+      className={`font-mono text-[11px] font-semibold uppercase tracking-[0.1em] ${tone}`}
+    >
       {method}
     </span>
   );
 }
 
 /**
- * A ruled note, not a tinted box.
+ * A CAUTION, SET INTO THE PAGE.
+ *
+ * A `.well` with one semantic edge rather than a tinted rounded box: the note
+ * is an aside cut into the chapter, and the colour is spent on a 2px stroke and
+ * a label instead of on a fill nobody can read small type against.
  *
  * The hue still means what it means everywhere else in the product — amber is
  * "wait, there is something you have to do", red is "you can lose money here" —
- * but it is spent on a 2px rule and a label rather than on a fill, and the
- * label is a WORD, so the distinction survives in greyscale and for a
- * red/green-blind reader. The body stays in ink on a measure, because it is the
- * part that has to be read.
+ * and the WORD carries the same meaning on its own, so the distinction survives
+ * in greyscale and for a red/green-blind reader. The body stays in ink on a
+ * measure, because it is the part that has to be read.
  */
 function Callout({
   tone,
@@ -1165,18 +1409,18 @@ function Callout({
 }) {
   const danger = tone === 'danger';
   const stroke = danger
-    ? 'border-red-600 dark:border-red-400'
-    : 'border-amber-600 dark:border-amber-400';
+    ? 'border-l-red-600 dark:border-l-red-400'
+    : 'border-l-amber-600 dark:border-l-amber-400';
   const ink = danger
     ? 'text-red-600 dark:text-red-400'
     : 'text-amber-600 dark:text-amber-400';
   return (
-    <div className={`border-t-2 pt-3 ${stroke} ${className}`}>
+    <div className={`well border-l-2 p-3.5 sm:p-4 ${stroke} ${className}`}>
       <p className={`runhead flex items-center gap-2 ${ink}`}>
         <AlertTriangle size={13} className="shrink-0" aria-hidden />
         {danger ? 'Unrecoverable' : 'Important'}
       </p>
-      <div className="measure-wide mt-2 text-xs leading-relaxed text-slate-700 dark:text-slate-300">
+      <div className="measure-wide mt-2 text-[13px] leading-relaxed text-slate-700 dark:text-slate-300">
         {children}
       </div>
     </div>

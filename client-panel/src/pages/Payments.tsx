@@ -7,6 +7,7 @@ import { ALL_STATUSES, formatAmount, formatDate, shortHash } from '@/lib/format'
 import type { Payment, PaymentStatus } from '@/types';
 import PageHeader from '@/components/PageHeader';
 import DataTable, { type Column } from '@/components/DataTable';
+import Section from '@/components/Section';
 import { PaymentStatusBadge } from '@/components/Badge';
 import CopyButton from '@/components/CopyButton';
 
@@ -15,10 +16,18 @@ const PAGE_SIZE = 25;
 /**
  * THE LIST — a merchant's money-in ledger.
  *
- * Set as a ledger on the page rather than a table inside a card: the running
- * heads sit over an ink rule, hairlines divide the rows, and the amount column
- * is ranged right on tabular figures so magnitudes can be compared down the
- * column instead of read one at a time. See the LEDGER block in index.css.
+ * TWO SURFACES, IN THE ORDER THE WORK HAPPENS: narrow the set, then read it.
+ * The filter bar is a raised surface of its own and the ledger is a titled
+ * Section below it, rather than both being printed straight onto the page. A row
+ * of controls floating on the bare canvas is the single clearest tell of an
+ * unfinished screen — there is nothing to say where the instrument ends and the
+ * data begins, so the eye has to work it out from the copy.
+ *
+ * Inside the ledger nothing changed: hairlines still divide the rows and the
+ * amount column is still ranged right on tabular figures, so magnitudes can be
+ * compared down the column instead of read one at a time. What changed is that
+ * those hairlines now divide WITHIN a surface rather than carrying the page's
+ * whole structure. See the LEDGER block in index.css.
  *
  * ASSET AND NETWORK ARE ONE COLUMN, never two and never one without the other:
  * USDT on BEP20 and USDT on TRC20 are different assets with different addresses,
@@ -137,10 +146,14 @@ export default function Payments() {
             // The row navigates; this link leaves the app. Without this the
             // merchant gets both.
             onClick={(e) => e.stopPropagation()}
-            className="link-ink inline-flex items-center gap-1 font-mono text-xs"
+            // `break-all` even though `shortHash` has already elided the middle:
+            // a hash is one unbreakable token, so if the column is ever narrower
+            // than the elision the cell sets its own minimum width and drags the
+            // whole ledger sideways rather than wrapping.
+            className="link-ink inline-flex items-center gap-1 break-all font-mono text-xs"
           >
             {shortHash(p.txHash)}
-            <ExternalLink size={11} aria-hidden />
+            <ExternalLink size={11} className="shrink-0" aria-hidden />
           </a>
         ) : (
           // Never a bare dash: say which nothing this is.
@@ -152,11 +165,16 @@ export default function Payments() {
       header: 'Payment ID',
       hideOnMobile: true,
       render: (p) => (
-        <span className="flex items-center gap-1 whitespace-nowrap font-mono text-xs text-slate-500 dark:text-slate-400">
-          {shortHash(p.paymentId, 8, 4)}
+        // `whitespace-nowrap` was the wrong instrument here and the audit caught
+        // it: an id is an unbreakable token, so refusing to wrap it made this
+        // cell — not the data — the thing setting the ledger's minimum width.
+        // `break-all` lets it fold instead, and the copy control is pinned so it
+        // never wraps away from the value it copies.
+        <span className="flex items-center gap-1 font-mono text-xs text-slate-500 dark:text-slate-400">
+          <span className="min-w-0 break-all">{shortHash(p.paymentId, 8, 4)}</span>
           {/* Copying used to navigate as well: the click bubbled to the row
               handler, so "copy this id" opened the record every time. */}
-          <span onClick={(e) => e.stopPropagation()}>
+          <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
             <CopyButton value={p.paymentId} size={12} />
           </span>
         </span>
@@ -186,9 +204,21 @@ export default function Payments() {
         }
       />
 
-      {/* The controls. No card: a row of fields on the page, closed by the
-          ledger's own ink rule a few lines below. */}
-      <div className="mb-5">
+      {/* ============================================================
+          THE FILTER BAR, ON ITS OWN SURFACE.
+
+          It used to be a bare row of fields on the page, which read as
+          unfinished for a reason worth stating: a control needs a ground to
+          sit on before it reads as a control. Given one, the bar also becomes
+          a single object the eye can dismiss once it has been set, rather than
+          three loose fields it has to re-parse on the way down to the data.
+
+          NOT a `.spot`, and not `.glass`. Glass belongs to chrome that floats
+          over the page (topbar, dock, modals); a filter bar scrolls with the
+          content and is therefore plane 2, the same plane as the ledger under
+          it. The controls stay stacked below `sm` exactly as they were.
+          ============================================================ */}
+      <div className="surface p-3 sm:p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <div className="relative flex-1">
             <Search
@@ -228,110 +258,135 @@ export default function Payments() {
         </div>
       </div>
 
-      <DataTable
-        columns={columns}
-        rows={rows}
-        rowKey={(p) => p.paymentId}
-        loading={query.isLoading}
-        error={query.isError ? (query.error as { message?: string })?.message : null}
-        onRetry={() => query.refetch()}
-        onRowClick={(p) => navigate(`/payments/${p.paymentId}`)}
-        label="Payments"
-        // Column one is the row's identity, so it is worth freezing when the
-        // seven columns run wider than the viewport.
-        stickyFirstColumn
-        // The only thing that makes the header actually stick: without a height
-        // the scroll box never scrolls and the header pins to nothing.
-        maxHeight="70vh"
-        // Enough ghost rows to fill the box, so nothing jumps when data lands.
-        skeletonRows={10}
-        renderMobile={(p) => (
-          <div className="flex items-baseline justify-between gap-3">
-            <span className="min-w-0">
-              <span className="block truncate font-medium text-slate-900 dark:text-slate-50">
-                {p.orderId}
+      {/* `flush` because the body is a ledger: a table ranges to the edges of
+          its own surface, and body padding would inset the rows from the rules
+          that divide them. The footnote and the pager below share that padding,
+          so they line up with the columns rather than with the surface edge. */}
+      <Section className="mt-3" flush title="Payments">
+        <DataTable
+          columns={columns}
+          rows={rows}
+          rowKey={(p) => p.paymentId}
+          loading={query.isLoading}
+          error={query.isError ? (query.error as { message?: string })?.message : null}
+          onRetry={() => query.refetch()}
+          onRowClick={(p) => navigate(`/payments/${p.paymentId}`)}
+          label="Payments"
+          // Column one is the row's identity, so it is worth freezing when the
+          // seven columns run wider than the viewport.
+          stickyFirstColumn
+          // The only thing that makes the header actually stick: without a height
+          // the scroll box never scrolls and the header pins to nothing.
+          //
+          // `dvh`, NOT `vh`. On mobile Safari `vh` is measured against the tall
+          // viewport the page has before the URL bar collapses, so `70vh` is
+          // meaningfully more than 70% of what the merchant can actually see —
+          // and this box is already nested inside the shell's own scroller,
+          // where being too tall means the inner scrollbar never appears and the
+          // sticky header goes back to sticking to nothing.
+          maxHeight="70dvh"
+          // Enough ghost rows to fill the box, so nothing jumps when data lands.
+          skeletonRows={10}
+          renderMobile={(p) => (
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="min-w-0">
+                {/* `break-words`, not `truncate`. An order id is the merchant's
+                    own reference and the only thing identifying the row; half of
+                    one is worse than a second line. It breaks only where it has
+                    to, so an ordinary reference still sets on one line. */}
+                <span className="block break-words font-medium text-slate-900 dark:text-slate-50">
+                  {p.orderId}
+                </span>
+                <span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">
+                  {formatDate(p.createdAt)}
+                </span>
               </span>
-              <span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">
-                {formatDate(p.createdAt)}
+              {/* `min-w-0` rather than `shrink-0`: a money figure must never be
+                  clipped by its own column, so the amount side yields width and
+                  wraps instead of overflowing the row. */}
+              <span className="min-w-0 text-right">
+                <span className="num lining-nums block break-words font-medium text-slate-900 dark:text-slate-50">
+                  {formatAmount(p.amount)}
+                </span>
+                <span className="mt-0.5 block text-xs">
+                  <AssetOnNetwork asset={p.asset ?? p.currency} network={p.network} />
+                </span>
+                <span className="mt-1.5 block">
+                  <PaymentStatusBadge status={p.status} />
+                </span>
               </span>
-            </span>
-            <span className="shrink-0 text-right">
-              <span className="num lining-nums block font-medium text-slate-900 dark:text-slate-50">
-                {formatAmount(p.amount)}
-              </span>
-              <span className="mt-0.5 block text-xs">
-                <AssetOnNetwork asset={p.asset ?? p.currency} network={p.network} />
-              </span>
-              <span className="mt-1.5 block">
-                <PaymentStatusBadge status={p.status} />
-              </span>
-            </span>
+            </div>
+          )}
+          emptyLabel={
+            filtered
+              ? 'No payments on this page match these filters.'
+              : 'No payments yet.'
+          }
+          emptyHint={
+            filtered
+              ? `The status filter asks the server; the search box only looks at the ${PAGE_SIZE} rows on this page.`
+              : 'A payment appears here as soon as one is created — from the API, a payment link, or the Create button above.'
+          }
+          emptyAction={
+            filtered ? (
+              <button type="button" className="btn-secondary" onClick={clearFilters}>
+                Clear filters
+              </button>
+            ) : (
+              <Link to="/payments/new" className="btn-secondary">
+                Create a payment
+              </Link>
+            )
+          }
+        />
+
+        {/* The footnote and the pager, inside the ledger's own surface rather
+            than adrift under it. A rule still divides them from the last row —
+            that is what a hairline is FOR now: dividing within a surface, not
+            standing in for one. Suppressed on an error, where the ledger's own
+            frame is already saying what happened. */}
+        {!query.isError && (
+          <div className="rule mt-3 flex flex-col-reverse gap-3 pb-1 pt-3 sm:flex-row sm:items-baseline sm:justify-between">
+            <p className="measure text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+              {searching && !query.isLoading && (
+                <>
+                  <span className="num">{rows.length}</span> of{' '}
+                  <span className="num">{pageRows.length}</span> rows on this page match.{' '}
+                </>
+              )}
+              Search and column sorting apply to this page only; the status filter and
+              paging are asked of the server.
+            </p>
+
+            {total > PAGE_SIZE && (
+              <nav
+                className="flex shrink-0 flex-wrap items-center gap-3"
+                aria-label="Pagination"
+              >
+                <span className="num text-xs text-slate-500 dark:text-slate-400">
+                  Page {page} of {totalPages}
+                </span>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={page <= 1 || query.isFetching}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                >
+                  Previous
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={page >= totalPages || query.isFetching}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                >
+                  Next
+                </button>
+              </nav>
+            )}
           </div>
         )}
-        emptyLabel={
-          filtered
-            ? 'No payments on this page match these filters.'
-            : 'No payments yet.'
-        }
-        emptyHint={
-          filtered
-            ? `The status filter asks the server; the search box only looks at the ${PAGE_SIZE} rows on this page.`
-            : 'A payment appears here as soon as one is created — from the API, a payment link, or the Create button above.'
-        }
-        emptyAction={
-          filtered ? (
-            <button type="button" className="btn-secondary" onClick={clearFilters}>
-              Clear filters
-            </button>
-          ) : (
-            <Link to="/payments/new" className="btn-secondary">
-              Create a payment
-            </Link>
-          )
-        }
-      />
-
-      {/* The footer rule closes the ledger — the last row deliberately has
-          none, so this is the stroke that ends it. Suppressed on an error,
-          where the ledger's own frame is already saying what happened. */}
-      {!query.isError && (
-        <div className="rule mt-4 flex flex-col-reverse gap-3 pt-3 sm:flex-row sm:items-baseline sm:justify-between">
-          <p className="measure text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-            {searching && !query.isLoading && (
-              <>
-                <span className="num">{rows.length}</span> of{' '}
-                <span className="num">{pageRows.length}</span> rows on this page match.{' '}
-              </>
-            )}
-            Search and column sorting apply to this page only; the status filter and
-            paging are asked of the server.
-          </p>
-
-          {total > PAGE_SIZE && (
-            <nav className="flex shrink-0 items-center gap-3" aria-label="Pagination">
-              <span className="num text-xs text-slate-500 dark:text-slate-400">
-                Page {page} of {totalPages}
-              </span>
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={page <= 1 || query.isFetching}
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-              >
-                Previous
-              </button>
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={page >= totalPages || query.isFetching}
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              >
-                Next
-              </button>
-            </nav>
-          )}
-        </div>
-      )}
+      </Section>
     </>
   );
 }

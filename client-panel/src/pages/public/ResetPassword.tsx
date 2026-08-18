@@ -1,8 +1,8 @@
-import { ReactNode, useState } from 'react';
+import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2, Lock } from 'lucide-react';
-import AuthShell from '@/components/AuthShell';
+import AuthShell, { Notice } from '@/components/AuthShell';
 import { errorMessage, resetPassword } from '@/lib/api';
 
 interface FormValues {
@@ -27,16 +27,18 @@ interface FormValues {
  * a new one" escape, because a dead link with no way out is the worst screen in
  * the funnel.
  *
- * SET IN TYPE. The brand-tinted rounded panels that held the tick and the
- * envelope are gone: they spent the brand hue on decoration and drew a box round
- * a single glyph. Confirmation is now emerald — the documented "this succeeded"
- * hue — carried by a word and an icon as well as a colour, on a hairline rather
- * than in a panel.
+ * ON A SURFACE. The brand-tinted rounded panels that once held the tick and the
+ * envelope are still gone: they spent the brand hue on decoration and drew a
+ * box round a single glyph. What the form sits on now is the shell's own
+ * rim-lit panel, which is a box that means something. Confirmation is emerald —
+ * the documented "this succeeded" hue — through the funnel's shared <Notice>,
+ * carried by a word and an icon as well as by colour.
  *
- * NO `.reveal` IN THIS FILE, DELIBERATELY. AuthShell's useReveal() collects its
- * targets once, on mount. `done` renders into the SAME AuthShell instance, so a
- * `.reveal` there would never be observed and would stay at opacity 0 forever in
- * a browser without scroll-driven animation.
+ * NO `.reveal` IN THIS FILE, DELIBERATELY, and the shell now enforces it by
+ * scoping its observer to the <aside>. It would otherwise be a trap: `done`
+ * renders into the SAME AuthShell instance, so a `.reveal` there would never be
+ * observed and would stay at opacity 0 forever in a browser without
+ * scroll-driven animation.
  */
 export default function ResetPassword() {
   const [params] = useSearchParams();
@@ -103,15 +105,12 @@ export default function ResetPassword() {
         {/* Emerald because this is the documented "it worked" hue, and never
             emerald ALONE: the headline, this sentence and the icon all say so
             independently of colour. */}
-        <p className="flex items-start gap-2.5 text-sm font-medium leading-relaxed text-emerald-700 dark:text-emerald-400">
-          <CheckCircle2 size={16} className="mt-0.5 shrink-0" aria-hidden />
-          <span>
-            New password saved, and your email address is confirmed at the same
-            time — there is nothing left to click in your inbox.
-          </span>
-        </p>
+        <Notice tone="ok" icon={CheckCircle2} live="status">
+          New password saved, and your email address is confirmed at the same
+          time — there is nothing left to click in your inbox.
+        </Notice>
 
-        <Link to="/login" className="btn-primary mt-8 w-full">
+        <Link to="/login" className="btn-primary mt-5 w-full">
           Sign in
         </Link>
       </AuthShell>
@@ -132,12 +131,12 @@ export default function ResetPassword() {
     >
       <form onSubmit={onSubmit} className="space-y-5" noValidate>
         {error && (
-          <FormError>
+          <Notice tone="failed" icon={AlertCircle}>
             {error}{' '}
             <Link to="/forgot-password" className="font-medium underline underline-offset-2">
               Request a new one
             </Link>
-          </FormError>
+          </Notice>
         )}
 
         <div>
@@ -155,7 +154,7 @@ export default function ResetPassword() {
               type={show ? 'text' : 'password'}
               autoComplete="new-password"
               autoFocus
-              className="input pl-9 pr-10"
+              className="input pl-9 pr-12"
               placeholder="At least 10 characters"
               aria-invalid={errors.newPassword ? true : undefined}
               aria-describedby={errors.newPassword ? 'newPassword-error' : undefined}
@@ -164,10 +163,14 @@ export default function ResetPassword() {
                 minLength: { value: 10, message: 'Use at least 10 characters' },
               })}
             />
+            {/* A 44px target around a 16px glyph. The box is transparent and
+                the icon has not moved; only the hit area grew. This one toggles
+                BOTH fields, which is why it lives on the first and why its
+                label has to name the action rather than the field. */}
             <button
               type="button"
               onClick={() => setShow((v) => !v)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+              className="absolute right-0.5 top-1/2 grid h-11 w-11 -translate-y-1/2 place-items-center rounded-lg text-slate-400 transition-colors duration-[var(--dur-press)] hover:text-slate-700 sm:h-9 sm:w-9 dark:hover:text-slate-200"
               aria-label={show ? 'Hide password' : 'Show password'}
             >
               {show ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -234,23 +237,8 @@ export default function ResetPassword() {
 
 /* -------------------------------------------------------------------------- */
 
-/**
- * A failure, set as a marginal rule rather than a tinted box. Red is the
- * documented "this failed" hue and it is never the only carrier of the meaning —
- * the icon and the sentence both say so. 600 on paper, 400 on ink; the 500 step
- * never carries text.
- */
-function FormError({ children }: { children: ReactNode }) {
-  return (
-    <div
-      role="alert"
-      className="flex items-start gap-2.5 border-l-2 border-red-600 pl-3 text-sm leading-relaxed text-red-600 dark:border-red-400 dark:text-red-400"
-    >
-      <AlertCircle size={15} className="mt-0.5 shrink-0" aria-hidden />
-      <span>{children}</span>
-    </div>
-  );
-}
+/* The local FormError is gone — see the note in ForgotPassword. One <Notice> in
+   AuthShell now serves all six funnel screens. */
 
 const linkFacts = [
   {
@@ -268,19 +256,19 @@ const linkFacts = [
 ];
 
 /**
- * Standing matter for the reset step. The figure is the fact that governs every
- * question a person has on this screen: the link is worth exactly one submitted
- * password, and loading the page costs nothing.
+ * Standing matter for the reset step, on the canvas rather than on a surface of
+ * its own — the panel beside it is what the reader has to act on. The figure is
+ * the fact that governs every question a person has on this screen: the link is
+ * worth exactly one submitted password, and loading the page costs nothing.
  */
 function AboutThisLink() {
   return (
     <>
       <span className="runhead">About this link</span>
-      <div className="rule-strong mt-3" aria-hidden />
 
-      <div className="mt-8">
-        <span className="figure-xl">1</span>
-        <span className="figure-label">
+      <div className="mt-6">
+        <span className="figure-xl text-gradient">1</span>
+        <span className="figure-label measure">
           use per link, spent on submit. It also expires an hour after it was
           sent, whichever comes first.
         </span>
@@ -288,7 +276,7 @@ function AboutThisLink() {
 
       <ul className="mt-10">
         {linkFacts.map(({ term, body }) => (
-          <li key={term} className="rule py-5">
+          <li key={term} className="rule py-5 first:border-t-0 first:pt-0">
             <span className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
               {term}
             </span>

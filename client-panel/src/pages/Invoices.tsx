@@ -27,6 +27,7 @@ import Modal from '@/components/Modal';
 import Spinner from '@/components/Spinner';
 import Badge from '@/components/Badge';
 import StatCard from '@/components/StatCard';
+import Section from '@/components/Section';
 import DataTable, { type Column } from '@/components/DataTable';
 
 /**
@@ -37,10 +38,14 @@ import DataTable, { type Column } from '@/components/DataTable';
  * never shows a crypto amount: quoting one here would be a number that is
  * already out of date by the time anyone reads it.
  *
- * Set as a broadsheet at working density: a masthead, a short ledger strip of
- * what is actually owed, then the invoices themselves as a ledger. No hero, no
- * entrance animation, no count-up — a merchant opens this screen to read a
- * number, and the number is simply there when they arrive.
+ * ASSEMBLED FROM SURFACES, not from ruled bands. The outgoing version printed
+ * everything straight onto the page and divided it with hairlines, which gave
+ * the eye nothing to land on: the outstanding figures, the ledger and the
+ * last action's outcome were one continuous column of type at one weight. Each
+ * is now its own lit surface, so "what am I owed" and "which invoice" are two
+ * objects rather than two paragraphs. No hero, no entrance animation, no
+ * count-up — a merchant opens this screen to read a number, and the number is
+ * simply there when they arrive.
  *
  * OUTSTANDING IS TOTALLED PER CURRENCY AND NEVER CONVERTED. This is the same
  * invariant BalanceStrip holds for (network, asset): an invoice is a fiat
@@ -193,10 +198,19 @@ export default function Invoices() {
    * The wrapper stops the click reaching the row: these buttons act on the
    * invoice, they do not open it. Enter on a button is safe already — the row's
    * key handler only fires when the row itself is the target.
+   *
+   * EVERY CONTROL HERE IS 44px UNTIL `sm`. They were 28px squares — a `p-1.5`
+   * around a 14px glyph — which on a phone is a target you hit by luck, and one
+   * of the three voids an invoice. The glyph stays 14px because the row's
+   * density is right; what grows is the box around it, exactly as `.btn` does
+   * at the same breakpoint and for the same reason.
    */
+  const iconAction =
+    'grid h-11 w-11 shrink-0 place-items-center rounded-lg text-slate-400 transition-colors duration-100 disabled:opacity-40 sm:h-9 sm:w-9';
+
   const rowActions = (inv: Invoice, justify: 'justify-start' | 'justify-end') => (
     <div
-      className={`flex items-center gap-0.5 ${justify}`}
+      className={`flex items-center ${justify}`}
       onClick={(e) => e.stopPropagation()}
     >
       {inv.token && inv.status !== 'void' && (
@@ -206,7 +220,7 @@ export default function Invoices() {
             href={checkoutUrl(inv.token)}
             target="_blank"
             rel="noopener noreferrer"
-            className="rounded p-1.5 text-slate-400 transition-colors duration-100 hover:text-brand-600 dark:hover:text-brand-400"
+            className={`${iconAction} hover:text-brand-600 dark:hover:text-brand-400`}
             title="Open pay page"
             aria-label={`Open pay page for ${inv.number}`}
           >
@@ -217,7 +231,7 @@ export default function Invoices() {
       {inv.status === 'open' && inv.customerEmail && (
         <button
           type="button"
-          className="rounded p-1.5 text-slate-400 transition-colors duration-100 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+          className={`${iconAction} hover:bg-[var(--hover)] hover:text-slate-700 dark:hover:text-slate-200`}
           onClick={() => send.mutate(inv.id)}
           disabled={send.isPending}
           title={`Email to ${inv.customerEmail}`}
@@ -229,7 +243,7 @@ export default function Invoices() {
       {inv.status !== 'paid' && inv.status !== 'void' && (
         <button
           type="button"
-          className="rounded p-1.5 text-slate-400 transition-colors duration-100 hover:bg-red-50 hover:text-red-600 disabled:opacity-40 dark:hover:bg-red-900/30 dark:hover:text-red-400"
+          className={`${iconAction} hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400`}
           onClick={() => kill.mutate(inv.id)}
           disabled={kill.isPending}
           title="Void this invoice"
@@ -262,7 +276,7 @@ export default function Invoices() {
       header: 'Customer',
       sortValue: (inv) => inv.customerName ?? '',
       render: (inv) =>
-        inv.customerName ?? <span className="text-slate-400 dark:text-slate-500">—</span>,
+        inv.customerName ?? <span className="text-slate-500 dark:text-slate-400">—</span>,
       className: 'text-slate-600 dark:text-slate-400',
     },
     {
@@ -304,7 +318,7 @@ export default function Invoices() {
             {formatDueDate(inv.dueDate)}
           </span>
         ) : (
-          <span className="text-slate-400 dark:text-slate-500">—</span>
+          <span className="text-slate-500 dark:text-slate-400">—</span>
         ),
     },
     {
@@ -356,7 +370,9 @@ export default function Invoices() {
         </span>
         <StatusBadge invoice={inv} />
       </div>
-      <div className="mt-2 -ml-1.5">{rowActions(inv, 'justify-start')}</div>
+      {/* Pulled left so the first glyph ranges with the text above it rather
+          than with the 44px box drawn around it. */}
+      <div className="-ml-3 mt-1">{rowActions(inv, 'justify-start')}</div>
     </div>
   );
 
@@ -380,13 +396,20 @@ export default function Invoices() {
         }
       />
 
-      {/* THE OUTSTANDING STRIP. One ruled column per currency — never a single
+      {/* THE OUTSTANDING STRIP. One TILE per currency — never a single
           converted total. Rendered only when something is actually owed, so an
           account with nothing open does not pay a row of screen for four
-          zeroes. */}
+          zeroes.
+
+          `auto-fit` + `minmax` rather than `sm:grid-cols-2 lg:grid-cols-4`: a
+          merchant billing in one currency got a quarter-width tile with three
+          empty columns beside it, and a merchant billing in five got a widow on
+          the second row. The track also refuses to squeeze a tile below the
+          width its figure needs, which is what lets `StatCard`'s `break-words`
+          work — a truncated balance is silent data loss. */}
       {ledger.byCurrency.length > 0 && (
-        <section className="mb-8" aria-label="Outstanding">
-          <div className="grid gap-x-8 gap-y-6 sm:grid-cols-2 lg:grid-cols-4">
+        <section className="mb-4" aria-label="Outstanding">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))] gap-3">
             {ledger.byCurrency.map((row) => (
               <StatCard
                 key={row.currency}
@@ -408,40 +431,48 @@ export default function Invoices() {
               />
             ))}
           </div>
-          <p className="mt-4 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+          <p className="measure-wide mt-3 px-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
             Totalled per currency and never converted — an invoice is a fiat document,
             and there is no rate on this page to make two currencies comparable.
           </p>
         </section>
       )}
 
-      <DataTable
-        columns={columns}
-        rows={invoices.data ?? []}
-        rowKey={(inv) => inv.id}
-        loading={invoices.isLoading}
-        error={invoices.isError ? errorMessage(invoices.error) : null}
-        onRetry={() => invoices.refetch()}
-        onRowClick={(inv) => setDetailFor(inv.id)}
-        renderMobile={renderMobile}
-        label="Invoices"
-        // Unpaginated, so it can run long — the height cap is what makes the
-        // running heads stay put through a thousand rows.
-        maxHeight="70vh"
-        skeletonRows={8}
-        emptyLabel="No invoices yet."
-        emptyHint="Add line items, set a due date, and email it. Your customer gets a page they can pay in any coin you accept."
-        emptyAction={
-          <button className="btn-primary" onClick={() => setCreateOpen(true)}>
-            <Plus size={16} /> Create your first invoice
-          </button>
-        }
-      />
+      {/* The ledger, on its own titled surface. `flush` because a table ranges
+          to the edges of the surface it sits on — padding here would inset the
+          rows from the rules that divide them. */}
+      <Section flush title="All invoices">
+        <DataTable
+          columns={columns}
+          rows={invoices.data ?? []}
+          rowKey={(inv) => inv.id}
+          loading={invoices.isLoading}
+          error={invoices.isError ? errorMessage(invoices.error) : null}
+          onRetry={() => invoices.refetch()}
+          onRowClick={(inv) => setDetailFor(inv.id)}
+          renderMobile={renderMobile}
+          label="Invoices"
+          // Unpaginated, so it can run long — the height cap is what makes the
+          // running heads stay put through a thousand rows. `dvh`, never `vh`:
+          // on mobile Safari `vh` measures the viewport WITHOUT the collapsing
+          // toolbar, so a 70vh box is taller than 70% of what you can see.
+          maxHeight="70dvh"
+          skeletonRows={8}
+          emptyLabel="No invoices yet."
+          emptyHint="Add line items, set a due date, and email it. Your customer gets a page they can pay in any coin you accept."
+          emptyAction={
+            <button className="btn-primary" onClick={() => setCreateOpen(true)}>
+              <Plus size={16} /> Create your first invoice
+            </button>
+          }
+        />
+      </Section>
 
-      {/* The outcome of the last row action, ranged left under a hairline
-          rather than floating free. */}
+      {/* The outcome of the last row action, on its own surface rather than
+          under a hairline. A result that matters enough to interrupt the page
+          is an object on it, not a paragraph appended to the ledger. */}
       {(send.isSuccess || send.isError || kill.isError) && (
-        <div className="rule mt-4 pt-3" role="status" aria-live="polite">
+        <div className="surface mt-4 p-4" role="status" aria-live="polite">
           {send.isSuccess && (
             <p className="measure-wide text-sm leading-relaxed text-slate-600 dark:text-slate-400">
               {send.data.sent
@@ -487,9 +518,15 @@ export default function Invoices() {
           </>
         }
       >
-        {/* RULED FIELD GROUPS. A form is a document too: each group is opened by
-            a hairline and named by a running head, so the eye can find "line
-            items" without reading every label on the way there. */}
+        {/* RULED FIELD GROUPS, and they stay ruled — this is the one place in
+            the redesign where a hairline is still the right structural device.
+            Surfaces carry structure between PLANES, and the dialog is already a
+            surface; nesting five more inside it would stack elevation on
+            elevation, and a `.well` behind a group of fields is the same fill
+            `.input` uses, so the fields would disappear into their own
+            container. A rule divides WITHIN a surface, which is exactly the job
+            here: the eye finds "line items" without reading every label on the
+            way there. */}
         <div className="space-y-5">
           <FieldGroup label="Document">
             <div className="grid gap-4 sm:grid-cols-2">
@@ -516,7 +553,7 @@ export default function Invoices() {
               <div>
                 <label className="label" htmlFor="inv-due">
                   Due date{' '}
-                  <span className="font-normal text-slate-400 dark:text-slate-500">
+                  <span className="font-normal text-slate-500 dark:text-slate-400">
                     (optional)
                   </span>
                 </label>
@@ -565,22 +602,38 @@ export default function Invoices() {
             </div>
           </FieldGroup>
 
-          {/* ---- Line items, set as a ledger you type into ---- */}
+          {/* ---- Line items, set as a ledger you type into ----
+
+              THE ROW STACKS BELOW `sm`, and this is the defect that made the
+              whole dialog unusable on a phone rather than merely tight. Inside
+              a `size="lg"` modal at 360px the content box is 280px wide; the
+              qty field (64), the price field (112), the remove control and
+              three gaps took 228 of it, leaving 52px for the DESCRIPTION —
+              of which `.input`'s own horizontal padding ate 28. A merchant was
+              typing a line item three characters at a time.
+
+              `flex-wrap` + `w-full` on the description is what fixes it, and it
+              is deliberately not a second layout: the description claims a full
+              line, qty and price fall onto the next one with price taking the
+              slack, and at `sm` a single `flex-nowrap` returns all four to one
+              row. The header above has always been `hidden sm:flex` — it was
+              written for a stacked mobile row that was never built, and this is
+              that row. */}
           <FieldGroup label="Line items">
             <div className="hidden items-end gap-2 pb-1.5 sm:flex">
-              <span className="runhead flex-1 text-[10px]">Description</span>
-              <span className="runhead w-16 text-[10px]">Qty</span>
-              <span className="runhead w-28 text-[10px]">Price</span>
-              <span className="w-7 shrink-0" aria-hidden />
+              <span className="runhead flex-1">Description</span>
+              <span className="runhead w-16">Qty</span>
+              <span className="runhead w-28">Price</span>
+              <span className="w-9 shrink-0" aria-hidden />
             </div>
             <div>
               {items.map((item, idx) => (
                 <div
                   key={idx}
-                  className="rule flex items-start gap-2 py-2 first:border-t-0 first:pt-0"
+                  className="rule flex flex-wrap items-center gap-2 py-2.5 first:border-t-0 first:pt-0 sm:flex-nowrap sm:py-2"
                 >
                   <input
-                    className="input flex-1"
+                    className="input w-full sm:w-auto sm:flex-1"
                     placeholder="Description"
                     value={item.description}
                     onChange={(e) =>
@@ -607,8 +660,11 @@ export default function Invoices() {
                     }
                     aria-label={`Line ${idx + 1} quantity`}
                   />
+                  {/* Price takes the slack on the stacked line and returns to
+                      its fixed column at `sm`, so the four fields still range
+                      under their running heads on a desktop. */}
                   <input
-                    className="input num w-28"
+                    className="input num flex-1 sm:w-28 sm:flex-none"
                     inputMode="decimal"
                     placeholder="Price"
                     value={item.unitPrice}
@@ -623,7 +679,7 @@ export default function Invoices() {
                   />
                   <button
                     type="button"
-                    className="mt-2 w-7 shrink-0 text-slate-400 transition-colors duration-100 hover:text-red-600 disabled:opacity-30 dark:hover:text-red-400"
+                    className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-slate-400 transition-colors duration-100 hover:text-red-600 disabled:opacity-30 sm:h-9 sm:w-9 dark:hover:text-red-400"
                     onClick={() =>
                       setItems((prev) => prev.filter((_, i) => i !== idx))
                     }
@@ -635,12 +691,14 @@ export default function Invoices() {
                 </div>
               ))}
             </div>
+            {/* A real control rather than a text link: "+ Add line" was a 20px
+                target, and this is the button that makes the form longer. */}
             <button
               type="button"
-              className="mt-3 text-sm font-medium text-brand-600 transition-colors duration-100 hover:text-brand-700 dark:text-brand-400 dark:hover:text-brand-300"
+              className="btn-secondary mt-3"
               onClick={() => setItems((prev) => [...prev, { ...EMPTY_ITEM }])}
             >
-              + Add line
+              <Plus size={14} /> Add line
             </button>
           </FieldGroup>
 
@@ -649,7 +707,7 @@ export default function Invoices() {
               <div>
                 <label className="label" htmlFor="inv-tax">
                   Tax{' '}
-                  <span className="font-normal text-slate-400 dark:text-slate-500">
+                  <span className="font-normal text-slate-500 dark:text-slate-400">
                     (optional)
                   </span>
                 </label>
@@ -749,45 +807,56 @@ export default function Invoices() {
               <StatusBadge invoice={detail.data} />
             </div>
 
+            {/* THE LINE ITEMS, inside a dialog that is 280px wide on a phone.
+                Two things keep them there. The scroller is the honest fallback
+                for a table that cannot be made narrower — without it a long
+                description pushed the whole dialog sideways and the close
+                control with it. `break-words` is what usually means the
+                scroller never has to fire: the only thing that can set a
+                minimum width on this table now is a single unbreakable word,
+                and the amounts stay `whitespace-nowrap` because a figure that
+                wraps mid-number is worse than one that scrolls. */}
             <div className="mt-5">
               <span className="runhead">What this covers</span>
-              <table className="mt-2 w-full text-sm">
-                <tbody>
-                  {detail.data.items.map((i) => (
-                    <tr key={i.id} className="align-baseline">
-                      <td className="rule py-2.5 pr-3 text-slate-700 dark:text-slate-300">
-                        {i.description}
-                        {Number(i.quantity) !== 1 && (
-                          <span className="num ml-1.5 text-xs text-slate-500 dark:text-slate-400">
-                            × {trim(i.quantity)}
-                          </span>
-                        )}
-                      </td>
-                      <td className="rule num py-2.5 text-right whitespace-nowrap text-slate-700 dark:text-slate-300">
-                        {formatAmount(i.amount)}
-                      </td>
-                    </tr>
-                  ))}
-                  {Number(detail.data.taxAmount) > 0 && (
+              <div className="mt-2 overflow-x-auto">
+                <table className="w-full text-sm">
+                  <tbody>
+                    {detail.data.items.map((i) => (
+                      <tr key={i.id} className="align-baseline">
+                        <td className="rule break-words py-2.5 pr-3 text-slate-700 dark:text-slate-300">
+                          {i.description}
+                          {Number(i.quantity) !== 1 && (
+                            <span className="num ml-1.5 text-xs text-slate-500 dark:text-slate-400">
+                              × {trim(i.quantity)}
+                            </span>
+                          )}
+                        </td>
+                        <td className="rule num py-2.5 text-right whitespace-nowrap text-slate-700 dark:text-slate-300">
+                          {formatAmount(i.amount)}
+                        </td>
+                      </tr>
+                    ))}
+                    {Number(detail.data.taxAmount) > 0 && (
+                      <tr>
+                        <td className="rule py-2.5 pr-3 text-slate-500 dark:text-slate-400">
+                          Tax
+                        </td>
+                        <td className="rule num py-2.5 text-right text-slate-500 dark:text-slate-400">
+                          {formatAmount(detail.data.taxAmount)}
+                        </td>
+                      </tr>
+                    )}
                     <tr>
-                      <td className="rule py-2.5 pr-3 text-slate-500 dark:text-slate-400">
-                        Tax
+                      <td className="rule-strong py-2.5 pr-3 font-semibold text-slate-900 dark:text-slate-100">
+                        Total
                       </td>
-                      <td className="rule num py-2.5 text-right text-slate-500 dark:text-slate-400">
-                        {formatAmount(detail.data.taxAmount)}
+                      <td className="rule-strong num py-2.5 text-right font-semibold whitespace-nowrap text-slate-900 dark:text-slate-100">
+                        {money(detail.data.currency, detail.data.total)}
                       </td>
                     </tr>
-                  )}
-                  <tr>
-                    <td className="rule-strong py-2.5 pr-3 font-semibold text-slate-900 dark:text-slate-100">
-                      Total
-                    </td>
-                    <td className="rule-strong num py-2.5 text-right font-semibold whitespace-nowrap text-slate-900 dark:text-slate-100">
-                      {money(detail.data.currency, detail.data.total)}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+                  </tbody>
+                </table>
+              </div>
             </div>
 
             {detail.data.notes && (
@@ -796,8 +865,12 @@ export default function Invoices() {
               </p>
             )}
 
+            {/* An INSET surface, not a ruled band: a URL you are meant to lift
+                out and send is a code block, and `.well` is the primitive for
+                one. It also gives the copy control a ground to sit on instead
+                of floating at the end of a hairline. */}
             {detail.data.token && detail.data.status !== 'void' && (
-              <div className="rule mt-5 pt-3">
+              <div className="well mt-5 p-3">
                 <span className="runhead">Pay link</span>
                 <div className="mt-1.5 flex items-center gap-2">
                   <code className="min-w-0 flex-1 truncate font-mono text-xs text-slate-600 dark:text-slate-300">

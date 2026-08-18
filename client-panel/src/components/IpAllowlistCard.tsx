@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Check, Plus, Save, ShieldAlert, X } from 'lucide-react';
 import { errorMessage, updateSettings } from '@/lib/api';
 import Badge from '@/components/Badge';
+import Section from '@/components/Section';
 import Spinner from '@/components/Spinner';
 
 interface Props {
@@ -23,16 +24,23 @@ interface Props {
  * has, so nothing breaks by leaving it alone.
  *
  * ---------------------------------------------------------------------------
- * SET AS A RULED BLOCK, NOT A CARD. It sits in a stack of settings blocks, and
- * a hairline plus a running head separates it from its neighbours for one pixel
- * where a card charged a border, a radius, a shadow and 24px on four sides. The
- * two former tinted panels — the amber warning and the green "saved" toast —
- * are now ink and a word, which is the house rule: colour confirms, the word
- * carries.
+ * IT OWNS ITS SURFACE, AS A `Section`. It used to be a ruled block on the bare
+ * page — right for a design made of hairlines, wrong for one made of lit
+ * surfaces, where a form floating on the canvas reads as unfinished. Settings
+ * renders it with no wrapper of its own (there is a comment there saying so),
+ * so the surface has to come from here; do NOT wrap this in a second `Section`
+ * at the call site or the page grows two nested cards for one block.
  *
- * THE EMPTY STATE IS NAMED. "Unrestricted" is printed next to the running head
+ * The two former tinted panels — the amber warning and the green "saved" toast
+ * — are still ink and a word rather than boxes, which is the house rule:
+ * colour confirms, the word carries. That has not changed, and a surface is not
+ * an invitation to reintroduce them.
+ *
+ * THE EMPTY STATE IS NAMED. "Unrestricted" is printed against the running head
  * rather than being left as an absence, because an empty list here is a
- * security posture and an unlabelled blank reads as "not set up yet".
+ * security posture and an unlabelled blank reads as "not set up yet". It rides
+ * in the section's `aside` slot, which is the same place a "View all" or a
+ * count sits everywhere else in the product.
  */
 export default function IpAllowlistCard({ value, hasBearerKey }: Props) {
   const queryClient = useQueryClient();
@@ -78,18 +86,18 @@ export default function IpAllowlistCard({ value, hasBearerKey }: Props) {
   const unrestricted = ips.length === 0;
 
   return (
-    <section className="rule pt-6">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
-        <span className="runhead">IP allowlist</span>
-        {/* The posture, in a word, with the dot's shape as the second carrier.
-            `waiting` is the amber/hollow mark: nothing is broken, but something
-            is still owed here. */}
+    <Section
+      title="IP allowlist"
+      /* The posture, in a word, with the dot's shape as the second carrier.
+         `waiting` is the amber/hollow mark: nothing is broken, but something is
+         still owed here. */
+      aside={
         <Badge tone={unrestricted ? 'waiting' : 'settled'} dot>
           {unrestricted ? 'Unrestricted' : `${ips.length} allowed`}
         </Badge>
-      </div>
-
-      <p className="measure mt-2 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+      }
+    >
+      <p className="measure text-sm leading-relaxed text-slate-500 dark:text-slate-400">
         With any entry in this list, API requests from every other address are
         rejected. Empty means no restriction — that is the default, and either way
         it does not affect signing in to the dashboard.
@@ -117,21 +125,30 @@ export default function IpAllowlistCard({ value, hasBearerKey }: Props) {
 
       {/* The addresses, as ruled rows rather than chips. Each is a line of a
           short ledger: the address ranged left in mono, the control that removes
-          it ranged right against the same rule. */}
+          it ranged right against the same rule.
+
+          THE REMOVE CONTROL IS 44px BELOW `sm`. It was a `p-1` box around a
+          14px glyph — about 26px, and one of the smallest targets in the
+          product, on a control that DELETES the thing containing a bearer
+          token. A miss here is either a silent loss of protection or a support
+          ticket. It gives the space back at `sm`, where there is a pointer. The
+          negative margin keeps the row's own height unchanged on desktop so
+          the list does not suddenly breathe differently from the ruled lists
+          beside it. */}
       {ips.length > 0 && (
         <ul className="mt-5">
           {ips.map((ip) => (
-            <li key={ip} className="rule flex items-center justify-between gap-4 py-2">
+            <li key={ip} className="rule flex items-center justify-between gap-3 py-2">
               <code className="num min-w-0 break-all font-mono text-sm text-slate-900 dark:text-slate-100">
                 {ip}
               </code>
               <button
                 type="button"
                 onClick={() => setIps(ips.filter((x) => x !== ip))}
-                className="shrink-0 rounded-sm p-1 text-slate-400 outline-none transition-colors duration-[var(--dur-press)] hover:text-red-600 focus-visible:ring-2 focus-visible:ring-brand-500 dark:hover:text-red-400"
+                className="-my-1.5 grid h-11 w-11 shrink-0 place-items-center rounded-lg text-slate-500 transition-colors duration-[var(--dur-press)] ease-[var(--ease-out)] hover:bg-[var(--hover)] hover:text-red-600 sm:-my-1 sm:h-9 sm:w-9 dark:text-slate-400 dark:hover:text-red-400"
                 aria-label={`Remove ${ip}`}
               >
-                <X size={14} aria-hidden />
+                <X size={15} aria-hidden />
               </button>
             </li>
           ))}
@@ -140,7 +157,7 @@ export default function IpAllowlistCard({ value, hasBearerKey }: Props) {
 
       <div className="mt-5 flex gap-2">
         <input
-          className="input"
+          className="input min-w-0"
           placeholder="203.0.113.7"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
@@ -185,6 +202,6 @@ export default function IpAllowlistCard({ value, hasBearerKey }: Props) {
           )}
         </button>
       </div>
-    </section>
+    </Section>
   );
 }

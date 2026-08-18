@@ -13,7 +13,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
-import AuthShell from '@/components/AuthShell';
+import AuthShell, { Notice } from '@/components/AuthShell';
 import { getSignupStatus } from '@/lib/api';
 import type { ApiError } from '@/lib/api';
 import type { LoginInput } from '@/types';
@@ -21,36 +21,40 @@ import type { LoginInput } from '@/types';
 /**
  * Merchant sign-in.
  *
- * SET IN TYPE, like the rest of the funnel. AuthShell owns the frame — the
- * masthead, the running head, the .rule-strong, the <h1>, the standfirst, the
- * hairline footer and the margin column — so this file is only the form, and
- * it deliberately renders the SAME primitives Signup does (.label, .input with
- * a slate-400 leading icon, .btn-primary) so the two screens read as one
- * product rather than as two designs that happen to share a header.
+ * THE MOST-OPENED SCREEN IN THE PRODUCT, and the one the redesign has to earn
+ * its keep on first. AuthShell owns the frame — the depth field, the glass
+ * masthead, the running head, the <h1>, the standfirst, the surface the form
+ * sits on, the footer switch and the supporting column — so this file is only
+ * the form, and it deliberately renders the SAME primitives Signup does (.label,
+ * .input with a slate-400 leading icon, .btn-primary, the shell's <Notice>) so
+ * the two screens read as one product rather than as two designs that happen to
+ * share a header.
  *
  * What changed here is enclosure and hue, not behaviour:
  *
- *   - The error banner was a rounded red-tinted box. It is now a NOTICE ON A
- *     RULE — one 2px stroke in the margin, no fill, no radius. Rules, not
- *     boxes, and a hairline says "this belongs to the field below it" as
- *     clearly as a filled card did.
- *   - That notice is now TONED BY MEANING. `error` carries two different
- *     things: a genuine failure, and the "we need your second factor" step,
- *     which is not a failure at all — it is the flow waiting on the user.
- *     Failure is red, waiting is amber, and each ships an ICON and the
- *     sentence itself so the hue is never the only thing carrying it.
+ *   - The error was a NOTICE ON A RULE — a 2px stroke in the margin with no
+ *     fill. That was the right gesture on paper and the wrong one on a lit
+ *     panel, where a bare coloured sentence reads as a label rather than as a
+ *     state. It is now the funnel's <Notice>: a tint, an inset ring and a
+ *     radius from the same scale as the surface under it.
+ *   - It is still TONED BY MEANING. `error` carries two different things: a
+ *     genuine failure, and the "we need your second factor" step, which is not
+ *     a failure at all — it is the flow waiting on the user. Failure is red,
+ *     waiting is amber, and each ships an ICON and the sentence itself so the
+ *     hue is never the only thing carrying it.
  *   - The second factor is separated from the credentials by a hairline
- *     instead of just stacking, so it reads as a second act.
- *   - Brand hue is now only the submit button, the link underlines and the
- *     focus ring. The two inline links moved to .link-ink (ink text, 1px
- *     brand underline) — coloured link text next to a coloured button was two
- *     things competing to be the thing you click.
+ *     instead of just stacking, so it reads as a second act. A rule DIVIDING
+ *     within a surface is what rules are for now.
+ *   - The password reveal was a bare 20px glyph. It is a 44px target now — see
+ *     the note on it. Nothing about it moved on screen.
+ *   - Brand hue is still only the submit button, the link underlines and the
+ *     focus ring.
  *
- * MOTION: none, on purpose. AuthShell's useReveal() observes this subtree, but
- * nothing here carries .reveal — /login is opened daily by merchants already
- * reaching for the password field, and fading it in taxes them for arriving.
- * It would also be unsafe: the notice and the 2FA field mount CONDITIONALLY,
- * and useReveal collects its targets once, on mount.
+ * MOTION: none, on purpose, and it is now structural rather than a promise —
+ * AuthShell scopes its reveal observer to the supporting column, so nothing in
+ * this file can animate on mount even by accident. /login is opened daily by
+ * merchants already reaching for the password field, and fading it in taxes
+ * them for arriving.
  *
  * BEHAVIOUR IS UNTOUCHED: the redirect-to-intended-route logic (both the
  * already-authenticated short circuit and the post-login navigate), the
@@ -146,27 +150,16 @@ export default function Login() {
       }
     >
       <form onSubmit={onSubmit} className="space-y-4" noValidate>
-        {/* A notice on a rule, not a tinted box. Amber for "waiting on you",
-            red for "that did not work" — each with its own icon and its own
-            sentence, so the hue is reinforcement rather than the message.
-            Amber sets at the 700 step on paper because amber-600 does not
-            clear AA on this ground; ink keeps the documented 400. */}
+        {/* Amber for "waiting on you", red for "that did not work" — each with
+            its own icon and its own sentence, so the hue is reinforcement
+            rather than the message. */}
         {error && (
-          <div
-            role="alert"
-            className={`flex items-start gap-2.5 border-l-2 py-1 pl-3 text-sm leading-relaxed ${
-              awaitingCode
-                ? 'border-amber-600 text-amber-700 dark:border-amber-400 dark:text-amber-400'
-                : 'border-red-600 text-red-700 dark:border-red-400 dark:text-red-400'
-            }`}
+          <Notice
+            tone={awaitingCode ? 'waiting' : 'failed'}
+            icon={awaitingCode ? ShieldCheck : AlertCircle}
           >
-            {awaitingCode ? (
-              <ShieldCheck size={15} className="mt-0.5 shrink-0" aria-hidden />
-            ) : (
-              <AlertCircle size={15} className="mt-0.5 shrink-0" aria-hidden />
-            )}
-            <span>{error}</span>
-          </div>
+            {error}
+          </Notice>
         )}
 
         <Field id="email" label="Email" icon={Mail} error={errors.email?.message}>
@@ -196,14 +189,23 @@ export default function Login() {
             id="password"
             type={showPassword ? 'text' : 'password'}
             autoComplete="current-password"
-            className="input pl-9 pr-10"
+            className="input pl-9 pr-12"
             placeholder="••••••••"
             {...register('password', { required: 'Password is required' })}
           />
+          {/*
+            A 44px TARGET AROUND A 16px GLYPH. This was a bare icon with no
+            padding — a ~20px tap area on the one control in the funnel that a
+            person reaches for precisely because they are already unsure what
+            they typed. The box is transparent and the icon stays optically
+            where it always was; only the hit area grew. At `sm` the field is
+            38px tall and the target relaxes with it, which is the same floor
+            `.btn` and `.input` keep.
+          */}
           <button
             type="button"
             onClick={() => setShowPassword((v) => !v)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+            className="absolute right-0.5 top-1/2 grid h-11 w-11 -translate-y-1/2 place-items-center rounded-lg text-slate-400 transition-colors duration-[var(--dur-press)] hover:text-slate-700 sm:h-9 sm:w-9 dark:hover:text-slate-200"
             aria-label={showPassword ? 'Hide password' : 'Show password'}
           >
             {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}

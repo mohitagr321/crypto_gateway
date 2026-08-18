@@ -1,8 +1,8 @@
-import { ReactNode, useState } from 'react';
+import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Link } from 'react-router-dom';
 import { AlertCircle, Loader2, Mail } from 'lucide-react';
-import AuthShell from '@/components/AuthShell';
+import AuthShell, { Notice } from '@/components/AuthShell';
 import { errorMessage, forgotPassword } from '@/lib/api';
 
 /**
@@ -16,19 +16,20 @@ import { errorMessage, forgotPassword } from '@/lib/api';
  * the reader instead of hiding it, because a merchant who mistypes their address
  * and gets a cheerful "check your inbox" deserves to know why no mail arrives.
  *
- * SET IN TYPE. The old success state was a 12rem brand-tinted rounded panel with
- * a floating envelope in it — brand hue spent on decoration, and a box drawn
- * around nothing. It is now a running head, the same standfirst, and the two
- * facts a person in this state actually needs, separated by hairlines. The
- * margin column carries the standing matter for the step.
+ * ON A SURFACE, like the rest of the funnel. An older success state was a 12rem
+ * brand-tinted rounded panel with a floating envelope in it — brand hue spent
+ * on decoration, and a box drawn around nothing. What replaced it was two facts
+ * separated by hairlines on bare paper; what it is now is those same two facts
+ * in a `.well`, set into the shell's panel. The distinction matters: a hairline
+ * enclosure has to be inferred, an inset one is seen. The supporting column
+ * carries the standing matter for each step.
  *
- * NO `.reveal` IN THIS FILE, DELIBERATELY. AuthShell's useReveal() collects its
- * targets once, when the shell mounts. The `sent` branch below renders into the
- * SAME AuthShell instance (React reconciles it rather than remounting), so
- * anything that appears with `sent` would never be observed and would sit at
- * opacity 0 forever in a browser without scroll-driven animation. The form state
- * could safely reveal, but half a funnel that animates and half that does not is
- * worse than a funnel that simply arrives.
+ * NO `.reveal` IN THIS FILE, DELIBERATELY, and the shell now enforces it — its
+ * reveal observer is scoped to the <aside>, and both of this page's asides are
+ * static. It would otherwise be a trap: the `sent` branch renders into the SAME
+ * AuthShell instance (React reconciles it rather than remounting), so anything
+ * appearing with `sent` would never be observed. Half a funnel that animates
+ * and half that does not is worse than a funnel that simply arrives.
  */
 export default function ForgotPassword() {
   const [sent, setSent] = useState(false);
@@ -68,11 +69,12 @@ export default function ForgotPassword() {
           </>
         }
       >
-        {/* Two facts, ruled. No box: the hairlines do the separating that a
-            border, a radius and 24px of padding were doing before. */}
-        <ul className="border-b border-slate-200 dark:border-slate-800">
+        {/* Two facts, set into the panel. The rule falls BETWEEN them only —
+            a stroke under the last one would hang inside the well, and the
+            well's own edge is already the bottom of the group. */}
+        <ul className="well px-4">
           {sentNotes.map(({ term, body }) => (
-            <li key={term} className="rule py-4">
+            <li key={term} className="rule py-4 first:border-t-0">
               <span className="block text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
                 {term}
               </span>
@@ -83,7 +85,7 @@ export default function ForgotPassword() {
           ))}
         </ul>
 
-        <Link to="/login" className="btn-primary mt-8 w-full">
+        <Link to="/login" className="btn-primary mt-5 w-full">
           Back to sign in
         </Link>
       </AuthShell>
@@ -106,7 +108,11 @@ export default function ForgotPassword() {
       }
     >
       <form onSubmit={onSubmit} className="space-y-5" noValidate>
-        {error && <FormError>{error}</FormError>}
+        {error && (
+          <Notice tone="failed" icon={AlertCircle}>
+            {error}
+          </Notice>
+        )}
 
         <div>
           <label className="label" htmlFor="email">
@@ -163,23 +169,9 @@ export default function ForgotPassword() {
 
 /* -------------------------------------------------------------------------- */
 
-/**
- * A failure, set as a marginal rule rather than a tinted box. Red is the
- * documented "this failed" hue, and it is never the only carrier of the meaning:
- * the icon and the sentence both say so. 600 on paper, 400 on ink — the 500 step
- * never carries text.
- */
-function FormError({ children }: { children: ReactNode }) {
-  return (
-    <div
-      role="alert"
-      className="flex items-start gap-2.5 border-l-2 border-red-600 pl-3 text-sm leading-relaxed text-red-600 dark:border-red-400 dark:text-red-400"
-    >
-      <AlertCircle size={15} className="mt-0.5 shrink-0" aria-hidden />
-      <span>{children}</span>
-    </div>
-  );
-}
+/* The local FormError is gone: it was one of four hand-rolled treatments of the
+   same idea across six funnel screens, and it now lives once, in AuthShell, as
+   <Notice>. */
 
 const sentNotes = [
   {
@@ -208,20 +200,21 @@ const linkFacts = [
 ];
 
 /**
- * Standing matter for the request step. The figure is the one number that
- * actually changes what a person does next: it explains why the second email is
- * the only one that works, and it is true on every deployment because the server
- * retires outstanding tokens whenever it issues a new one.
+ * Standing matter for the request step, on the canvas rather than on a second
+ * surface — the panel beside it is the thing to act on and nothing here should
+ * compete with it for that. The figure is the one number that actually changes
+ * what a person does next: it explains why the second email is the only one
+ * that works, and it is true on every deployment because the server retires
+ * outstanding tokens whenever it issues a new one.
  */
 function LinkRules() {
   return (
     <>
       <span className="runhead">How the link works</span>
-      <div className="rule-strong mt-3" aria-hidden />
 
-      <div className="mt-8">
-        <span className="figure-xl">1</span>
-        <span className="figure-label">
+      <div className="mt-6">
+        <span className="figure-xl text-gradient">1</span>
+        <span className="figure-label measure">
           live reset link per account. Ask for another and the one before it stops
           working — always open the newest email.
         </span>
@@ -229,7 +222,7 @@ function LinkRules() {
 
       <ul className="mt-10">
         {linkFacts.map(({ term, body }) => (
-          <li key={term} className="rule py-5">
+          <li key={term} className="rule py-5 first:border-t-0 first:pt-0">
             <span className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
               {term}
             </span>
@@ -263,11 +256,10 @@ function NotArriving() {
   return (
     <>
       <span className="runhead">If it does not arrive</span>
-      <div className="rule-strong mt-3" aria-hidden />
 
-      <ul className="mt-8">
+      <ul className="mt-6">
         {troubleshooting.map(({ term, body }) => (
-          <li key={term} className="rule py-5">
+          <li key={term} className="rule py-5 first:border-t-0 first:pt-0">
             <span className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
               {term}
             </span>

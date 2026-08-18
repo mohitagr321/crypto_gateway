@@ -4,6 +4,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { ArrowRight } from 'lucide-react';
 import PageHeader from '@/components/PageHeader';
 import OnboardingChecklist from '@/components/OnboardingChecklist';
+import Section from '@/components/Section';
 import ErrorState from '@/components/ErrorState';
 import { errorMessage, getOnboarding, resendVerification } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
@@ -15,15 +16,21 @@ import { useAuth } from '@/context/AuthContext';
  * (Settings, API Keys) — coming back here should show fresh state without a
  * manual refresh.
  *
- * SET AS A SPREAD, NOT A STACK OF CARDS. The checklist runs down the wide
- * column and the margin column carries the two things a merchant reads while
- * they wait on themselves: where to go next, and the one security fact that
- * decides how they hand out keys. Both used to be cards, which made three
- * boxes of equal weight out of one task and two footnotes.
+ * SET AS A SPREAD OF SURFACES. The checklist runs down the wide column and the
+ * narrow one carries the two things a merchant reads while they wait on
+ * themselves: where to go next, and the one security fact that decides how they
+ * hand out keys. Each is its own titled surface, so the page has three things
+ * on it rather than one long ruled column in which every heading has the same
+ * standing as every other.
  *
- * The masthead, the loading state and the error state all keep the same
- * running head, so a slow request changes what is on the page rather than what
- * page you appear to be on.
+ * THE CHECKLIST IS RENDERED BARE, deliberately — exactly as Dashboard renders
+ * it. It is a shared component with its own internal structure and its own
+ * conversion; wrapping it here would either double its head or nest a surface
+ * inside a surface. It presents itself.
+ *
+ * The masthead, the loading state and the error state all keep the same running
+ * head, so a slow request changes what is on the page rather than what page you
+ * appear to be on.
  */
 
 /** Where a merchant usefully goes while the checklist is still open. */
@@ -56,21 +63,28 @@ export default function Onboarding() {
   // Loading and error keep the masthead rather than replacing the page with a
   // centred glyph: the header is already correct before the request answers,
   // and holding it still means nothing jumps when the data lands. The
-  // placeholder is `.ghost` — static by design, because `.skeleton` shimmers
-  // on a loop and loops are banned on a dashboard route.
+  // placeholder is `.ghost` — static by design, because a shimmer loops and
+  // loops are banned on a dashboard route.
   if (query.isLoading) {
     return (
       <>
         <Masthead />
-        <div className="grid gap-x-10 gap-y-10 lg:grid-cols-12">
-          <div className="lg:col-span-8">
-            <div className="ghost h-5 w-44" />
-            <div className="ghost mt-4 h-2 w-full" />
+        <div className="grid gap-3 lg:grid-cols-12">
+          <div className="surface min-w-0 p-4 sm:p-5 lg:col-span-8" aria-busy="true">
+            <span className="sr-only" role="status">
+              Loading…
+            </span>
+            <div className="ghost h-5 w-44" aria-hidden />
+            <div className="ghost mt-4 h-2 w-full" aria-hidden />
             <div className="mt-8 space-y-5">
               {[0, 1, 2, 3].map((i) => (
-                <div key={i} className="rule pt-5">
-                  <div className="ghost h-4 w-1/3" />
-                  <div className="ghost mt-2.5 h-3 w-3/4" />
+                <div key={i} className="border-t border-[var(--line-soft)] pt-5">
+                  <div
+                    className="ghost h-4 w-1/3"
+                    aria-hidden
+                    style={{ opacity: Math.max(0.3, 1 - i * 0.15) }}
+                  />
+                  <div className="ghost mt-2.5 h-3 w-3/4" aria-hidden />
                 </div>
               ))}
             </div>
@@ -108,8 +122,8 @@ export default function Onboarding() {
         }
       />
 
-      <div className="grid gap-x-10 gap-y-10 lg:grid-cols-12">
-        <div className="min-w-0 lg:col-span-8">
+      <div className="grid gap-3 lg:grid-cols-12">
+        <div className="min-w-0 space-y-3 lg:col-span-8">
           <OnboardingChecklist
             state={state}
             variant="page"
@@ -118,15 +132,14 @@ export default function Onboarding() {
             resendSent={resendSent}
           />
 
-          {/* The close. A ruled band under a heavy stroke, not a brand-tinted
-              panel with a party glyph in it: brand means "something you can
-              click", and spending it as a celebratory fill is exactly the
-              decoration this idiom exists to remove. The two things you can
-              click are still brand, because they are buttons. */}
+          {/* The close. A titled surface, not a brand-tinted panel with a party
+              glyph in it: brand means "something you can click", and spending it
+              as a celebratory fill is exactly the decoration this design exists
+              to remove. The two things you can click are still brand, because
+              they are buttons. */}
           {state.complete && (
-            <div className="rule-strong mt-10 pt-6">
-              <span className="runhead">Ready</span>
-              <h2 className="mt-2 text-xl font-semibold tracking-[-0.02em] text-slate-900 dark:text-slate-50">
+            <Section title="Ready">
+              <h2 className="text-xl font-semibold tracking-[-0.02em] text-slate-900 dark:text-slate-50">
                 You're ready to take live payments
               </h2>
               <p className="measure mt-2 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
@@ -141,49 +154,53 @@ export default function Onboarding() {
                   Go to dashboard
                 </Link>
               </div>
-            </div>
+            </Section>
           )}
         </div>
 
-        <aside className="min-w-0 lg:col-span-4">
-          <span className="runhead">While you're here</span>
-          {/* A ruled list, not a card of links: the hairline does the
-              separating, and the row is the target. The 2px nudge on the arrow
-              is hover-driven, so it costs a visit nothing. */}
-          <ul className="mt-3 border-b border-slate-200 dark:border-slate-800">
-            {ASIDE_LINKS.map((l) => (
-              <li key={l.to}>
-                <Link
-                  to={l.to}
-                  className="rule group flex items-baseline justify-between gap-4 py-3 outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-brand-500"
-                >
-                  <span className="min-w-0">
-                    <span className="block text-sm font-medium text-slate-900 underline decoration-transparent underline-offset-[3px] group-hover:decoration-brand-600 dark:text-slate-100 dark:group-hover:decoration-brand-400">
-                      {l.label}
+        <aside className="min-w-0 space-y-3 lg:col-span-4">
+          {/* `flush`: the rows draw their own hairlines and are the targets, so
+              they range to the edges of the surface rather than being inset
+              from the rules that divide them. Each row is two lines at `py-3`,
+              which clears the 44px touch floor without being told to. */}
+          <Section flush title="While you're here">
+            <ul>
+              {ASIDE_LINKS.map((l) => (
+                <li key={l.to} className="border-t border-[var(--line-soft)] first:border-t-0">
+                  <Link
+                    to={l.to}
+                    className="group flex items-baseline justify-between gap-4 rounded-lg py-3 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500"
+                  >
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-slate-900 underline decoration-transparent underline-offset-[3px] group-hover:decoration-brand-600 dark:text-slate-100 dark:group-hover:decoration-brand-400">
+                        {l.label}
+                      </span>
+                      <span className="mt-0.5 block text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                        {l.hint}
+                      </span>
                     </span>
-                    <span className="mt-0.5 block text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                      {l.hint}
-                    </span>
-                  </span>
-                  <ArrowRight
-                    size={14}
-                    aria-hidden
-                    className="shrink-0 translate-y-0.5 text-slate-400 transition-transform duration-[var(--dur-press)] ease-[var(--ease-out)] group-hover:translate-x-0.5"
-                  />
-                </Link>
-              </li>
-            ))}
-          </ul>
+                    {/* The 2px nudge is hover-driven, so it costs a visit
+                        nothing, travels well under the 8px budget, and animates
+                        transform only. */}
+                    <ArrowRight
+                      size={14}
+                      aria-hidden
+                      className="shrink-0 translate-y-0.5 text-slate-500 transition-transform duration-[var(--dur-press)] ease-[var(--ease-out)] group-hover:translate-x-0.5 dark:text-slate-400"
+                    />
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </Section>
 
-          <div className="rule mt-8 pt-5">
-            <span className="runhead">A note on security</span>
-            <p className="measure mt-3 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+          <Section title="A note on security">
+            <p className="measure text-sm leading-relaxed text-slate-600 dark:text-slate-400">
               Your settlement wallet, password and API keys can only be changed from
               a signed-in session here — never with an API key. Keep your account
               password strong, and give each integration its own key so you can
               revoke one without breaking the others.
             </p>
-          </div>
+          </Section>
         </aside>
       </div>
     </>

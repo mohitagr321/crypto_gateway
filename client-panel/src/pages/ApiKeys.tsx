@@ -23,12 +23,14 @@ import DataTable, { type Column } from '@/components/DataTable';
 import CopyButton from '@/components/CopyButton';
 import CodeBlock from '@/components/CodeBlock';
 import Modal from '@/components/Modal';
+import Section from '@/components/Section';
 import Spinner from '@/components/Spinner';
 
 /**
  * Multi-key management.
  *
- * Two things here are load-bearing rather than decorative:
+ * Two things here are load-bearing rather than decorative, and neither was
+ * touched by the redesign:
  *  1. The one-time secret modal is not dismissable by clicking away — a merchant
  *     who loses the secret has to revoke and re-issue, so closing must be a
  *     deliberate "I have saved it".
@@ -37,27 +39,32 @@ import Spinner from '@/components/Spinner';
  *     that it cannot move funds — not discover it from a 403 in production.
  *
  * ---------------------------------------------------------------------------
- * SET AS A BROADSHEET, AT WORKING DENSITY
+ * WHAT THE REDESIGN CHANGED, AND WHAT IT DELIBERATELY DID NOT
  *
- * The keys are a LEDGER — DataTable, on the page rather than in a card, so this
- * list is the same object as every other list in the product. Everything that
- * used to be a tinted rounded panel (the exposure warning, the danger zone, the
- * bearer note in the create dialog) is now a running head in the semantic ink
- * over body copy on a measure, which is the same gesture DataTable's own error
- * and empty states use. Rules, not boxes.
+ * The page is now built from lit surfaces rather than from ruled bands: the
+ * ledger of keys, the compromise block and the exposure warning each sit on
+ * their own `.surface`, and the page is the space between them. Nothing about
+ * what any of them SAYS changed.
  *
- * BRAND IS NOW ABSENT FROM STATE. The "Signed" mode marker used to be a
- * brand-tinted pill, which made an attribute of a credential the same colour as
- * the button you are meant to press. Brand is interactive-only: the CTAs, the
- * radio, the focus ring. Mode is carried by an icon, a word and a neutral ink,
- * with amber reserved for the weaker posture that wants attention.
+ * THE WARNINGS GOT LOUDER, NOT QUIETER, and that was the constraint the
+ * conversion was held to. The bearer-without-allowlist notice used to be ink on
+ * the bare canvas between two rules; it is now a surface of its own, above the
+ * ledger, carrying the same amber ink, the same icon and the same words. A
+ * warning that survives a redesign by being visually demoted has not survived
+ * it.
+ *
+ * BRAND IS ABSENT FROM STATE. The "Signed" mode marker is an icon, a word and a
+ * neutral ink — never a brand pill, because brand means "you can act on this"
+ * and an attribute of a credential is not something you press. Amber is
+ * reserved for the weaker posture.
  *
  * THE SECRET IS THE POINT OF THIS PAGE. It exists for exactly one render and
- * never again, so in the one-time dialog it is the heaviest thing on screen:
- * opened by the ink rule, set at reading size in mono, and copied by a
- * full-width control rather than an icon tucked in a corner. That is the same
- * treatment the hosted checkout gives a deposit address, for the same reason —
- * it is the one string that must not be misread or missed.
+ * never again, so in the one-time dialog it is the heaviest thing on screen: set
+ * in a `.well` at reading size in mono, broken at any character so no part of it
+ * can be scrolled out of sight, and copied by a full-width control rather than
+ * an icon tucked in a corner. That is the same treatment the hosted checkout
+ * gives a deposit address, for the same reason — it is the one string that must
+ * not be misread or missed.
  */
 export default function ApiKeys() {
   const queryClient = useQueryClient();
@@ -140,7 +147,11 @@ export default function ApiKeys() {
       render: (k) => (
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
-            <code className="whitespace-nowrap font-mono text-[13px] text-slate-900 dark:text-slate-100">
+            {/* `break-all`, NOT `whitespace-nowrap`. A public key id is a long
+                unbreakable string, and refusing to break it is what sets the
+                ledger's minimum width — it dragged the whole table sideways on
+                anything narrow, to protect a line break nobody minds. */}
+            <code className="min-w-0 break-all font-mono text-[13px] text-slate-900 dark:text-slate-100">
               {k.apiKey}
             </code>
             {/* Bearer keys are shown as a masked prefix, so there is nothing
@@ -168,8 +179,10 @@ export default function ApiKeys() {
       render: (k) => (
         // Plain mono ranged down the column, not three grey chips per row: a
         // scope is a literal you may need to type, and a box around each one
-        // just fights the hairlines.
-        <span className="whitespace-nowrap font-mono text-[11px] text-slate-500 dark:text-slate-400">
+        // just fights the hairlines. Allowed to wrap for the same reason the
+        // key id is allowed to break — a scope list is the second-widest thing
+        // in this table and nothing is lost by setting it on two lines.
+        <span className="block break-words font-mono text-[11px] text-slate-500 dark:text-slate-400">
           {k.scopes.length > 0 ? k.scopes.join('  ·  ') : '—'}
         </span>
       ),
@@ -185,7 +198,7 @@ export default function ApiKeys() {
         k.lastUsedAt ? (
           <span className="num whitespace-nowrap">{formatDate(k.lastUsedAt)}</span>
         ) : (
-          <span className="text-slate-400 dark:text-slate-500">Never</span>
+          <span className="text-slate-500 dark:text-slate-400">Never</span>
         ),
     },
     {
@@ -204,9 +217,13 @@ export default function ApiKeys() {
       header: <span className="sr-only">Actions</span>,
       align: 'right',
       render: (k) => (
+        // 44px square, not a 28px `p-1.5` glyph. This is the control that takes
+        // a credential out of service, it is the only control in the row, and
+        // the rows are tall enough to hold a real target without growing — so
+        // there was never anything bought by making it thumb-sized-adjacent.
         <button
           type="button"
-          className="rounded-sm p-1.5 text-slate-400 outline-none transition-colors duration-[var(--dur-press)] hover:text-red-600 focus-visible:ring-2 focus-visible:ring-brand-500 dark:hover:text-red-400"
+          className="-my-1 inline-grid h-11 w-11 place-items-center rounded-lg text-slate-500 outline-none transition-colors duration-[var(--dur-press)] hover:bg-[var(--hover)] hover:text-red-600 focus-visible:ring-2 focus-visible:ring-brand-500 dark:text-slate-400 dark:hover:text-red-400"
           onClick={() => setRevoking(k)}
           aria-label={`Revoke key ${k.apiKey}`}
         >
@@ -236,11 +253,14 @@ export default function ApiKeys() {
         }
       />
 
-      {/* The exposure note. No rule of its own: it sits between the masthead's
-          ink stroke and the ledger's own header rule, which frame it already —
-          a third stroke 16px from the first would read as a mistake. */}
+      {/* THE EXPOSURE NOTICE.
+          On its own surface, above the ledger — it used to be ink on the bare
+          canvas, which on a page now made of lit surfaces would have read as
+          the least important thing on the screen rather than the most. Same
+          words, same amber ink, same icon; only the standing changed, and it
+          went up. */}
       {hasBearerKey && noIpAllowlist && (
-        <div className="mb-6 flex gap-3">
+        <div className="surface mb-4 flex gap-3 p-4">
           <ShieldAlert
             size={16}
             className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400"
@@ -262,83 +282,88 @@ export default function ApiKeys() {
         </div>
       )}
 
-      <DataTable
-        columns={columns}
-        rows={rows}
-        rowKey={(k) => k.id}
-        loading={keys.isLoading}
-        error={keys.isError ? errorMessage(keys.error) : null}
-        onRetry={() => keys.refetch()}
-        label="API keys"
-        skeletonRows={3}
-        defaultSortKey="created"
-        // Column one is the credential's identity, which is the thing you scroll
-        // sideways to keep looking at.
-        stickyFirstColumn
-        emptyLabel="No API keys yet."
-        emptyHint="Create one to start taking payments from your own server. The secret is shown once, at creation, and never again."
-        emptyAction={
-          <button className="btn-primary" onClick={() => setCreateOpen(true)}>
-            <Plus size={16} aria-hidden /> Create your first key
-          </button>
-        }
-        renderMobile={(k) => (
-          <div className="flex flex-col gap-1.5">
-            <div className="flex items-baseline justify-between gap-3">
-              <code className="min-w-0 break-all font-mono text-[13px] text-slate-900 dark:text-slate-100">
-                {k.apiKey}
-              </code>
-              <AuthModeMark mode={k.authMode} />
-            </div>
-            {k.label && (
-              <span className="text-xs text-slate-500 dark:text-slate-400">
-                {k.label}
+      {/* `flush`: a ledger ranges to the edges of its own surface. */}
+      <Section flush title="Issued keys">
+        <DataTable
+          columns={columns}
+          rows={rows}
+          rowKey={(k) => k.id}
+          loading={keys.isLoading}
+          error={keys.isError ? errorMessage(keys.error) : null}
+          onRetry={() => keys.refetch()}
+          label="API keys"
+          skeletonRows={3}
+          defaultSortKey="created"
+          // Column one is the credential's identity, which is the thing you
+          // scroll sideways to keep looking at.
+          stickyFirstColumn
+          emptyLabel="No API keys yet."
+          emptyHint="Create one to start taking payments from your own server. The secret is shown once, at creation, and never again."
+          emptyAction={
+            <button className="btn-primary" onClick={() => setCreateOpen(true)}>
+              <Plus size={16} aria-hidden /> Create your first key
+            </button>
+          }
+          renderMobile={(k) => (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-baseline justify-between gap-3">
+                <code className="min-w-0 break-all font-mono text-[13px] text-slate-900 dark:text-slate-100">
+                  {k.apiKey}
+                </code>
+                <AuthModeMark mode={k.authMode} />
+              </div>
+              {k.label && (
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                  {k.label}
+                </span>
+              )}
+              <span className="break-words font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                {k.scopes.length > 0 ? k.scopes.join('  ·  ') : '—'}
               </span>
-            )}
-            <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
-              {k.scopes.length > 0 ? k.scopes.join('  ·  ') : '—'}
-            </span>
-            <div className="mt-1 flex items-baseline justify-between gap-3">
-              <span className="num text-xs text-slate-500 dark:text-slate-400">
-                {k.lastUsedAt ? `Last used ${formatDate(k.lastUsedAt)}` : 'Never used'}
-              </span>
-              <button
-                type="button"
-                className="shrink-0 text-xs font-medium text-red-600 outline-none focus-visible:ring-2 focus-visible:ring-brand-500 dark:text-red-400"
-                onClick={() => setRevoking(k)}
-                aria-label={`Revoke key ${k.apiKey}`}
-              >
-                Revoke
-              </button>
+              <div className="flex items-center justify-between gap-3">
+                <span className="num text-xs text-slate-500 dark:text-slate-400">
+                  {k.lastUsedAt ? `Last used ${formatDate(k.lastUsedAt)}` : 'Never used'}
+                </span>
+                {/* A real 44px target rather than a 12px word: this is the one
+                    destructive control on a phone row, and a thumb has to be
+                    able to hit it deliberately — and to miss it deliberately. */}
+                <button
+                  type="button"
+                  className="-mr-2 -my-2 inline-flex min-h-[44px] shrink-0 items-center rounded-lg px-2 text-xs font-medium text-red-600 outline-none transition-colors duration-[var(--dur-press)] focus-visible:ring-2 focus-visible:ring-brand-500 dark:text-red-400"
+                  onClick={() => setRevoking(k)}
+                  aria-label={`Revoke key ${k.apiKey}`}
+                >
+                  Revoke
+                </button>
+              </div>
             </div>
-          </div>
-        )}
-      />
+          )}
+        />
+      </Section>
 
-      {/* Danger zone. Last on the page and separated by space and a red running
-          head rather than by a red-tinted box — the ink says which register this
-          block is in, and the button says what it does. It was previously
+      {/* THE COMPROMISE BLOCK.
+          Last on the page, on its own surface, opened by a red running head
+          rather than wrapped in a red-tinted box — the ink says which register
+          this block is in and the button says what it does. It was previously
           unreachable from the UI entirely: the endpoint existed and nothing
           called it, so a merchant with a leaked key of unknown identity had no
           way to shut the door. */}
-      <section className="rule mt-12 grid gap-x-10 gap-y-3 pt-6 md:grid-cols-12">
-        <div className="md:col-span-3">
-          <span className="runhead text-red-600 dark:text-red-400">Compromise</span>
-        </div>
-        <div className="md:col-span-9">
-          <h2 className="text-base font-semibold text-slate-900 dark:text-slate-50">
-            Think a key has leaked?
-          </h2>
-          <p className="measure mt-2 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
-            Revoke every active key at once and issue a single new HMAC-signed key.
-            Your integrations will fail with 401 until you deploy the new
-            credentials — that is the point.
-          </p>
-          <button className="btn-danger mt-5" onClick={() => setRegenOpen(true)}>
-            Revoke all keys
-          </button>
-        </div>
-      </section>
+      <Section
+        className="mt-4"
+        title={<span className="text-red-600 dark:text-red-400">Compromise</span>}
+      >
+        <h2 className="text-base font-semibold text-slate-900 dark:text-slate-50">
+          Think a key has leaked?
+        </h2>
+        <p className="measure mt-2 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+          Revoke every active key at once and issue a single new HMAC-signed key.
+          Your integrations will fail with 401 until you deploy the new
+          credentials — that is the point.
+        </p>
+        <button className="btn-danger mt-5" onClick={() => setRegenOpen(true)}>
+          Revoke all keys
+        </button>
+      </Section>
 
       {/* ---------------- Create ---------------- */}
       <Modal
@@ -404,14 +429,19 @@ export default function ApiKeys() {
             </div>
           </fieldset>
 
+          {/* The consequence of the weaker choice, stated at the moment it is
+              made. On a `.well` rather than a hairline: inside a dialog the
+              surrounding surface is already lit, so an inset is what reads as
+              "this is a note about the choice above" — and it is more, not
+              less, visible than the rule it replaces. */}
           {authMode === 'simple' && (
-            <div className="rule flex gap-3 pt-4">
+            <div className="well flex gap-3 p-3.5">
               <ShieldAlert
                 size={15}
                 className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400"
                 aria-hidden
               />
-              <p className="measure text-xs leading-relaxed text-slate-600 dark:text-slate-400">
+              <p className="measure text-xs leading-relaxed text-slate-700 dark:text-slate-300">
                 This key will get <code className="code">payments:read</code> and{' '}
                 <code className="code">payments:write</code> only. Add an IP allowlist
                 in Settings so the token is useless from anywhere else.
@@ -618,9 +648,13 @@ X-Signature: hmac_sha256(apiSecret, timestamp + "." + rawBody)`,
           </>
         }
       >
-        <div className="rule-strong pt-4">
+        {/* WHICH key, quoted verbatim on an inset surface. A confirmation
+            dialog that names the thing it is about in the same treatment the
+            product uses for every other literal is how a merchant checks they
+            are killing the credential they meant to. */}
+        <div className="well p-3.5">
           <span className="runhead">Key</span>
-          <code className="mt-2 block break-all font-mono text-sm text-slate-900 dark:text-slate-50">
+          <code className="mt-1.5 block break-all font-mono text-sm text-slate-900 dark:text-slate-50">
             {revoking?.apiKey}
           </code>
         </div>
@@ -686,6 +720,10 @@ function AuthModeMark({ mode }: { mode: ApiKeyAuthMode }) {
  * border at all times and only the colour changes, so selecting one cannot
  * shift the layout by a pixel. The radio itself is still the primary carrier,
  * as it is in every radio group ever built.
+ *
+ * The whole row is the label, so the target is the row rather than the 16px
+ * dot: at `py-4` around three lines of content that is well over 44px, which is
+ * the floor a radio in a sheet has to clear on a phone.
  */
 function ModeOption({
   selected,
@@ -707,7 +745,7 @@ function ModeOption({
       className={`flex cursor-pointer gap-3 border-t-2 py-4 transition-colors duration-[var(--dur-press)] ${
         selected
           ? 'border-slate-900 dark:border-slate-100'
-          : 'border-slate-200 dark:border-slate-800'
+          : 'border-[var(--line)]'
       }`}
     >
       <input
@@ -742,8 +780,15 @@ function ModeOption({
 /**
  * One credential, in the dialog that shows it for the only time.
  *
- * `emphasis` is the secret itself: opened by the ink rule rather than a
- * hairline, set at reading size, and copied by a full-width control.
+ * BOTH ROWS SIT IN A `.well`, which is the inset surface — the one that reads
+ * as a hole rather than a raised object, and therefore as a quoted literal
+ * inside the dialog's own surface. `emphasis` is the secret itself: set at
+ * reading size, opened by the ink rule above the well, and copied by a
+ * full-width control rather than an icon in a corner.
+ *
+ * `break-all` on both is not cosmetic. A 64-character secret that does not
+ * break either overflows its container or gets a horizontal scrollbar, and a
+ * secret with a scrollbar is a secret somebody copies three quarters of.
  *
  * `!text-sm` and `!rounded-lg` carry the important modifier ON PURPOSE, and it
  * is not belt-and-braces. CopyButton composes `${className}` onto a base that
@@ -771,21 +816,23 @@ function SecretRow({
   return (
     <div className={`mt-7 ${emphasis ? 'rule-strong pt-4' : 'rule pt-4'}`}>
       <span className="runhead">{label}</span>
-      <code
-        className={`mt-2 block break-all font-mono ${
-          emphasis
-            ? 'text-[15px] leading-relaxed text-slate-900 dark:text-slate-50'
-            : 'text-[13px] leading-relaxed text-slate-700 dark:text-slate-300'
-        }`}
-      >
-        {value}
-      </code>
+      <div className="well mt-2 p-3.5">
+        <code
+          className={`block break-all font-mono ${
+            emphasis
+              ? 'text-[15px] leading-relaxed text-slate-900 dark:text-slate-50'
+              : 'text-[13px] leading-relaxed text-slate-700 dark:text-slate-300'
+          }`}
+        >
+          {value}
+        </code>
+      </div>
       {emphasis ? (
         <CopyButton
           value={value}
           label={copyLabel}
           size={15}
-          className="mt-4 w-full justify-center !rounded-lg border border-slate-300 py-3 !text-sm font-semibold text-slate-900 hover:text-slate-900 dark:border-slate-700 dark:text-slate-100 dark:hover:text-slate-100"
+          className="mt-4 w-full justify-center !rounded-lg border border-[var(--line)] py-3 !text-sm font-semibold text-slate-900 hover:text-slate-900 dark:text-slate-100 dark:hover:text-slate-100"
         />
       ) : (
         <CopyButton value={value} label={copyLabel} className="-ml-2 mt-1.5" />

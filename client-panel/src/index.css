@@ -612,7 +612,12 @@
     content: '';
     position: absolute;
     inset: 0;
-    translate: -120% 0;
+    /* The rest state is on `transform`, NOT on `translate`. They are separate
+       properties and they COMPOSE — translate resolves first — so resting on
+       `translate: -120%` under a keyframe that animates `transform:
+       translateX(-120% -> 120%)` would sweep from -240% to 0% and finish
+       parked over the face of the button instead of clear of it. */
+    transform: translateX(-120%);
     pointer-events: none;
     background: linear-gradient(
       105deg,
@@ -1444,6 +1449,71 @@
     transform-origin: 0 50%;
     animation: cg-progress linear both;
     animation-timeline: scroll(root block);
+  }
+}
+
+/* ===========================================================================
+ * THE THREE SIGNATURE KEYFRAMES, DECLARED AS PLAIN CSS.
+ *
+ * They are NOT in tailwind.config.js's `keyframes` map, and that is deliberate
+ * rather than an oversight — putting them there is exactly what broke them.
+ *
+ * Tailwind emits an `@keyframes` block only when the matching `animate-*`
+ * UTILITY appears in a scanned content file. These three are used from inside
+ * `@layer components` — `.st-live .st-dot`, `.btn-primary:hover::after`,
+ * `.depth-field::before` — via `theme('animation.x')`, which resolves to the
+ * correct `animation: halo 2.6s …` shorthand and nothing more. Nothing in any
+ * .tsx writes `animate-halo`, so Tailwind had no reason to generate the
+ * keyframes, and all three shipped as no-ops: the shorthand referenced an
+ * animation name that did not exist in the stylesheet.
+ *
+ * It failed SILENTLY, which is why it survived. A missing keyframe does not
+ * error — the element simply sits at its static state, and a status dot that
+ * does not pulse looks exactly like a status dot. Verified by grepping dist:
+ * `@keyframes halo|sheen|drift` appeared 0 times while `animation: halo|sheen|
+ * drift` appeared once each.
+ *
+ * A `safelist` would also fix it, at the cost of shipping three utility classes
+ * nothing uses. Declaring them here instead keeps one definition, puts it next
+ * to the rules that consume it, and cannot be tree-shaken.
+ * ======================================================================== */
+
+/* The halo under a status dot that is still in flight. The one loop this design
+   permits on a dashboard route: it marks the rows a merchant is actively
+   waiting on, which is information rather than decoration. box-shadow only, so
+   it cannot reflow anything. */
+@keyframes halo {
+  0% {
+    box-shadow: 0 0 0 0 currentColor;
+  }
+  70% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* One pass of light across a primary control on hover. Not a loop — a loop on a
+   control is a distraction; this reads as the surface catching the light as the
+   pointer arrives. */
+@keyframes sheen {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(120%);
+  }
+}
+
+/* The depth field drifts. 34 seconds, so it is never seen to move — only felt
+   to have moved. */
+@keyframes drift {
+  from {
+    transform: translate3d(-2%, -1%, 0) scale(1);
+  }
+  to {
+    transform: translate3d(3%, 2%, 0) scale(1.08);
   }
 }
 

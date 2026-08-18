@@ -17,6 +17,7 @@ import PageHeader from '@/components/PageHeader';
 import Modal from '@/components/Modal';
 import Spinner from '@/components/Spinner';
 import Badge from '@/components/Badge';
+import Section from '@/components/Section';
 import DataTable, { type Column } from '@/components/DataTable';
 
 /**
@@ -34,6 +35,13 @@ import DataTable, { type Column } from '@/components/DataTable';
  * The long-form facts — description, payment terms, auto-send, and the reason a
  * subscription stopped — live one click away in the detail view, which is also
  * where the billing history was already kept.
+ *
+ * ONE LEDGER, ONE SURFACE. That distinction is the whole of the redesign here:
+ * the table is now placed ON a lit surface rather than printed on the page, and
+ * so are the two things that used to hang off hairlines beside it — the
+ * needs-attention note and the outcome of the last pause/resume/cancel. Three
+ * ruled bands stacked in a column read as one undifferentiated run of type;
+ * three surfaces read as three things.
  */
 export default function Subscriptions() {
   const qc = useQueryClient();
@@ -114,16 +122,20 @@ export default function Subscriptions() {
    * closes over the mutation, and wrapped so a click on a control never also
    * opens the row. Every button carries a title AND an aria-label: an icon on
    * its own is not a word, and these three change what a customer gets billed.
+   *
+   * 44px UNTIL `sm`, for the same reason `.btn` carries the floor: these were
+   * 28px squares, and on a phone the cancel control sat four pixels from the
+   * pause control. Getting that wrong stops a customer's billing.
    */
   const rowActions = (s: Subscription, justify: 'justify-start' | 'justify-end') => (
     <div
-      className={`flex items-center gap-0.5 ${justify}`}
+      className={`flex items-center ${justify}`}
       onClick={(e) => e.stopPropagation()}
     >
       {s.status === 'active' && (
         <button
           type="button"
-          className="rounded p-1.5 text-slate-400 transition-colors duration-100 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+          className={`${ICON_ACTION} hover:bg-[var(--hover)] hover:text-slate-700 dark:hover:text-slate-200`}
           onClick={() => change.mutate({ id: s.id, action: 'pause' })}
           disabled={change.isPending}
           title="Pause billing"
@@ -135,7 +147,7 @@ export default function Subscriptions() {
       {(s.status === 'paused' || s.status === 'needs_attention') && (
         <button
           type="button"
-          className="rounded p-1.5 text-slate-400 transition-colors duration-100 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+          className={`${ICON_ACTION} hover:bg-[var(--hover)] hover:text-slate-700 dark:hover:text-slate-200`}
           onClick={() => change.mutate({ id: s.id, action: 'resume' })}
           disabled={change.isPending}
           title="Resume billing"
@@ -147,7 +159,7 @@ export default function Subscriptions() {
       {s.status !== 'canceled' && (
         <button
           type="button"
-          className="rounded p-1.5 text-slate-400 transition-colors duration-100 hover:bg-red-50 hover:text-red-600 disabled:opacity-40 dark:hover:bg-red-900/30 dark:hover:text-red-400"
+          className={`${ICON_ACTION} hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950 dark:hover:text-red-400`}
           onClick={() => change.mutate({ id: s.id, action: 'cancel' })}
           disabled={change.isPending}
           title="Cancel this subscription"
@@ -174,7 +186,7 @@ export default function Subscriptions() {
       sortValue: (s) => s.customerName ?? s.customerEmail ?? '',
       render: (s) =>
         s.customerName ??
-        s.customerEmail ?? <span className="text-slate-400 dark:text-slate-500">—</span>,
+        s.customerEmail ?? <span className="text-slate-500 dark:text-slate-400">—</span>,
       className: 'text-slate-600 dark:text-slate-400',
     },
     {
@@ -208,7 +220,7 @@ export default function Subscriptions() {
       sortValue: (s) => (s.status === 'canceled' ? '' : s.nextRunAt),
       render: (s) =>
         s.status === 'canceled' ? (
-          <span className="text-slate-400 dark:text-slate-500">ended</span>
+          <span className="text-slate-500 dark:text-slate-400">ended</span>
         ) : (
           <span className="num whitespace-nowrap">{formatDateShort(s.nextRunAt)}</span>
         ),
@@ -258,7 +270,9 @@ export default function Subscriptions() {
         </span>
         <StatusBadge status={s.status} />
       </div>
-      <div className="mt-2 -ml-1.5">{rowActions(s, 'justify-start')}</div>
+      {/* Pulled left so the first glyph ranges with the text above it rather
+          than with the 44px box drawn around it. */}
+      <div className="-ml-3 mt-1">{rowActions(s, 'justify-start')}</div>
     </div>
   );
 
@@ -286,35 +300,42 @@ export default function Subscriptions() {
           that happens to be stalled. The status column says which rows; this
           says what it means and what to do. */}
       {summary.stalled.length > 0 && (
-        <div className="mb-6">
+        <div className="mb-4">
           <AttentionNote names={summary.stalled.map((s) => s.title)} />
         </div>
       )}
 
-      <DataTable
-        columns={columns}
-        rows={subs.data ?? []}
-        rowKey={(s) => s.id}
-        loading={subs.isLoading}
-        error={subs.isError ? errorMessage(subs.error) : null}
-        onRetry={() => subs.refetch()}
-        // The row opens the subscription: its terms, and every invoice it has
-        // ever issued.
-        onRowClick={(s) => setHistoryFor(s)}
-        renderMobile={renderMobile}
-        label="Subscriptions"
-        skeletonRows={5}
-        emptyLabel="No subscriptions yet."
-        emptyHint="Set an amount and an interval. Each cycle we create an invoice and, if you like, email it to your customer automatically."
-        emptyAction={
-          <button className="btn-primary" onClick={() => setCreateOpen(true)}>
-            <Plus size={16} /> Create your first subscription
-          </button>
-        }
-      />
+      {/* The schedule, on its own titled surface. `flush` because a table
+          ranges to the edges of the surface it sits on. */}
+      <Section flush title="All subscriptions">
+        <DataTable
+          columns={columns}
+          rows={subs.data ?? []}
+          rowKey={(s) => s.id}
+          loading={subs.isLoading}
+          error={subs.isError ? errorMessage(subs.error) : null}
+          onRetry={() => subs.refetch()}
+          // The row opens the subscription: its terms, and every invoice it has
+          // ever issued.
+          onRowClick={(s) => setHistoryFor(s)}
+          renderMobile={renderMobile}
+          label="Subscriptions"
+          skeletonRows={5}
+          emptyLabel="No subscriptions yet."
+          emptyHint="Set an amount and an interval. Each cycle we create an invoice and, if you like, email it to your customer automatically."
+          emptyAction={
+            <button className="btn-primary" onClick={() => setCreateOpen(true)}>
+              <Plus size={16} /> Create your first subscription
+            </button>
+          }
+        />
+      </Section>
 
+      {/* A failed pause/resume/cancel gets a surface of its own: the row above
+          it still shows the state the merchant just tried to change, so this
+          has to read as a separate object rather than as a footnote. */}
       {change.isError && (
-        <div className="rule mt-4 pt-3" role="status" aria-live="polite">
+        <div className="surface mt-4 p-4" role="status" aria-live="polite">
           <p className="measure-wide text-sm leading-relaxed text-red-600 dark:text-red-400">
             {errorMessage(change.error)}
           </p>
@@ -348,7 +369,13 @@ export default function Subscriptions() {
       >
         {/* RULED FIELD GROUPS: what, how much, how often, who. Each group is
             opened by a hairline and named by a running head, so the form reads
-            as four decisions rather than eleven inputs. */}
+            as four decisions rather than eleven inputs.
+
+            Rules rather than surfaces, and deliberately: the dialog is already
+            a surface, and `.well` — the only inset ground available — is the
+            same fill `.input` uses, so a group of fields set on one would
+            dissolve into its own container. A hairline divides WITHIN a
+            surface, which is precisely the job here. */}
         <div className="space-y-5">
           <FieldGroup label="What you are billing for">
             <label className="label" htmlFor="sub-title">
@@ -366,7 +393,7 @@ export default function Subscriptions() {
             <div className="mt-4">
               <label className="label" htmlFor="sub-desc">
                 Description{' '}
-                <span className="font-normal text-slate-400 dark:text-slate-500">
+                <span className="font-normal text-slate-500 dark:text-slate-400">
                   (optional)
                 </span>
               </label>
@@ -543,7 +570,7 @@ export default function Subscriptions() {
 
             {historyFor.status === 'needs_attention' && (
               <div className="mt-4">
-                <AttentionNote />
+                <AttentionNote inset />
               </div>
             )}
 
@@ -621,49 +648,110 @@ export default function Subscriptions() {
                   </p>
                 </div>
               ) : (
-                <table className="mt-3 w-full text-sm">
-                  <thead>
-                    <tr>
-                      <th className={HEAD}>Cycle</th>
-                      <th className={HEAD}>Invoice</th>
-                      <th className={`${HEAD} text-right`}>Amount</th>
-                      <th className={HEAD}>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
+                <>
+                  {/* BELOW `sm` THE TABLE IS DROPPED, not scrolled sideways.
+                      Four columns — cycle, invoice, amount, status — inside a
+                      `size="lg"` dialog is 280px of room for content that wants
+                      well over 400: the amount is `whitespace-nowrap` because a
+                      figure must not break, and `.st` is `whitespace-nowrap`
+                      because a status lozenge must not either, so the two of
+                      them alone set a floor the dialog cannot meet. A merchant
+                      reading their own billing history would have been dragging
+                      it sideways inside a sheet that also scrolls vertically,
+                      which is the worst gesture on a phone.
+
+                      The stacked row carries every one of the four facts, which
+                      is the test a mobile fallback has to pass — the invoice
+                      number and its link lead, the cycle sits under it, and the
+                      amount and status range right. */}
+                  <ul className="mt-3 sm:hidden">
                     {history.data?.map((row) => (
-                      <tr key={row.id} className="align-baseline">
-                        <td className="rule num py-2.5 pr-3 text-slate-500 dark:text-slate-400">
-                          {row.cycle_number}
-                        </td>
-                        <td className="rule py-2.5 pr-3">
+                      <li
+                        key={row.id}
+                        className="rule flex items-start justify-between gap-3 py-2.5 first:border-t-0 first:pt-0"
+                      >
+                        <div className="min-w-0">
                           {row.token ? (
                             <a
                               href={checkoutUrl(row.token)}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="link-ink font-medium"
+                              className="link-ink text-sm font-medium"
                             >
                               {row.number}
                             </a>
                           ) : (
-                            <span className="font-medium text-slate-700 dark:text-slate-300">
+                            <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
                               {row.number}
                             </span>
                           )}
-                        </td>
-                        <td className="rule num py-2.5 pr-3 text-right whitespace-nowrap text-slate-700 dark:text-slate-300">
-                          {row.currency} {formatAmount(row.total)}
-                        </td>
-                        <td className="rule py-2.5">
-                          <Badge tone={row.status === 'paid' ? 'settled' : 'waiting'} dot>
-                            {row.status}
-                          </Badge>
-                        </td>
-                      </tr>
+                          <p className="num mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                            cycle {row.cycle_number}
+                          </p>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <p className="num text-sm whitespace-nowrap text-slate-700 dark:text-slate-300">
+                            {row.currency} {formatAmount(row.total)}
+                          </p>
+                          <span className="mt-1 flex justify-end">
+                            <Badge tone={row.status === 'paid' ? 'settled' : 'waiting'} dot>
+                              {row.status}
+                            </Badge>
+                          </span>
+                        </div>
+                      </li>
                     ))}
-                  </tbody>
-                </table>
+                  </ul>
+
+                  {/* From `sm` there is room for the real thing. The scroller
+                      stays as the honest fallback for a very long invoice
+                      number on a narrow tablet. */}
+                  <div className="mt-3 hidden overflow-x-auto sm:block">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr>
+                          <th className={HEAD}>Cycle</th>
+                          <th className={HEAD}>Invoice</th>
+                          <th className={`${HEAD} text-right`}>Amount</th>
+                          <th className={HEAD}>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {history.data?.map((row) => (
+                          <tr key={row.id} className="align-baseline">
+                            <td className="rule num py-2.5 pr-3 text-slate-500 dark:text-slate-400">
+                              {row.cycle_number}
+                            </td>
+                            <td className="rule py-2.5 pr-3">
+                              {row.token ? (
+                                <a
+                                  href={checkoutUrl(row.token)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="link-ink font-medium"
+                                >
+                                  {row.number}
+                                </a>
+                              ) : (
+                                <span className="font-medium text-slate-700 dark:text-slate-300">
+                                  {row.number}
+                                </span>
+                              )}
+                            </td>
+                            <td className="rule num py-2.5 pr-3 text-right whitespace-nowrap text-slate-700 dark:text-slate-300">
+                              {row.currency} {formatAmount(row.total)}
+                            </td>
+                            <td className="rule py-2.5">
+                              <Badge tone={row.status === 'paid' ? 'settled' : 'waiting'} dot>
+                                {row.status}
+                              </Badge>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
               )}
             </div>
           </div>
@@ -673,23 +761,50 @@ export default function Subscriptions() {
   );
 }
 
-/** The header of a small in-modal ledger: a running head over an ink rule. */
+/**
+ * The header of the small in-modal ledger.
+ *
+ * Matched to `.ledger`'s own running head — 10.5px at 0.14em over a hairline —
+ * rather than the 12px at 0.18em over a full-ink rule it carried before. Two
+ * reasons, and neither is taste. A near-black 1px stroke is the outgoing
+ * broadsheet's structural gesture, and on the dark ground its inverse reads as
+ * a scar rather than as a rule; `--line` is the stroke the rest of the product
+ * divides with. And uppercase at 0.18em tracking is what actually sets a
+ * table's minimum width — the widest cell in this table used to be the word
+ * "Amount", not any amount in it.
+ */
 const HEAD =
-  'border-b border-slate-900 pb-1.5 pr-3 text-left text-xs font-medium uppercase tracking-[0.18em] text-slate-500 dark:border-slate-100 dark:text-slate-400';
+  'border-b border-[var(--line)] pb-1.5 pr-3 text-left text-[10.5px] font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400';
+
+/**
+ * The 44px box every icon control in this page's rows is drawn inside. Module
+ * scope so the three buttons cannot drift apart, and `sm:` relaxes to 36 where
+ * there is a pointer and vertical space is worth more — the same trade `.btn`
+ * makes at the same breakpoint.
+ */
+const ICON_ACTION =
+  'grid h-11 w-11 shrink-0 place-items-center rounded-lg text-slate-400 transition-colors duration-100 disabled:opacity-40 sm:h-9 sm:w-9';
 
 /**
  * Why billing stopped, and what resuming does.
  *
  * Amber because something is waiting on the merchant — but the word "needs
  * attention" is what carries the meaning, exactly as it does in the status
- * column. Set as a ruled block rather than a tinted panel: the stroke is the
- * emphasis, and the paragraph keeps a real measure so it is read rather than
- * skipped.
+ * column, and the icon carries it a third time. No tint behind the block: a
+ * per-notice fill would put a fifth colour on the page competing with the
+ * status lozenges it is describing.
+ *
+ * TWO GROUNDS, BECAUSE IT LIVES ON TWO PLANES. On the page it is a `.surface` —
+ * a raised object beside the ledger it qualifies. Inside the subscription
+ * dialog, which is already floating, it takes `.well` instead: stacking a
+ * raised surface on a floating one is the depth mistake that makes a design
+ * read as amateur, and a notice inside a dialog is recessed into it, not
+ * hovering above it.
  */
-function AttentionNote({ names }: { names?: string[] }) {
+function AttentionNote({ names, inset = false }: { names?: string[]; inset?: boolean }) {
   const n = names?.length ?? 1;
   return (
-    <div className="border-t-2 border-amber-600 pt-3 dark:border-amber-400">
+    <div className={`${inset ? 'well' : 'surface'} p-4`}>
       <div className="flex items-start gap-2.5">
         <AlertTriangle
           size={15}

@@ -149,15 +149,48 @@ export function statusGroupOf(status: string): StatusGroupId {
  * semantic hue, which is how a chart ends up implying that USDC is "settled"
  * and BNB is "failed".
  *
- * ORDERED FOR DISTINGUISHABILITY, not by hue wheel: adjacent entries are far
- * apart in both hue and lightness, so a two-series chart is separable at a
- * glance and an eight-series chart is still separable at the legend. The first
- * four are also distinguishable in the common forms of colour-vision
- * deficiency, which is why blue and orange lead rather than red and green.
+ * FIVE ENTRIES, NOT SIX, AND THE SIXTH WAS A LIE.
  *
- * NONE of these is emerald, amber or red at the steps those use for status —
- * checked deliberately, so a categorical series can never be mistaken for a
- * state readout sitting next to it.
+ * This list used to carry `cyan` at index 1 and `accent` at index 2 as if they
+ * were two colours. They are one: tailwind.config.js defines BOTH families off
+ * the same `--a-*` ramp (`cyan.600` and `accent.600` are each
+ * `oklch(var(--a-600))`), so the palette shipped two ADJACENT entries painted in
+ * exactly the same ink. A two-series chart drawn with seriesInk(1) and
+ * seriesInk(2) rendered as one colour twice — the single worst failure a
+ * categorical palette can have, and invisible in code review because the class
+ * names differ. Five genuinely distinct inks is what the token set actually
+ * holds; pretending to six is what caused this.
+ *
+ * ORDERED FOR DISTINGUISHABILITY, and the ordering is a solved constraint
+ * rather than a preference. The five hues available to a non-semantic series
+ * are brand 271, sky 250, accent 205, teal 187 and fuchsia 332 — clustered in
+ * the blues, because every warm hue in this system is spoken for by a status.
+ * Two of those pairs sit close (teal/accent 18 deg, sky/brand 21 deg), so the
+ * order below is the cycle that maximises the SMALLEST gap between neighbours:
+ *
+ *   brand 271 -> accent 205 (66) -> fuchsia 332 (127) -> sky 250 (82)
+ *   -> teal 187 (63) -> wraps to brand (84)
+ *
+ * 63 deg is the best achievable minimum here — sky has only one neighbour
+ * further than that — and `seriesInk` wraps, so the last-to-first gap is a real
+ * adjacency and is counted above.
+ *
+ * LIGHTNESS CANNOT CARRY ITS HALF, and saying otherwise would be the same kind
+ * of untruth as the duplicate. Four of the five sit at the same corrected step
+ * (L 0.510 light / 0.800 dark), because that is the step at which this ramp
+ * holds a chart mark on both grounds. Sky is the one break — it takes 700/300
+ * (L 0.440 / 0.868) — so it is placed between the two entries whose hues are
+ * furthest from it and does the work lightness can. What separates the rest is
+ * hue plus CHROMA: brand at C 0.215 is a saturated indigo where accent at C
+ * 0.082 is a muted blue-grey, which is also what keeps those two apart under
+ * deuteranopia, where their hues converge and their intensities do not.
+ *
+ * TEAL IS LAST ON PURPOSE. At hue 187 it is 25 deg from the settled emerald
+ * (162) at a near-identical lightness and chroma — closer than accent's 43 deg,
+ * which is the pair this palette's comments used to worry about. It is still
+ * off every semantic hue, so it is safe to use; but it is the entry most likely
+ * to be misread as "settled" by a chart standing next to a status readout, so
+ * it is the last one a chart reaches for rather than the first.
  */
 export interface SeriesInk {
   /** Tailwind fill-* class pair, for recharts <Cell> and bars. */
@@ -170,11 +203,10 @@ export interface SeriesInk {
 
 export const SERIES_PALETTE: readonly SeriesInk[] = [
   { fillClass: 'fill-brand-600 dark:fill-brand-400', strokeClass: 'stroke-brand-600 dark:stroke-brand-400', label: 'Series 1' },
-  { fillClass: 'fill-cyan-600 dark:fill-cyan-400', strokeClass: 'stroke-cyan-600 dark:stroke-cyan-400', label: 'Series 2' },
-  { fillClass: 'fill-accent-600 dark:fill-accent-400', strokeClass: 'stroke-accent-600 dark:stroke-accent-400', label: 'Series 3' },
-  { fillClass: 'fill-teal-600 dark:fill-teal-400', strokeClass: 'stroke-teal-600 dark:stroke-teal-400', label: 'Series 4' },
-  { fillClass: 'fill-fuchsia-600 dark:fill-fuchsia-400', strokeClass: 'stroke-fuchsia-600 dark:stroke-fuchsia-400', label: 'Series 5' },
-  { fillClass: 'fill-sky-700 dark:fill-sky-300', strokeClass: 'stroke-sky-700 dark:stroke-sky-300', label: 'Series 6' },
+  { fillClass: 'fill-accent-600 dark:fill-accent-400', strokeClass: 'stroke-accent-600 dark:stroke-accent-400', label: 'Series 2' },
+  { fillClass: 'fill-fuchsia-600 dark:fill-fuchsia-400', strokeClass: 'stroke-fuchsia-600 dark:stroke-fuchsia-400', label: 'Series 3' },
+  { fillClass: 'fill-sky-700 dark:fill-sky-300', strokeClass: 'stroke-sky-700 dark:stroke-sky-300', label: 'Series 4' },
+  { fillClass: 'fill-teal-600 dark:fill-teal-400', strokeClass: 'stroke-teal-600 dark:stroke-teal-400', label: 'Series 5' },
 ];
 
 /**
@@ -182,8 +214,9 @@ export const SERIES_PALETTE: readonly SeriesInk[] = [
  *
  * Wrapping rather than throwing on purpose: the number of assets a deployment
  * settles is operator configuration, not a constant, and a chart must not blow
- * up because someone enabled a seventh coin. Past six the labels are doing the
- * work anyway.
+ * up because someone enabled a sixth coin. Past five the labels are doing the
+ * work anyway — which is the argument for the key beside every chart, not an
+ * argument for inventing a sixth hue this ramp does not hold.
  */
 export function seriesInk(i: number): SeriesInk {
   return SERIES_PALETTE[i % SERIES_PALETTE.length];

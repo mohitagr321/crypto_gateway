@@ -5,6 +5,7 @@ import { errorMessage, getWebhookLogs } from '@/lib/api';
 import { formatDate, shortHash } from '@/lib/format';
 import type { WebhookLog } from '@/types';
 import PageHeader from '@/components/PageHeader';
+import Section from '@/components/Section';
 import { WebhookStatusBadge } from '@/components/Badge';
 import CopyButton from '@/components/CopyButton';
 
@@ -12,23 +13,30 @@ import CopyButton from '@/components/CopyButton';
  * Webhook delivery log.
  *
  * ---------------------------------------------------------------------------
- * SET AS A LOG, WHICH IS A LEDGER YOU CAN OPEN
+ * A LEDGER YOU CAN OPEN, ON ITS OWN SURFACE
  *
  * Not DataTable: a row here expands into a payload, and a disclosure inside a
- * table cell fights the table for width. So this is hand-rolled from the same
- * parts — a running-head strip over an ink rule, hairlines between rows, and
- * the ruled empty/error states DataTable uses, so the two read as one object
- * even though only one of them is a `<table>`.
+ * table cell fights the table for width. So it is hand-rolled from the same
+ * parts — a Section for the surface and the running head, hairlines between
+ * rows, and the same ruled empty/error states DataTable uses, so the two read
+ * as one object even though only one of them is a `<table>`.
+ *
+ * The head used to be a hand-drawn strip closed by a full-weight ink rule
+ * (`border-slate-900`), which was the correct gesture in a design made of rules
+ * and is a scar in one made of surfaces. `Section` draws that head now, so this
+ * page cannot drift away from every other list in the product.
  *
  * MONOSPACE WHERE IT IS A LITERAL. The event name, the endpoint, the HTTP code
  * and the payloads are all strings a developer will compare character by
  * character or paste into a terminal; the prose around them is not. Nothing
  * else on the page is mono.
  *
- * THE TINTS ARE GONE. The expanded detail used to sit on a grey fill and the
- * standing advice in an outlined box. A hairline and an indent say "this
- * belongs to the row above" for one pixel, and the advice now sits on the
- * masthead's measure where a merchant reads it once rather than every visit.
+ * EVERY FACT IN THE ROW IS REACHABLE ON A PHONE. The attempt counter and the
+ * sent time used to be in a `hidden sm:block` column, which meant that below
+ * 640px the two questions a delivery log is opened to answer — when did this
+ * fire, and how many tries in are we — had no answer anywhere on the screen.
+ * They now fall under the endpoint on a narrow viewport and stay ranged right
+ * on a wide one.
  *
  * MOTION. Exactly one thing moves: the disclosure chevron rotates, keyed to the
  * open state — a value CHANGE, never mount — at --dur-pop, transform only. The
@@ -53,23 +61,26 @@ function LogRow({ log }: { log: WebhookLog }) {
   const response = prettyJson(log.responseBody);
 
   return (
-    <li className="border-t border-slate-200 first:border-t-0 dark:border-slate-800">
+    <li className="border-t border-[var(--line-soft)] first:border-t-0">
+      {/* `min-h-[44px]` is the touch floor, and a disclosure is exactly the
+          control that tends to miss it: its height comes from its content, so a
+          one-line row lands around 36px without being told otherwise. */}
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="flex w-full items-start gap-3 py-3 text-left outline-none transition-colors duration-[var(--dur-press)] hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500 dark:hover:bg-slate-800"
+        className="flex min-h-[44px] w-full items-start gap-3 rounded-lg px-1 py-3 text-left outline-none transition-colors duration-[var(--dur-press)] hover:bg-[var(--hover)] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500"
       >
         <ChevronRight
           size={14}
           aria-hidden
-          className={`mt-[3px] shrink-0 text-slate-400 transition-transform duration-[var(--dur-pop)] ease-[var(--ease-out)] ${
+          className={`mt-[3px] shrink-0 text-slate-500 transition-transform duration-[var(--dur-pop)] ease-[var(--ease-out)] dark:text-slate-400 ${
             open ? 'rotate-90' : ''
           }`}
         />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <code className="font-mono text-[13px] font-medium text-slate-900 dark:text-slate-100">
+            <code className="break-all font-mono text-[13px] font-medium text-slate-900 dark:text-slate-100">
               {log.event}
             </code>
             <WebhookStatusBadge status={log.status} />
@@ -82,12 +93,17 @@ function LogRow({ log }: { log: WebhookLog }) {
           <p className="mt-1 truncate font-mono text-[11px] text-slate-500 dark:text-slate-400">
             {log.url}
           </p>
+          {/* The narrow-viewport home for the two facts the right-hand column
+              carries from `sm` up. Never both at once. */}
+          <p className="num mt-1 text-[11px] text-slate-500 sm:hidden dark:text-slate-400">
+            Attempt {log.attempt} / {log.maxAttempts} · {formatDate(log.createdAt)}
+          </p>
         </div>
         <div className="hidden shrink-0 text-right sm:block">
           <span className="num block text-[11px] text-slate-600 dark:text-slate-300">
             {log.attempt} / {log.maxAttempts}
           </span>
-          <span className="num mt-0.5 block whitespace-nowrap text-[11px] text-slate-400 dark:text-slate-500">
+          <span className="num mt-0.5 block whitespace-nowrap text-[11px] text-slate-500 dark:text-slate-400">
             {formatDate(log.createdAt)}
           </span>
         </div>
@@ -95,18 +111,27 @@ function LogRow({ log }: { log: WebhookLog }) {
 
       {open && (
         // Indented to the chevron's gutter so the detail hangs off its row
-        // rather than restarting the page's left edge.
-        <div className="pb-5 pl-7">
-          <dl className="grid grid-cols-2 gap-x-8 sm:grid-cols-4">
+        // rather than restarting the surface's left edge.
+        <div className="pb-5 pl-7 pr-1">
+          {/* `auto-fit` rather than `grid-cols-2 sm:grid-cols-4`: this block is
+              already indented 28px, so a hard two-up on a 360px phone gave each
+              field about 140px to hold a payment id. The fields now reflow to
+              one column when that is what fits. */}
+          <dl className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-x-8">
             {log.paymentId && (
               <Field label="Payment">
-                <span className="num font-mono">{shortHash(log.paymentId, 8, 4)}</span>
+                <span className="num break-all font-mono">
+                  {shortHash(log.paymentId, 8, 4)}
+                </span>
               </Field>
             )}
             <Field label="Attempt">
               <span className="num">
                 {log.attempt} / {log.maxAttempts}
               </span>
+            </Field>
+            <Field label="Sent">
+              <span className="num">{formatDate(log.createdAt)}</span>
             </Field>
             {log.nextRetryAt && (
               <Field label="Next retry">
@@ -131,8 +156,8 @@ function LogRow({ log }: { log: WebhookLog }) {
 /** A ruled key/value of the expanded detail — the spine, at log density. */
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="rule pt-2">
-      <dt className="runhead text-[10px]">{label}</dt>
+    <div className="min-w-0 border-t border-[var(--line-soft)] pt-2">
+      <dt className="runhead">{label}</dt>
       <dd className="mt-1 break-words text-xs text-slate-700 dark:text-slate-300">
         {children}
       </dd>
@@ -141,9 +166,14 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 }
 
 /**
- * A JSON payload. This is the one box on the page and it earns the enclosure:
- * it is a verbatim wire body, and the dark ground is the same one CodeBlock
- * uses everywhere else in the product, so code always looks like code.
+ * A JSON payload, on the one deliberately dark ground in the product.
+ *
+ * It earns the enclosure: this is a verbatim wire body, and it is the same
+ * ground CodeBlock uses everywhere else, so code always looks like code in both
+ * themes rather than becoming a pale panel in one of them. The scroller is the
+ * `<pre>` itself — a payload must keep its own whitespace, so it scrolls rather
+ * than wraps, and it must never be allowed to push the surface it sits on
+ * sideways.
  */
 function Payload({ label, code, copy }: { label: string; code: string; copy: string }) {
   return (
@@ -218,15 +248,15 @@ export default function WebhookLogs() {
         }
       />
 
-      <section>
-        {/* The log's own head: running heads over the ink rule, exactly as the
-            ledger sets a table header. It stays put through every state below,
-            so the columns never have to be re-found. */}
-        <div className="flex items-end justify-between gap-4 border-b border-slate-900 pb-2 dark:border-slate-100">
-          <span className="runhead">Delivery</span>
-          <span className="runhead hidden sm:block">Attempt · Sent</span>
-        </div>
-
+      {/* `flush`, for the same reason a table gets it: the rows draw their own
+          hairlines edge to edge and body padding would inset them from the
+          rules that divide them. The `aside` is the second running head — what
+          the right-hand column of each row holds, named once at the top. */}
+      <Section
+        flush
+        title="Delivery"
+        aside={<span className="runhead hidden sm:block">Attempt · Sent</span>}
+      >
         {query.isLoading ? (
           <div aria-busy="true">
             <span className="sr-only" role="status">
@@ -235,7 +265,7 @@ export default function WebhookLogs() {
             {GHOST_WIDTHS.map((w, i) => (
               <div
                 key={w}
-                className="border-t border-slate-200 py-4 first:border-t-0 dark:border-slate-800"
+                className="border-t border-[var(--line-soft)] py-4 first:border-t-0"
               >
                 {/* Static, stepped down the page: the frequency boundary bans a
                     loop on a surface opened this often, so shape and opacity do
@@ -282,7 +312,7 @@ export default function WebhookLogs() {
             ))}
           </ul>
         )}
-      </section>
+      </Section>
     </>
   );
 }

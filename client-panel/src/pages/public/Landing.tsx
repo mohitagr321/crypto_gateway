@@ -15,19 +15,23 @@ import {
 } from 'lucide-react';
 import CodeBlock from '@/components/CodeBlock';
 import LiveCheckoutDemo from '@/components/LiveCheckoutDemo';
+import PaymentFlowDiagram from './PaymentFlowDiagram';
 import { getAssets, getNetworks, getSignupStatus } from '@/lib/api';
 import { useReveal, revealDelay } from '@/lib/useReveal';
 
 /**
- * Public landing page.
+ * Public landing page — the flagship surface of the product.
  *
- * SET IN TYPE, NOT ASSEMBLED FROM CARDS. The page is divided by hairline rules
- * and white space rather than by rounded rectangles: each band carries a
- * running head, body copy sits on a real reading measure ranged left, the grid
- * is asymmetric (a narrow annotation column against a wide main one), and the
- * one number worth stating in a section is set enormous and anchors it.
+ * BUILT FROM LIT SURFACES ON A DEPTH FIELD, not set as a broadsheet. The page
+ * that stood here was divided by hairline rules and white space: running heads
+ * in a margin column, an asymmetric grid, bands opened by a stroke. It was well
+ * made and it was a newspaper, and a newspaper is not what a 2026 payments
+ * company looks like. Every band that was doing STRUCTURAL work with a rule is
+ * now a raised, rim-lit surface floating on the field that MarketingLayout
+ * mounts; rules survive only where they divide rows INSIDE one of those
+ * surfaces, which is the one job the system still gives them.
  *
- * The rules that outrank the look:
+ * The rules that outrank the look, and none of them changed:
  *
  *   - Every capability claim is READ FROM THE GATEWAY (/networks, /assets).
  *     Nothing on this page asserts a chain or a coin that the deployment cannot
@@ -36,15 +40,20 @@ import { useReveal, revealDelay } from '@/lib/useReveal';
  *     payments site that overstates itself is worse than a plain one.
  *   - Motion is CSS scroll-driven where supported (see index.css) and degrades
  *     to a visible page everywhere else. No animation library, so the first
- *     thing a prospect downloads stays small.
+ *     thing a prospect downloads stays small. This is a marketing route, which
+ *     is the widest end of the frequency boundary: reveals, parallax and a
+ *     looping marquee are all in budget here and would not be on a dashboard.
  *   - BRAND IS INTERACTIVE ONLY: the CTA, a link underline, the focus ring. It
- *     is never decoration and never a state. That is why the headline is plain
- *     ink (emphasis comes from WEIGHT, not hue) and why the tick marks and
- *     section icons are slate-400, the step documented for decorative icons.
- *     Emerald stays reserved for "funds arrived" — hence the live dot, and
- *     nothing else.
- *   - Mobile is the primary layout, including a sticky CTA that survives the
- *     whole scroll — most first visits are on a phone.
+ *     is never a state. The one decorative use of the brand ramp on this page is
+ *     `.text-gradient` on a single headline phrase — brand travelling to accent,
+ *     which are the two hues that carry no meaning. It is spent ONCE, on the
+ *     phrase the whole page turns on. Emerald stays reserved for "funds
+ *     arrived", which is why the live dots are the only green here.
+ *   - THE PRIMARY CTA STAYS ABOVE THE FOLD on a 1440x900 laptop AND a 360x640
+ *     phone. That constraint is what sets the hero's vertical rhythm, and it is
+ *     why `.h-display`'s clamp is left alone rather than pushed with a utility:
+ *     an oversized hero that shoves the button off-screen looks impressive in a
+ *     screenshot and costs signups in practice.
  */
 
 const CREATE_SNIPPET = `curl -X POST https://your-gateway/api/v1/payments \\
@@ -237,45 +246,54 @@ export default function Landing() {
 
   return (
     <div ref={revealRef}>
-      {/* ============================ HERO ============================ */}
+      {/* ============================ HERO ============================
+          The hero gets its OWN aurora on top of the field MarketingLayout
+          mounts. That is not a duplicate: the shell's field is a whole-app
+          atmosphere at low alpha, and this is a local bloom sized to the
+          opening spread, which is what makes the top of the page the brightest
+          part of it and gives the checkout frame something to be lit against.
+          Both are `pointer-events-none` and neither carries information. */}
       <section className="relative isolate overflow-hidden">
         <div className="aurora pointer-events-none absolute inset-0 -z-10" aria-hidden />
-        <div className="absolute inset-0 -z-10 bg-grid" aria-hidden />
+        <div className="pointer-events-none absolute inset-0 -z-10 bg-grid" aria-hidden />
 
-        <div className="mx-auto grid w-full max-w-6xl items-center gap-10 px-5 pb-14 pt-10 sm:px-8 sm:pb-20 sm:pt-14 lg:grid-cols-[1.02fr_1fr] lg:gap-14">
-          <div>
-            {/* Masthead: the running head and the live capability chips sit on
-                one line, closed by the section rule. The heavy stroke is under
-                the label rather than above it, so it never reads as a second
-                copy of the site header's border. */}
-            <div className="reveal">
-              <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
-                <span className="runhead">Crypto payment gateway</span>
-                {chains.map((n) => (
-                  <span key={n} className="chip">
-                    <span className="relative flex h-2 w-2">
-                      <span className="absolute inline-flex h-full w-full animate-pulse-ring rounded-full bg-emerald-500" />
-                      <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-                    </span>
-                    {n} · live
+        <div className="mx-auto grid w-full max-w-6xl items-center gap-10 px-5 pb-14 pt-8 sm:px-8 sm:pb-20 sm:pt-14 lg:grid-cols-[1.05fr_1fr] lg:gap-14">
+          <div className="min-w-0">
+            {/* The eyebrow and the live chips share one line. This is the first
+                claim the page makes and it is the only one read from the wire:
+                the chips are the gateway's own enabled networks, so the header
+                of the page cannot advertise a chain the deployment cannot
+                settle. */}
+            <div className="reveal flex flex-wrap items-center gap-x-4 gap-y-2">
+              <span className="eyebrow">Crypto payment gateway</span>
+              {chains.map((n) => (
+                <span key={n} className="chip">
+                  <span className="relative flex h-2 w-2" aria-hidden>
+                    <span className="absolute inline-flex h-full w-full animate-pulse-ring rounded-full bg-emerald-500" />
+                    <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
                   </span>
-                ))}
-                {assetList.length > 0 && (
-                  <span className="chip">{assetList.length} assets</span>
-                )}
-              </div>
-              <div className="rule-strong mt-4" aria-hidden />
+                  {n} · live
+                </span>
+              ))}
+              {assetList.length > 0 && (
+                <span className="chip num">
+                  {assetList.length} {assetList.length === 1 ? 'asset' : 'assets'}
+                </span>
+              )}
             </div>
 
-            {/* Plain ink. The emphasis on the second line is WEIGHT — the brand
-                hue belongs to things you can click, and a gradient headline is
-                the one thing every template on this market does. */}
-            <h1 className="reveal mt-7 h-display" style={revealDelay(1)}>
-              Accept crypto.<br />
-              <span className="font-normal">Keep custody.</span>
+            {/* THE ONE GRADIENT PHRASE ON THE PAGE. "Keep custody" is the
+                promise the entire product is an argument for, so it is the line
+                that gets the brand -> accent sweep. Spending it a second time
+                anywhere below would make it a decoration rather than an
+                emphasis. */}
+            <h1 className="reveal mt-6 h-display" style={revealDelay(1)}>
+              Accept crypto.
+              <br />
+              <span className="text-gradient">Keep custody.</span>
             </h1>
 
-            <p className="reveal lede measure mt-6" style={revealDelay(2)}>
+            <p className="reveal lede measure mt-5" style={revealDelay(2)}>
               A payment gateway that settles straight to a wallet you control —
               priced in your currency, confirmed on-chain, delivered by signed
               webhook.
@@ -283,7 +301,7 @@ export default function Landing() {
 
             <div
               ref={heroCtaRef}
-              className="reveal mt-8 flex flex-col gap-3 sm:flex-row sm:items-center"
+              className="reveal mt-7 flex flex-col gap-3 sm:flex-row sm:items-center"
               style={revealDelay(3)}
             >
               <Link to={primaryCta.to} className="btn-primary-lg group">
@@ -299,51 +317,65 @@ export default function Landing() {
             </div>
 
             <ul
-              className="reveal rule mt-8 flex flex-wrap gap-x-6 gap-y-2 pt-4 text-sm text-slate-600 dark:text-slate-400"
+              className="reveal mt-7 flex flex-wrap gap-x-6 gap-y-2 text-sm text-slate-600 dark:text-slate-400"
               style={revealDelay(4)}
             >
               {heroClaims.map((t) => (
                 <li key={t} className="flex items-center gap-1.5">
-                  <Check size={15} className="text-slate-400" aria-hidden />
+                  <Check size={15} className="shrink-0 text-slate-400" aria-hidden />
                   {t}
                 </li>
               ))}
             </ul>
           </div>
 
-          <div className="reveal parallax-slow" style={revealDelay(2)}>
+          {/* The checkout replica counter-drifts as the page scrolls. Parallax
+              is the cheapest way to make a flat hero feel built out of layers,
+              and it is scroll-driven CSS rather than JS, so it composites. */}
+          <div className="reveal parallax-slow min-w-0" style={revealDelay(2)}>
             <LiveCheckoutDemo />
           </div>
         </div>
 
-        {/* Asset ticker — proof of breadth, and it is the live catalogue. Set as
-            a ruled stock ticker rather than a row of pills: symbol in ink,
-            chain in small caps, a hairline between each. */}
+        {/* THE ASSET MARQUEE — proof of breadth, and it is the live catalogue
+            rather than a logo wall. It sits on its own surface: a ticker is an
+            instrument readout, and the raised plane is what separates it from
+            the hero above it without needing a rule to do the separating. */}
         {assetList.length > 0 && (
-          <div className="relative border-y border-slate-200 bg-white/50 py-5 backdrop-blur dark:border-slate-800 dark:bg-slate-900/30">
-            <div className="mx-auto mb-4 w-full max-w-6xl px-5 sm:px-8">
-              <span className="runhead">Assets this gateway settles</span>
-            </div>
-            <div className="marquee-mask group overflow-hidden">
-              {/* A -50% translate only loops seamlessly if the track holds
-                  EXACTLY two copies of a run that is itself wider than the
-                  viewport. With four assets one copy is ~500px, so on a desktop
-                  the seam was visible as a gap. `run` repeats the catalogue
-                  until it is long enough, then it is rendered twice. */}
-              <div className="animate-marquee flex w-max group-hover:[animation-play-state:paused]">
-                {[...marqueeRun, ...marqueeRun].map((a, i) => (
-                  <span
-                    key={`${a.network}-${a.symbol}-${i}`}
-                    className="flex shrink-0 items-baseline gap-2 border-l border-slate-200 px-6 dark:border-slate-800"
-                  >
-                    <span className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
-                      {a.symbol}
+          <div className="mx-auto w-full max-w-6xl px-5 pb-14 sm:px-8 sm:pb-20">
+            <div className="reveal surface overflow-hidden">
+              <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-3 sm:px-5">
+                <h2 className="runhead">Assets this gateway settles</h2>
+                <span className="num text-xs text-slate-500 dark:text-slate-400">
+                  read from /assets
+                </span>
+              </div>
+              {/* Pauses under the cursor, so a reader who wants to actually read
+                  a ticker can. There is no hover on touch, which is why the
+                  same list is printed statically in the footer. */}
+              <div className="marquee-mask group overflow-hidden border-t border-[var(--line-soft)] py-4">
+                {/* A -50% translate only loops seamlessly if the track holds
+                    EXACTLY two copies of a run that is itself wider than the
+                    viewport. With four assets one copy is ~500px, so on a
+                    desktop the seam was visible as a gap. `marqueeRun` repeats
+                    the catalogue until it is long enough, then it is rendered
+                    twice. `w-max` is load-bearing — without it the track wraps
+                    and the seam reappears. */}
+                <div className="animate-marquee flex w-max group-hover:[animation-play-state:paused]">
+                  {[...marqueeRun, ...marqueeRun].map((a, i) => (
+                    <span
+                      key={`${a.network}-${a.symbol}-${i}`}
+                      className="flex shrink-0 items-baseline gap-2 border-l border-[var(--line-soft)] px-6"
+                    >
+                      <span className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+                        {a.symbol}
+                      </span>
+                      <span className="text-xs uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                        {a.network}
+                      </span>
                     </span>
-                    <span className="text-[11px] uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">
-                      {a.network}
-                    </span>
-                  </span>
-                ))}
+                  ))}
+                </div>
               </div>
             </div>
           </div>
@@ -351,137 +383,138 @@ export default function Landing() {
       </section>
 
       {/* ========================= HOW IT WORKS =========================
-          Three steps as a ruled sequence, each opened by an enormous numeral.
-          Cards would have made them three equal-weight objects; a numbered
-          sequence down the page is what actually says "in this order". */}
-      <section className="section">
-        <div className="reveal grid gap-x-8 gap-y-4 md:grid-cols-12">
-          <div className="col-aside">
-            <span className="runhead">How it works</span>
-            <p className="mt-3">
-              Three calls, in order. Nothing between them is manual, and nothing
-              waits on us.
-            </p>
-          </div>
-          <div className="md:col-span-8 md:col-start-5">
-            <h2 className="h-section">Three calls from zero to settled</h2>
-            <p className="lede measure mt-4">
-              One POST, one webhook, and a payout address you set once.
-            </p>
-          </div>
+          Three surfaces, then the lifecycle drawn out underneath them. The
+          sequence used to be a stack of ruled bands down the page, which said
+          "in this order" but cost three full screens to say it; three tiles say
+          the same thing in one, and the diagram below carries the part a list
+          genuinely cannot — that the money and the notification travel to two
+          different places. */}
+      <section className="section pt-0">
+        <div className="reveal">
+          <span className="eyebrow">How it works</span>
+          <h2 className="mt-3 h-section">Three calls from zero to settled</h2>
+          <p className="lede measure mt-4">
+            One POST, one webhook, and a payout address you set once. Nothing
+            between them is manual, and nothing waits on us.
+          </p>
         </div>
 
-        <ol className="mt-8 sm:mt-12">
+        <ol className="mt-8 grid gap-3 sm:mt-12 lg:grid-cols-3">
           {steps.map((s, i) => (
             <li
               key={s.n}
-              className="reveal band grid gap-x-8 gap-y-4 md:grid-cols-12"
+              className="reveal surface spot flex min-w-0 flex-col p-5 sm:p-6"
               style={revealDelay(i)}
             >
-              <div className="md:col-span-3">
-                <span className="figure-xl">{s.n}</span>
-              </div>
-              <div className="md:col-span-8 md:col-start-5">
-                <h3 className="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl dark:text-slate-50">
-                  {s.title}
-                </h3>
-                <p className="measure mt-3 leading-relaxed text-slate-600 dark:text-slate-400">
-                  {s.body}
-                </p>
-              </div>
+              <span className="figure-lg">{s.n}</span>
+              <h3 className="mt-3 text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-50">
+                {s.title}
+              </h3>
+              <p className="measure mt-2 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+                {s.body}
+              </p>
             </li>
           ))}
         </ol>
+
+        {/* NOT RENDERED BELOW `sm`, and this is a legibility decision rather
+            than a layout one. The drawing has a fixed 420-unit viewBox, so its
+            type scales with the container: inside a 320px phone column its
+            labels land at ~7px, which is below anything anyone can read. The
+            three tiles above carry the same sequence in real, reflowing text
+            and the SVG's aria-label carries it for assistive tech, so nothing
+            is lost by withholding an illustration at the one width where it
+            would be illegible. From `sm` up it has 520px+ and sets at 14px. */}
+        <div className="reveal mt-3 hidden sm:block" style={revealDelay(1)}>
+          <PaymentFlowDiagram />
+        </div>
       </section>
 
       {/* ============================ CODE ============================ */}
-      <section className="relative overflow-hidden border-y border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/40">
-        <div className="section">
-          <div className="grid gap-x-8 gap-y-10 lg:grid-cols-12 lg:items-start">
-            <div className="reveal lg:col-span-5">
-              <span className="runhead">For developers</span>
-              <div className="rule-strong mt-4" aria-hidden />
-              <h2 className="mt-6 h-section">An API that gets out of the way</h2>
-              <p className="lede measure mt-4">
-                Create a payment, show the address, wait for the webhook.
-                Requests are idempotent, responses are boring, and every field
-                means exactly what it says.
-              </p>
-              {/* A ruled list, not a column of ticks: the hairline does the
-                  separating a bullet glyph was doing, for a pixel. */}
-              <ul className="mt-8 border-b border-slate-200 dark:border-slate-800">
-                {devPoints.map((t) => (
-                  <li
-                    key={t}
-                    className="rule measure py-3 text-sm leading-relaxed text-slate-600 dark:text-slate-400"
-                  >
-                    {t}
-                  </li>
-                ))}
-              </ul>
-              <Link to="/developers" className="btn-primary mt-8 inline-flex">
-                Full developer guide <ArrowRight size={16} />
-              </Link>
-            </div>
+      <section className="section pt-0">
+        <div className="grid gap-8 lg:grid-cols-12 lg:items-start lg:gap-10">
+          <div className="reveal min-w-0 lg:col-span-5">
+            <span className="eyebrow">For developers</span>
+            <h2 className="mt-3 h-section">An API that gets out of the way</h2>
+            <p className="lede measure mt-4">
+              Create a payment, show the address, wait for the webhook. Requests
+              are idempotent, responses are boring, and every field means exactly
+              what it says.
+            </p>
 
-            <div className="reveal min-w-0 lg:col-span-7" style={revealDelay(1)}>
-              <CodeBlock
-                tabs={[
-                  { label: 'Create payment', code: CREATE_SNIPPET },
-                  { label: 'Response', code: RESPONSE_SNIPPET },
-                  { label: 'Webhook', code: WEBHOOK_SNIPPET },
-                ]}
-              />
-            </div>
+            {/* Rules INSIDE a surface, which is the one structural job the
+                system still gives a hairline: it divides rows of one object
+                rather than standing in for the object. */}
+            <ul className="surface mt-7 px-4 py-1 sm:px-5">
+              {devPoints.map((t) => (
+                <li
+                  key={t}
+                  className="rule py-3.5 text-sm leading-relaxed text-slate-600 first:border-t-0 dark:text-slate-400"
+                >
+                  {t}
+                </li>
+              ))}
+            </ul>
+
+            <Link to="/developers" className="btn-primary mt-7 inline-flex">
+              Full developer guide <ArrowRight size={16} />
+            </Link>
+          </div>
+
+          <div className="reveal min-w-0 lg:col-span-7" style={revealDelay(1)}>
+            <CodeBlock
+              tabs={[
+                { label: 'Create payment', code: CREATE_SNIPPET },
+                { label: 'Response', code: RESPONSE_SNIPPET },
+                { label: 'Webhook', code: WEBHOOK_SNIPPET },
+              ]}
+            />
           </div>
         </div>
       </section>
 
       {/* ========================== FEATURES =========================== */}
-      <section className="section">
-        <div className="reveal grid gap-x-8 gap-y-4 md:grid-cols-12">
-          <div className="col-aside">
-            <span className="runhead">What you get</span>
-            <p className="mt-3">
-              Every capability named here is read from this gateway on load, not
-              from a brochure.
-            </p>
-          </div>
-          <div className="md:col-span-8 md:col-start-5">
-            <h2 className="h-section">Built for moving real money</h2>
-          </div>
+      <section className="section pt-0">
+        <div className="reveal">
+          <span className="eyebrow">What you get</span>
+          <h2 className="mt-3 h-section">Built for moving real money</h2>
+          <p className="lede measure mt-4">
+            Every capability named here is read from this gateway on load, not
+            from a brochure.
+          </p>
         </div>
 
-        {/* THE FIGURE. The live (network, asset) pair count carries the section.
-            It is deliberately absent until /assets answers — a placeholder zero
-            on a payments page is a claim, and the wrong one. */}
+        {/* THE FIGURE. The live (network, asset) pair count carries the section
+            and gets the surface a measurement deserves. It is deliberately
+            absent until /assets answers — a placeholder zero on a payments page
+            is a claim, and the wrong one. */}
         {assetList.length > 0 && (
-          <div className="reveal band mt-8 grid gap-x-8 gap-y-8 sm:mt-12 md:grid-cols-12">
-            <div className="md:col-span-4">
-              <span className="figure-xl">{assetList.length}</span>
+          <div className="reveal surface spot mt-8 grid gap-8 p-5 sm:mt-12 sm:p-7 md:grid-cols-12 md:gap-10">
+            <div className="min-w-0 md:col-span-5">
+              <span className="figure-xl break-words">{assetList.length}</span>
               <span className="figure-label measure">
                 (network, asset) pairs this deployment settles right now, read
                 from <code className="code">/assets</code>.
               </span>
             </div>
-            <div className="md:col-span-7 md:col-start-6">
-              <p className="measure leading-relaxed text-slate-600 dark:text-slate-400">
-                Each pair keeps its own balance and is never summed with
-                another, so what you reconcile is what actually landed on that
-                chain.
+            <div className="min-w-0 md:col-span-6 md:col-start-7">
+              <p className="measure text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+                Each pair keeps its own balance and is never summed with another,
+                so what you reconcile is what actually landed on that chain.
               </p>
-              <dl className="mt-6 grid gap-x-10 sm:grid-cols-2">
+              {/* A spine — label left, figure right, against a shared rule. The
+                  same primitive every detail view in the dashboard is built
+                  from, which is the point: the marketing page and the product
+                  should be recognisably the same instrument. */}
+              <dl className="mt-4">
                 {chains.map((n) => {
                   const count = assetList.filter((a) => a.network === n).length;
                   return (
-                    <div
-                      key={n}
-                      className="rule flex items-baseline justify-between gap-4 py-2.5"
-                    >
-                      <dt className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                    <div key={n} className="spine-row">
+                      <dt className="spine-label text-slate-900 dark:text-slate-100">
                         {n}
                       </dt>
-                      <dd className="num text-xs text-slate-500 dark:text-slate-400">
+                      <dd className="spine-value num">
                         {count} {count === 1 ? 'asset' : 'assets'}
                       </dd>
                     </div>
@@ -492,23 +525,23 @@ export default function Landing() {
           </div>
         )}
 
-        {/* The six capabilities as a ruled table rather than six boxes. Icons
-            stay, at slate-400 — the step documented for decorative icons. */}
-        {/* Spacing has to read correctly BOTH with the figure band above it and
-            without it, since the band does not render until /assets answers. */}
-        <div className="mt-8 grid border-b border-slate-200 sm:mt-10 sm:grid-cols-2 sm:gap-x-12 dark:border-slate-800">
+        {/* Six tiles rather than six ruled rows. `auto-fit` + `minmax` so they
+            reflow from three across to one without a breakpoint, and so a tile
+            can never be squeezed narrower than its own copy wants to be. */}
+        <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(min(100%,17rem),1fr))] gap-3">
           {features.map((f, i) => (
             <div
               key={f.title}
-              className="reveal rule py-6 sm:py-8"
-              style={revealDelay(i % 2)}
+              className="reveal surface spot min-w-0 p-5"
+              style={revealDelay(i % 3)}
             >
-              <div className="flex items-baseline gap-2.5">
-                <f.icon size={16} className="shrink-0 translate-y-0.5 text-slate-400" aria-hidden />
-                <h3 className="text-base font-semibold tracking-tight text-slate-900 dark:text-slate-50">
-                  {f.title}
-                </h3>
-              </div>
+              {/* slate-400 is the documented step for a DECORATIVE icon and is
+                  never allowed to carry text. The heading beside it is what
+                  carries the meaning. */}
+              <f.icon size={18} className="text-slate-400" aria-hidden />
+              <h3 className="mt-3 text-base font-semibold tracking-tight text-slate-900 dark:text-slate-50">
+                {f.title}
+              </h3>
               <p className="measure mt-2 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
                 {f.body}
               </p>
@@ -518,76 +551,76 @@ export default function Landing() {
       </section>
 
       {/* ============================= FAQ ============================= */}
-      <section className="border-t border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900/40">
-        <div className="section">
-          <div className="reveal grid gap-x-8 gap-y-4 md:grid-cols-12">
-            <div className="col-aside">
-              <span className="runhead">Questions</span>
-              <p className="mt-3">
-                The six a merchant asks before handing over a payment flow.
-              </p>
-            </div>
-            <div className="md:col-span-8 md:col-start-5">
-              <h2 className="h-section">Before you sign up</h2>
-            </div>
-          </div>
-
-          {/* Same 12-column grid as the heading above, so the list hangs off
-              exactly the same edge as the headline rather than approximately. */}
-          <div className="mt-8 grid gap-x-8 sm:mt-12 md:grid-cols-12">
-            <div className="border-b border-slate-200 md:col-span-8 md:col-start-5 dark:border-slate-800">
-              {faqs.map((f, i) => (
-                <Faq key={f.q} {...f} style={revealDelay(Math.min(i, 3))} />
-              ))}
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ============================= CTA ============================= */}
-      <section className="section">
+      <section className="section pt-0">
         <div className="reveal">
-          <div className="rule-strong" aria-hidden />
-          <div className="mt-8 grid gap-x-8 gap-y-8 md:grid-cols-12">
-            <div className="col-aside">
-              <span className="runhead">Get started</span>
-              <p className="mt-3 flex gap-2">
-                <Percent size={13} className="mt-0.5 shrink-0 text-slate-400" aria-hidden />
-                <span>
-                  Commission is shown in full on your dashboard, versioned with
-                  an audit trail.
-                </span>
-              </p>
+          <span className="eyebrow">Questions</span>
+          <h2 className="mt-3 h-section">Before you sign up</h2>
+          <p className="lede measure mt-4">
+            The six a merchant asks before handing over a payment flow.
+          </p>
+        </div>
+
+        <div className="reveal surface mt-8 px-4 sm:mt-12 sm:px-6">
+          {faqs.map((f) => (
+            <Faq key={f.q} {...f} />
+          ))}
+        </div>
+      </section>
+
+      {/* ============================= CTA =============================
+          The closing surface is the only one on the page that is LIT rather
+          than merely raised: `.bg-mesh` puts the hero's own bloom back behind
+          the last thing the reader sees, so the page closes in the same key it
+          opened in. */}
+      <section className="section pt-0">
+        <div className="reveal surface relative overflow-hidden bg-mesh p-6 sm:p-10">
+          <div className="pointer-events-none absolute inset-0 bg-grid" aria-hidden />
+          <div className="relative">
+            <span className="eyebrow">Get started</span>
+            <h2 className="mt-3 h-section">Start accepting crypto today</h2>
+            <p className="lede measure mt-4">
+              Create an account, confirm your email, add a settlement wallet.
+              You&apos;ll have a working API key in a few minutes.
+            </p>
+            <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+              <Link to={primaryCta.to} className="btn-primary-lg group">
+                {primaryCta.label}
+                <ArrowRight
+                  size={18}
+                  className="transition-transform duration-200 group-hover:translate-x-0.5"
+                />
+              </Link>
+              <Link to="/pricing" className="btn-secondary-lg">
+                See pricing
+              </Link>
             </div>
-            <div className="md:col-span-8 md:col-start-5">
-              <h2 className="h-section">Start accepting crypto today</h2>
-              <p className="lede measure mt-4">
-                Create an account, confirm your email, add a settlement wallet.
-                You'll have a working API key in a few minutes.
-              </p>
-              <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-                <Link to={primaryCta.to} className="btn-primary-lg group">
-                  {primaryCta.label}
-                  <ArrowRight
-                    size={18}
-                    className="transition-transform duration-200 group-hover:translate-x-0.5"
-                  />
-                </Link>
-                <Link to="/pricing" className="btn-secondary-lg">
-                  See pricing
-                </Link>
-              </div>
-            </div>
+            <p className="measure-wide mt-7 flex gap-2 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
+              <Percent size={14} className="mt-0.5 shrink-0 text-slate-400" aria-hidden />
+              <span>
+                Commission is shown in full on your dashboard, versioned with an
+                audit trail.
+              </span>
+            </p>
           </div>
         </div>
       </section>
 
-      {/* Sticky mobile CTA. Most first visits are on a phone, and the hero CTA
-          is long gone by the FAQ. Hidden on lg where the header CTA is always
-          in view, and it sits above the safe-area inset so it clears the home
-          indicator on iOS. */}
+      {/* STICKY MOBILE CTA. Most first visits are on a phone and the hero CTA is
+          long gone by the FAQ. Hidden on lg, where the masthead's own CTA never
+          leaves the viewport.
+
+          IT IS PLANE 3 AND THEREFORE GLASS — the second and last glass plane on
+          the public site, and it never shares a viewport with a third.
+
+          THE SAFE-AREA INSET IS LOAD-BEARING, not a nicety. `viewport-fit=cover`
+          is now set on the document, so iOS extends the page under the home
+          indicator; without `env(safe-area-inset-bottom)` in the padding this
+          bar's button would sit UNDER that indicator, where a tap is swallowed
+          by the system gesture. The clearance under the last of the page is the
+          footer's own mobile bottom padding in MarketingLayout — put here it
+          would only push Landing's content up and leave the colophon covered. */}
       <div
-        className={`fixed inset-x-0 bottom-0 z-30 border-t border-slate-200 bg-white/90 px-4 py-3 backdrop-blur-xl transition-transform duration-300 lg:hidden dark:border-slate-800 dark:bg-slate-950/90 ${
+        className={`glass fixed inset-x-0 bottom-0 z-30 border-x-0 border-b-0 px-4 pt-3 shadow-float transition-transform duration-[var(--dur-morph)] ease-[var(--ease-out)] lg:hidden ${
           showStickyCta ? 'translate-y-0' : 'translate-y-full'
         }`}
         style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
@@ -595,27 +628,31 @@ export default function Landing() {
         // the same link twice.
         aria-hidden={!showStickyCta}
       >
-        <Link to={primaryCta.to} className="btn-primary w-full" tabIndex={showStickyCta ? 0 : -1}>
+        <Link
+          to={primaryCta.to}
+          className="btn-primary w-full"
+          tabIndex={showStickyCta ? 0 : -1}
+        >
           {primaryCta.label} <ArrowRight size={16} />
         </Link>
       </div>
-      {/* Spacer so the sticky bar never covers the last of the page. */}
-      <div className="h-20 lg:hidden" aria-hidden />
     </div>
   );
 }
 
 /**
- * One question in the ruled FAQ list. No box: a hairline above each row and one
- * closing the list is all the enclosure a disclosure needs. The hover
- * affordance is a brand underline on the question — a link underline is the
- * sanctioned decorative use of the brand hue, because it is drawn on something
- * you can genuinely click.
+ * One question in the FAQ, as a ruled row INSIDE the section's surface. No box
+ * of its own: a disclosure is a row of a list, and giving each one a surface
+ * would put six objects on screen where there is one.
+ *
+ * The hover affordance is a brand underline on the question — a link underline
+ * is the sanctioned decorative use of the brand hue, because it is drawn on
+ * something you can genuinely click.
  */
-function Faq({ q, a, style }: { q: string; a: string; style?: React.CSSProperties }) {
+function Faq({ q, a }: { q: string; a: string }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="reveal rule" style={style}>
+    <div className="rule first:border-t-0">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
