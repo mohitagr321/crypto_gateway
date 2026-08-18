@@ -1,20 +1,73 @@
 import { X } from 'lucide-react';
 import { useEffect, useRef, type ReactNode } from 'react';
-import { classNames } from '@/lib/format';
+import { createPortal } from 'react-dom';
+
+interface ModalProps {
+  open: boolean;
+  onClose: () => void;
+  title?: ReactNode;
+  children: ReactNode;
+  footer?: ReactNode;
+  size?: 'sm' | 'md' | 'lg';
+  /**
+   * When false, the backdrop and Escape will not close it — for a dialog showing
+   * a one-time secret, where dismissing by accident loses the value for good.
+   */
+  dismissable?: boolean;
+}
 
 /**
- * The dialog. A card is the right primitive here and one of the few places it
- * still is — a modal genuinely IS a separate surface floating over the page,
- * which is the thing a border, a radius and a shadow are for.
+ * `sm:` on every width, because below `sm` this is a full-bleed sheet and a
+ * max-width would be a box with dead margin on both sides of it.
  *
- * NO ENTRANCE ANIMATION. Every modal in this panel is opened by a click on a
- * control the operator is already looking at, so they are ahead of any reveal;
- * on a surface opened dozens of times a day an entrance is a tax charged once
- * per open, forever. The scrim and the panel are simply there.
+ * `lg` is `3xl` here where the merchant panel uses `2xl`: this console's large
+ * dialogs are the commission tier editor and the API-credential sheet, both of
+ * which are grids of fields rather than prose, and both were drawn against that
+ * width. It is the one measure of this component that is deliberately not
+ * shared.
+ */
+const sizes = {
+  sm: 'sm:max-w-sm',
+  md: 'sm:max-w-lg',
+  lg: 'sm:max-w-3xl',
+};
+
+/**
+ * A DIALOG ON DESKTOP, A SHEET ON A PHONE — one component, because they are the
+ * same thing wearing the size it fits into.
  *
- * FOCUS. Opening moves focus into the dialog and closing returns it to whatever
- * opened it — without that, an operator who dismisses "Withdraw commission" with
- * Escape lands back at the top of the document.
+ * The outgoing version was a centred card at every width, and it had a specific
+ * and reachable failure: the BODY was capped at 70vh while the dialog
+ * itself carried no cap at all. Header (~57px) plus 70vh plus footer (~69px)
+ * plus the wrapper's `p-4` needs about 410px of a 360px-tall landscape phone, so
+ * the footer — which is where "Withdraw" and "Save commission" live — was pushed
+ * off the bottom of the screen with nothing to scroll it back. `vh` made it
+ * worse rather than better, because on mobile Safari `vh` measures the viewport
+ * WITHOUT the collapsing toolbar and is therefore always taller than what you
+ * can see.
+ *
+ * What it does now:
+ *
+ *   BELOW `sm`   full-bleed, pinned to the bottom edge, rounded at the top only.
+ *                It enters by travelling, which is the whole point of a sheet:
+ *                it tells you which direction it came from and therefore where
+ *                dismissing it sends it back to.
+ *   FROM `sm`    a centred dialog that scales in from 0.98. It does NOT travel —
+ *                a modal that slides in on a desktop reads as a notification
+ *                arriving rather than as the thing you just asked for.
+ *
+ * THE CAP IS ON THE DIALOG AND THE BODY IS THE ONLY SCROLLER. Header and footer
+ * are pinned, so the title stays visible while a long form scrolls and the
+ * primary action never leaves the screen. `100dvh` throughout, and
+ * `env(safe-area-inset-bottom)` on the footer keeps that action clear of the iOS
+ * home indicator.
+ *
+ * THE ENTRANCE IS NEW AND IT IS WITHIN BUDGET. This dialog previously had none,
+ * on the argument that an operator who clicked a button is ahead of any reveal.
+ * That is right for a desktop dialog and wrong for a sheet: 260ms of travel is
+ * what tells a thumb which edge the panel came from, which is the affordance
+ * that makes "swipe it away" a guess worth making. `motion-safe:` gates both, so
+ * a reduced-motion operator still gets neither.
  */
 export default function Modal({
   open,
@@ -23,38 +76,100 @@ export default function Modal({
   children,
   footer,
   size = 'md',
-}: {
-  open: boolean;
-  onClose: () => void;
-  title?: ReactNode;
-  children: ReactNode;
-  footer?: ReactNode;
-  size?: 'sm' | 'md' | 'lg';
-}) {
+  dismissable = true,
+}: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
-  const returnTo = useRef<HTMLElement | null>(null);
 
+  /**
+   * FOCUS MANAGEMENT, SCROLL LOCK AND ESCAPE — all three, because a dialog with
+   * only some of them is a dialog that fails a keyboard operator in a way nobody
+   * notices with a mouse. This panel shipped with focus restoration and Escape
+   * and neither of the other two.
+   *
+   * THE TRAP is the part that was missing. Without it, Tab walks straight out of
+   * the panel and into the page behind it: the operator is still looking at a
+   * modal, their focus ring has vanished somewhere under the scrim, and on the
+   * sheet that holds a merchant's freshly rotated API secret they can tab to
+   * controls they were never meant to reach while it is open. `aria-modal` tells
+   * assistive tech the rest of the page is inert; it does not make it inert for
+   * the Tab key, which is a common and reasonable thing to assume and is wrong.
+   *
+   * THE SCROLL LOCK is the other. Without it the console scrolls behind the
+   * dialog on touch, so an operator who means to scroll a long tier table
+   * scrolls the page underneath it instead and loses their place twice.
+   *
+   * FOCUS IS RESTORED to whatever opened the dialog. Losing it to `<body>` on
+   * close means the next Tab starts from the top of the document, which on this
+   * product means crossing the whole navigation rail to get back to the button
+   * the operator just pressed.
+   *
+   * The selector deliberately excludes `[tabindex="-1"]` — programmatically
+   * focusable, but not part of the tab ring — and the panel itself takes
+   * `tabIndex={-1}` so it can receive focus when it contains no focusable child
+   * at all, which is the case for a purely informational dialog.
+   */
   useEffect(() => {
     if (!open) return;
-    returnTo.current = document.activeElement as HTMLElement | null;
-    panelRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      returnTo.current?.focus?.();
+
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+
+    const focusable = () =>
+      Array.from(
+        panelRef.current?.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      ).filter((el) => el.offsetParent !== null || el === document.activeElement);
+
+    // Focus the first control rather than the panel where there is one: on a
+    // form dialog that puts the caret in the first field, which is what the
+    // operator came to do.
+    const first = focusable()[0];
+    (first ?? panelRef.current)?.focus();
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && dismissable) {
+        onClose();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+
+      const items = focusable();
+      if (items.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const firstItem = items[0];
+      const lastItem = items[items.length - 1];
+      const active = document.activeElement;
+
+      // Wrap at both ends, and also catch the case where focus has somehow
+      // already escaped the panel — pull it back rather than letting Tab
+      // continue through the page.
+      if (e.shiftKey && (active === firstItem || !panelRef.current?.contains(active))) {
+        e.preventDefault();
+        lastItem.focus();
+      } else if (!e.shiftKey && (active === lastItem || !panelRef.current?.contains(active))) {
+        e.preventDefault();
+        firstItem.focus();
+      }
     };
-  }, [open, onClose]);
+
+    document.addEventListener('keydown', onKey);
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = '';
+      previouslyFocused?.focus?.();
+    };
+  }, [open, onClose, dismissable]);
 
   if (!open) return null;
 
-  const width = { sm: 'max-w-sm', md: 'max-w-lg', lg: 'max-w-3xl' }[size];
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4">
       <div
-        className="absolute inset-0 bg-slate-950/60 backdrop-blur-sm"
-        onClick={onClose}
+        className="absolute inset-0 bg-slate-950/70 backdrop-blur-sm"
+        onClick={dismissable ? onClose : undefined}
         aria-hidden
       />
       <div
@@ -62,33 +177,49 @@ export default function Modal({
         role="dialog"
         aria-modal="true"
         tabIndex={-1}
-        className={classNames(
-          'relative z-10 w-full rounded-2xl border border-slate-200 bg-white shadow-float outline-none dark:border-slate-800 dark:bg-slate-900',
-          width,
-        )}
+        className={`surface relative z-10 flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-b-none rounded-t-3xl shadow-float outline-none sm:max-h-[88dvh] sm:rounded-2xl ${sizes[size]} motion-safe:animate-[sheet-in_var(--dur-modal)_var(--ease-out)] sm:motion-safe:animate-[dialog-in_var(--dur-modal)_var(--ease-out)]`}
       >
-        {/* The dialog's own masthead: title over a hairline, same gesture as a
-            page header one level down. */}
-        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-4 dark:border-slate-800">
-          <h3 className="min-w-0 text-base font-semibold text-slate-900 dark:text-slate-50">
-            {title}
-          </h3>
-          <button
-            type="button"
-            onClick={onClose}
-            className="btn-ghost h-8 w-8 shrink-0 !p-0"
-            aria-label="Close"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="max-h-[70vh] overflow-y-auto px-5 py-4">{children}</div>
+        {(title || dismissable) && (
+          <div className="flex shrink-0 items-start justify-between gap-4 px-5 pb-3 pt-5 sm:px-6">
+            {/* The grabber says "this is a sheet and it came from down there".
+                Purely a signifier, so it is hidden from assistive tech and is not
+                a control — it is not draggable and must not look like it on a
+                surface where a mis-drag would dismiss unsaved input. */}
+            <span
+              className="absolute left-1/2 top-2 h-1 w-10 -translate-x-1/2 rounded-full bg-slate-300 sm:hidden dark:bg-slate-700"
+              aria-hidden
+            />
+            {title && (
+              <h2 className="min-w-0 text-lg font-semibold tracking-[-0.02em] text-slate-900 dark:text-slate-100">
+                {title}
+              </h2>
+            )}
+            {dismissable && (
+              // 40px, up from the 32px a 8-by-8 glyph button computed to.
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Close"
+                className="-mr-2 -mt-1 grid h-10 w-10 shrink-0 place-items-center rounded-full text-slate-400 transition-colors hover:bg-[var(--hover)] hover:text-slate-600 dark:hover:text-slate-300"
+              >
+                <X size={18} aria-hidden />
+              </button>
+            )}
+          </div>
+        )}
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-5 pt-1 sm:px-6">{children}</div>
+
         {footer && (
-          <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-4 dark:border-slate-800">
+          <div
+            className="flex shrink-0 flex-col-reverse gap-2 border-t border-[var(--line-soft)] bg-[var(--surface-2)] px-5 py-4 sm:flex-row sm:justify-end sm:px-6"
+            style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
+          >
             {footer}
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

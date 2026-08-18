@@ -1,14 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, Coins, ExternalLink, Loader2, TrendingUp, Wallet } from 'lucide-react';
-import { useState } from 'react';
+import { CheckCircle2, ExternalLink, Wallet } from 'lucide-react';
+import { useState, type ReactNode } from 'react';
 import Badge, { NetworkLabel } from '@/components/Badge';
 import DataTable, { type Column } from '@/components/DataTable';
-import { BandHead } from '@/components/Editorial';
 import ErrorState from '@/components/ErrorState';
 import FormError from '@/components/FormError';
 import Modal from '@/components/Modal';
 import PageHeader from '@/components/PageHeader';
-import StatCard from '@/components/StatCard';
+import Section from '@/components/Section';
+import Spinner from '@/components/Spinner';
 import { useAuth } from '@/context/AuthContext';
 import {
   apiErrorMessage,
@@ -43,12 +43,21 @@ const scopeKey = (b?: CommissionBalance): string =>
 /**
  * THE GATEWAY'S OWN MONEY.
  *
- * One band per chain, and no pooled total anywhere on the page. Commission is
+ * ONE SURFACE PER POOL, and no pooled total anywhere on the page. Commission is
  * physically held in that chain's central wallet and can only be withdrawn from
  * there, so a single combined figure would be a number nobody can act on — and
  * acting on it would mean trying to spend Tron-earned funds out of the BSC
  * wallet. The non-fungibility discipline is the correctness rule here, exactly
- * as it is on the merchant panel's balances.
+ * as it is on the merchant panel's balances, and the layout is what enforces it:
+ * a pool's three figures are grouped onto their own card with the chain and the
+ * asset in its running head, so there is nowhere for two pools' numbers to sit
+ * side by side looking addable.
+ *
+ * THE THREE FIGURES ARE RULED BLOCKS RATHER THAN STAT TILES, which is the same
+ * call the merchant panel's Reports page makes for the same reason: a tile is a
+ * discrete object that stands alone, and these three are one reading — accrued,
+ * minus withdrawn, leaves available. Cards inside a card would say they were
+ * three unrelated readouts that happen to share a heading.
  */
 export default function Revenue() {
   const qc = useQueryClient();
@@ -118,6 +127,7 @@ export default function Revenue() {
             href={addrLink(w.toAddress, w.network)}
             target="_blank"
             rel="noreferrer"
+            onClick={(e) => e.stopPropagation()}
             className="link-ink inline-flex items-center gap-1 font-mono text-xs"
           >
             {shortHash(w.toAddress, 8, 4)}
@@ -140,11 +150,11 @@ export default function Revenue() {
       sortValue: (w) => w.status,
       render: (w) => (
         <div>
-          <Badge status={w.status} />
+          <Badge status={w.status} dot />
           {/* The reason a withdrawal failed is the whole point of the row, so it
               is printed rather than truncated into a tooltip nobody opens. */}
           {w.error && (
-            <p className="mt-1 max-w-[22rem] text-xs leading-snug text-red-600 dark:text-red-400">
+            <p className="mt-1 max-w-[22rem] break-words text-xs leading-snug text-red-600 dark:text-red-400">
               {w.error}
             </p>
           )}
@@ -161,6 +171,7 @@ export default function Revenue() {
             href={txLink(w.txHash, w.network)}
             target="_blank"
             rel="noreferrer"
+            onClick={(e) => e.stopPropagation()}
             className="link-ink inline-flex items-center gap-1 font-mono text-xs"
           >
             {shortHash(w.txHash)} <ExternalLink className="h-3 w-3" aria-hidden />
@@ -176,11 +187,11 @@ export default function Revenue() {
       <PageHeader
         eyebrow="Money in"
         title="Revenue"
-        subtitle="Commission the gateway has earned, per chain, and every withdrawal of it."
+        description="Commission the gateway has earned, per chain, and every withdrawal of it."
         actions={
           isSuper ? (
             <button type="button" className="btn-primary" onClick={() => setOpen(true)}>
-              <Wallet className="h-4 w-4" /> Withdraw commission
+              <Wallet className="h-4 w-4" aria-hidden /> Withdraw commission
             </button>
           ) : (
             <span className="runhead">Read-only · ops role</span>
@@ -193,82 +204,167 @@ export default function Revenue() {
           message={apiErrorMessage(balanceQuery.error)}
           onRetry={() => balanceQuery.refetch()}
         />
+      ) : balanceQuery.isLoading ? (
+        /* The pools are not known until the balance resolves, so there is no
+           card to put a per-figure skeleton in. One placeholder surface stands
+           in for the set — static and stepped, because the frequency boundary
+           bans a loop on a console route. */
+        <Section title="Commission by chain and asset">
+          <div
+            className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,11rem),1fr))] gap-x-8 gap-y-6"
+            aria-busy="true"
+          >
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="rule pt-3">
+                <span className="ghost h-3 w-28" aria-hidden />
+                <span
+                  className="ghost mt-3 h-7 w-2/3"
+                  aria-hidden
+                  style={{ opacity: Math.max(0.3, 1 - i * 0.2) }}
+                />
+                <span className="ghost mt-2.5 h-2.5 w-20" aria-hidden />
+              </div>
+            ))}
+            <span className="sr-only" role="status">
+              Loading commission balances…
+            </span>
+          </div>
+        </Section>
       ) : (
         networkBalances.map((b) => {
           const net = b.network ?? 'BEP20';
-          // One band per (network, ASSET), not per network. A chain holds a
+          // One surface per (network, ASSET), not per network. A chain holds a
           // separate pool for every token swept on it — BNB commission cannot
           // be paid out as USDT — so keying on the chain alone rendered two
-          // bands with the same React key and the same heading, and an operator
+          // blocks with the same React key and the same heading, and an operator
           // could not tell which number belonged to which coin.
           const sym = b.asset ?? b.currency ?? 'USDT';
+          const cur = b.currency ?? currency;
           return (
-            <section key={scopeKey(b)} className="mb-10">
-              <BandHead
-                aside={
-                  <span className="text-xs text-slate-500 dark:text-slate-400">
-                    {sym} held in the {net} central wallet
-                  </span>
-                }
-              >
-                {networkLabel(net)} · {sym}
-              </BandHead>
-              <div className="mt-2 grid grid-cols-1 gap-x-8 gap-y-6 sm:grid-cols-3">
+            <Section
+              key={scopeKey(b)}
+              className="mb-4"
+              title={`${networkLabel(net)} · ${sym}`}
+              aside={
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                  Held in the {net} central wallet
+                </span>
+              }
+            >
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,11rem),1fr))] gap-x-8 gap-y-6">
                 {/* Available first, because it is the only one of the three you
                     can do anything with. Emerald: this is money that has
-                    arrived and is yours to move. */}
-                <StatCard
+                    arrived and is yours to move — which is the one meaning that
+                    hue carries in this product. */}
+                <PoolFigure
                   label="Available to withdraw"
                   value={formatUsdt(b.available)}
-                  icon={Wallet}
+                  note={`${cur} · payable from the ${net} wallet now`}
                   tone="emerald"
-                  loading={balanceQuery.isLoading}
-                  hint={`${b.currency ?? currency} · payable from the ${net} wallet now`}
                 />
-                <StatCard
+                <PoolFigure
                   label="Accrued"
                   value={formatUsdt(b.accrued)}
-                  icon={TrendingUp}
-                  loading={balanceQuery.isLoading}
-                  hint={`${b.currency ?? currency} · total ever earned on ${net}`}
+                  note={`${cur} · total ever earned on ${net}`}
                 />
-                <StatCard
+                <PoolFigure
                   label="Withdrawn"
                   value={formatUsdt(b.withdrawn)}
-                  icon={Coins}
-                  loading={balanceQuery.isLoading}
-                  hint={`${b.currency ?? currency} · already taken out`}
+                  note={`${cur} · already taken out`}
                 />
               </div>
-            </section>
+            </Section>
           );
         })
       )}
 
-      <section>
-        <BandHead>Withdrawal history</BandHead>
-        <div className="mt-3">
-          <DataTable
-            columns={columns}
-            rows={historyQuery.data ?? []}
-            rowKey={(w) => w.id}
-            loading={historyQuery.isLoading}
-            error={historyQuery.isError ? apiErrorMessage(historyQuery.error) : null}
-            onRetry={() => historyQuery.refetch()}
-            emptyMessage="No commission has been withdrawn yet."
-            emptyHint="Every withdrawal is recorded here with the chain it settled on and the transaction that carried it."
-            label="Commission withdrawals"
-            defaultSortKey="createdAt"
-            defaultSortDir="desc"
-            skeletonRows={8}
-            pageSize={15}
-          />
-        </div>
-        <p className="measure-wide mt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+      <Section className="mt-4" flush title="Withdrawal history">
+        <DataTable
+          columns={columns}
+          rows={historyQuery.data ?? []}
+          rowKey={(w) => w.id}
+          loading={historyQuery.isLoading}
+          error={historyQuery.isError ? apiErrorMessage(historyQuery.error) : null}
+          onRetry={() => historyQuery.refetch()}
+          emptyMessage="No commission has been withdrawn yet."
+          emptyHint="Every withdrawal is recorded here with the chain it settled on and the transaction that carried it."
+          label="Commission withdrawals"
+          defaultSortKey="createdAt"
+          defaultSortDir="desc"
+          skeletonRows={8}
+          pageSize={15}
+          // `dvh`, never `vh` — mobile Safari's `vh` excludes the collapsing
+          // toolbar and is always taller than the visible viewport.
+          maxHeight="70dvh"
+          /**
+           * THE STACKED ROW. This ledger shipped with no `renderMobile`, so
+           * below `md` it handed a phone a six-column table to drag sideways —
+           * and the two columns an operator actually opens this list for, the
+           * destination and the transaction, were `hideOnMobile` and therefore
+           * absent from the narrow view entirely.
+           *
+           * THE FAILURE REASON IS NEVER DROPPED. A failed withdrawal's error is
+           * the row: it is what tells an operator whether to retry or to go and
+           * look at the wallet. It wraps under the row rather than being cut.
+           */
+          renderMobile={(w) => (
+            <div>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="num truncate text-sm font-medium text-slate-900 dark:text-slate-50">
+                    {formatUsdt(w.amount)} {w.asset ?? currency}
+                  </p>
+                  <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                    {formatDate(w.createdAt)}
+                  </p>
+                </div>
+                <span className="shrink-0">
+                  <Badge status={w.status} dot />
+                </span>
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-x-3 text-xs">
+                <NetworkLabel network={w.network} />
+                {w.toAddress && (
+                  <a
+                    href={addrLink(w.toAddress, w.network)}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="link-ink inline-flex min-h-[44px] items-center gap-1 font-mono"
+                  >
+                    to {shortHash(w.toAddress, 6, 4)}
+                    <ExternalLink className="h-3 w-3" aria-hidden />
+                  </a>
+                )}
+                {w.txHash ? (
+                  <a
+                    href={txLink(w.txHash, w.network)}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="link-ink inline-flex min-h-[44px] items-center gap-1 font-mono"
+                  >
+                    {shortHash(w.txHash)} <ExternalLink className="h-3 w-3" aria-hidden />
+                  </a>
+                ) : (
+                  <span className="inline-flex min-h-[44px] items-center text-slate-500 dark:text-slate-400">
+                    not broadcast
+                  </span>
+                )}
+              </div>
+              {w.error && (
+                <p className="mt-1 break-words text-xs leading-snug text-red-600 dark:text-red-400">
+                  {w.error}
+                </p>
+              )}
+            </div>
+          )}
+        />
+        <p className="measure-wide pb-1 pt-3 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
           Amounts are never summed across chains: commission earned on one chain
           can only be withdrawn from that chain's central wallet.
         </p>
-      </section>
+      </Section>
 
       {isSuper && (
         <WithdrawModal
@@ -283,6 +379,44 @@ export default function Revenue() {
         />
       )}
     </>
+  );
+}
+
+/**
+ * One figure of a pool, as a ruled block inside the pool's surface.
+ *
+ * `break-words` and never `truncate`: this is a chain's whole commission float,
+ * and a cut figure is a number an operator reads wrong rather than notices is
+ * missing. `min-w-0` on the block is what lets a grid child shrink under its
+ * content at all, which is what makes the wrap possible.
+ *
+ * No `text-*` utility on the figure, ever — `.figure-lg` is a component-layer
+ * clamp and a utility wins the cascade, pinning it to one size at every width.
+ * A colour utility is a different matter: it is not what the clamp sets.
+ */
+function PoolFigure({
+  label,
+  value,
+  note,
+  tone,
+}: {
+  label: string;
+  value: string;
+  note: ReactNode;
+  tone?: 'emerald';
+}) {
+  return (
+    <div className="rule min-w-0 pt-3">
+      <span className="runhead">{label}</span>
+      <p
+        className={`figure-lg mt-2 break-words ${
+          tone === 'emerald' ? 'text-emerald-600 dark:text-emerald-400' : ''
+        }`}
+      >
+        {value}
+      </p>
+      <p className="mt-1.5 text-xs leading-snug text-slate-500 dark:text-slate-400">{note}</p>
+    </div>
   );
 }
 
@@ -397,9 +531,9 @@ function WithdrawModal({
             onClick={onSubmit}
           >
             {mutation.isPending ? (
-              <Loader2 className="motion-keep h-4 w-4 animate-spin" />
+              <Spinner size={16} />
             ) : (
-              <CheckCircle2 className="h-4 w-4" />
+              <CheckCircle2 className="h-4 w-4" aria-hidden />
             )}
             Withdraw
           </button>
@@ -436,16 +570,19 @@ function WithdrawModal({
         )}
 
         <div>
-          <div className="flex items-baseline justify-between gap-3">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3">
             <label className="label" htmlFor="wd-amount">
               Amount ({currency})
             </label>
+            {/* 44px, and it earns it: this is the control that fills the field
+                with a whole chain's commission float, so a mis-tap on a phone
+                either does nothing or moves the wrong number. */}
             <button
               type="button"
-              className="mb-1.5 text-xs font-medium text-brand-600 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-brand-500 dark:text-brand-400"
+              className="-mr-1 inline-flex min-h-[44px] items-center rounded-lg px-1 text-xs font-medium text-brand-600 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-brand-500 dark:text-brand-400"
               onClick={() => setAmount(balance?.available ?? '')}
             >
-              Max: <span className="num">{formatUsdt(balance?.available)}</span>
+              Max: <span className="num ml-1">{formatUsdt(balance?.available)}</span>
             </button>
           </div>
           <input
@@ -464,7 +601,7 @@ function WithdrawModal({
           </label>
           <input
             id="wd-address"
-            className="input font-mono text-sm"
+            className="input font-mono"
             placeholder={network === 'TRC20' ? 'T…' : '0x…'}
             value={toAddress}
             onChange={(e) => setToAddress(e.target.value)}

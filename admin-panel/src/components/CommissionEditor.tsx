@@ -174,14 +174,29 @@ export function CommissionSummary({ commission }: { commission?: Commission | nu
 
   if (commission.type === 'tiered' && commission.tiers?.length) {
     return (
-      <div className="overflow-x-auto">
-        <table className="w-full border-separate border-spacing-0 text-sm">
+      /*
+        A LEDGER, not a hand-rolled table. Same classes, same measures and the
+        same CSS-only scroll shadows as every other table in the console, so a
+        slab schedule read here and a payout list read one route away are the
+        same object.
+
+        The scroller matters more here than usual: this renders inside a dialog,
+        where the content box on a 360px phone is about 280px wide, and an
+        unwrapped table inside a modal is the classic way a dialog grows a
+        horizontal scrollbar with no visible end. `.ledger-scroll` both contains
+        it and shows an edge shadow on whichever side still has table to reach.
+
+        The header used to close on a slate-900 / slate-100 ink rule — a
+        2px near-white stroke on the dark ground, which index.css names as the
+        scar this system was written to remove. `.ledger` draws the header's own
+        hairline instead.
+      */
+      <div className="ledger-scroll">
+        <table className="ledger">
           <thead>
             <tr>
-              <th className="border-b border-slate-900 py-1.5 pr-4 text-left text-xs font-medium uppercase tracking-[0.18em] text-slate-500 dark:border-slate-100 dark:text-slate-400">
-                Range (USDT)
-              </th>
-              <th className="border-b border-slate-900 py-1.5 text-right text-xs font-medium uppercase tracking-[0.18em] text-slate-500 dark:border-slate-100 dark:text-slate-400">
+              <th scope="col">Range (USDT)</th>
+              <th scope="col" className="text-right">
                 Rate
               </th>
             </tr>
@@ -189,18 +204,8 @@ export function CommissionSummary({ commission }: { commission?: Commission | nu
           <tbody>
             {commission.tiers.map((t, i) => (
               <tr key={i}>
-                <td
-                  className={`py-1.5 pr-4 tabular-nums lining-nums text-slate-700 dark:text-slate-300 ${
-                    i > 0 ? 'border-t border-slate-200 dark:border-slate-800' : ''
-                  }`}
-                >
-                  {tierRangeLabel(t)}
-                </td>
-                <td
-                  className={`py-1.5 text-right tabular-nums lining-nums text-slate-900 dark:text-slate-100 ${
-                    i > 0 ? 'border-t border-slate-200 dark:border-slate-800' : ''
-                  }`}
-                >
+                <td className="num">{tierRangeLabel(t)}</td>
+                <td className="num text-right text-slate-900 dark:text-slate-100">
                   {tierRateLabel(t)}
                 </td>
               </tr>
@@ -345,92 +350,111 @@ export default function CommissionEditor({
 
           {err.tiers && <p className="text-xs text-red-600 dark:text-red-400">{err.tiers}</p>}
 
-          {/* The slab table's running heads, over the ledger's ink rule. From
-              `sm` up the tiers read as ruled rows under these; below it each
-              tier stacks and carries its own field labels. */}
-          <div className="hidden gap-2 border-b border-slate-900 pb-1.5 text-xs font-medium uppercase tracking-[0.18em] text-slate-500 sm:grid sm:grid-cols-[1fr_1fr_1fr_1fr_auto] dark:border-slate-100 dark:text-slate-400">
-            <span>Min</span>
-            <span>Max (∞ if empty)</span>
-            <span>Type</span>
-            <span>Value</span>
-            <span className="w-9" />
+          {/*
+            THE SLAB SCHEDULE, IN A WELL.
+
+            A run of bare inputs on the dialog's own surface reads as a form that
+            has not finished loading; a slab table is one THING — a schedule — and
+            grouping it onto an inset surface is what says so. `.well` is the
+            sanctioned inset: one step off the surface it sits on, and no rim
+            light, because light does not catch on the top edge of a hole.
+
+            The running heads close on `.rule-b`, a hairline, rather than on the
+            slate-900 / slate-100 ink rule they used to — a
+            2px near-white stroke across a dark dialog is a scar, and index.css
+            says so by name. Tracking drops from 0.18em to the console's 0.14em
+            for the same reason it did in the ledger: wide tracking on uppercase
+            heads is what actually sets a table's minimum width.
+          */}
+          <div className="well space-y-3 p-3">
+            <div className="rule-b hidden gap-2 pb-1.5 sm:grid sm:grid-cols-[1fr_1fr_1fr_1fr_auto]">
+              <span className="runhead">Min</span>
+              <span className="runhead">Max (∞ if empty)</span>
+              <span className="runhead">Type</span>
+              <span className="runhead">Value</span>
+              <span className="w-11" />
+            </div>
+
+            {draft.tiers.map((t, i) => {
+              const isLast = i === draft.tiers.length - 1;
+              return (
+                <div
+                  key={i}
+                  className={`grid grid-cols-2 gap-2 sm:grid-cols-[1fr_1fr_1fr_1fr_auto] ${
+                    i > 0 ? 'border-t border-[var(--line-soft)] pt-3' : ''
+                  }`}
+                >
+                  <TierField
+                    label="Min"
+                    disabled={disabled}
+                    placeholder="0"
+                    value={t.minAmount}
+                    onChange={(v) => setTier(i, { minAmount: v })}
+                    error={err[`tier.${i}.minAmount`]}
+                  />
+                  <TierField
+                    label="Max"
+                    disabled={disabled}
+                    placeholder={isLast ? '∞' : '10'}
+                    value={t.maxAmount}
+                    onChange={(v) => setTier(i, { maxAmount: v })}
+                    error={err[`tier.${i}.maxAmount`]}
+                  />
+                  <div className="min-w-0">
+                    <span className="runhead mb-1 sm:hidden">Type</span>
+                    <select
+                      className="input"
+                      disabled={disabled}
+                      value={t.type}
+                      onChange={(e) =>
+                        setTier(i, { type: e.target.value as 'fixed' | 'percentage' })
+                      }
+                    >
+                      <option value="percentage">%</option>
+                      <option value="fixed">Fixed</option>
+                    </select>
+                  </div>
+                  <TierField
+                    label="Value"
+                    disabled={disabled}
+                    placeholder={t.type === 'percentage' ? '1' : '1.00'}
+                    value={t.value}
+                    onChange={(v) => setTier(i, { value: v })}
+                    error={err[`tier.${i}.value`]}
+                  />
+                  <div className="col-span-2 flex items-end justify-end sm:col-span-1">
+                    {/* Red is a WARNING about the action here, which is the same
+                        meaning it carries on a failed payment — consistent, not a
+                        collision. The label is in the accessible name, because an
+                        icon-only control that only says what it does in a `title`
+                        says nothing to a screen reader.
+
+                        44px, up from the 36px a 9-by-9 glyph button computed
+                        to. This one is worth the extra care: it is a destructive
+                        control sitting immediately beside two number fields, so a
+                        mis-tap on a phone deletes a tier the operator was in the
+                        middle of typing. */}
+                    <button
+                      type="button"
+                      className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-red-600 transition-colors duration-[var(--dur-press)] hover:bg-red-500/10 disabled:pointer-events-none disabled:opacity-30 dark:text-red-400"
+                      disabled={disabled || draft.tiers.length === 1}
+                      title="Remove tier"
+                      aria-label={`Remove tier ${i + 1}`}
+                      onClick={() => removeTier(i)}
+                    >
+                      <Trash2 className="h-4 w-4" aria-hidden />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
-          {draft.tiers.map((t, i) => {
-            const isLast = i === draft.tiers.length - 1;
-            return (
-              <div
-                key={i}
-                className={`grid grid-cols-2 gap-2 sm:grid-cols-[1fr_1fr_1fr_1fr_auto] ${
-                  i > 0 ? 'border-t border-slate-200 pt-3 dark:border-slate-800' : ''
-                }`}
-              >
-                <TierField
-                  label="Min"
-                  disabled={disabled}
-                  placeholder="0"
-                  value={t.minAmount}
-                  onChange={(v) => setTier(i, { minAmount: v })}
-                  error={err[`tier.${i}.minAmount`]}
-                />
-                <TierField
-                  label="Max"
-                  disabled={disabled}
-                  placeholder={isLast ? '∞' : '10'}
-                  value={t.maxAmount}
-                  onChange={(v) => setTier(i, { maxAmount: v })}
-                  error={err[`tier.${i}.maxAmount`]}
-                />
-                <div>
-                  <span className="mb-1 block text-xs text-slate-500 sm:hidden dark:text-slate-400">
-                    Type
-                  </span>
-                  <select
-                    className="input"
-                    disabled={disabled}
-                    value={t.type}
-                    onChange={(e) => setTier(i, { type: e.target.value as 'fixed' | 'percentage' })}
-                  >
-                    <option value="percentage">%</option>
-                    <option value="fixed">Fixed</option>
-                  </select>
-                </div>
-                <TierField
-                  label="Value"
-                  disabled={disabled}
-                  placeholder={t.type === 'percentage' ? '1' : '1.00'}
-                  value={t.value}
-                  onChange={(v) => setTier(i, { value: v })}
-                  error={err[`tier.${i}.value`]}
-                />
-                <div className="col-span-2 flex items-end justify-end sm:col-span-1">
-                  {/* Red is a WARNING about the action here, which is the same
-                      meaning it carries on a failed payment — consistent, not a
-                      collision. The label is in the accessible name, because an
-                      icon-only control that only says what it does in a `title`
-                      says nothing to a screen reader. */}
-                  <button
-                    type="button"
-                    className="btn-ghost h-9 w-9 !p-0 text-red-600 disabled:opacity-30 dark:text-red-400"
-                    disabled={disabled || draft.tiers.length === 1}
-                    title="Remove tier"
-                    aria-label={`Remove tier ${i + 1}`}
-                    onClick={() => removeTier(i)}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-
-          <button
-            type="button"
-            className="btn-secondary !py-1.5 text-xs"
-            disabled={disabled}
-            onClick={addTier}
-          >
-            <Plus className="h-3.5 w-3.5" /> Add tier
+          {/* `!py-1.5 text-xs` is gone: `.btn` now enforces the 44px touch floor
+              itself, and the override bought nothing except a control an
+              operator misses with a thumb. */}
+          <button type="button" className="btn-secondary" disabled={disabled} onClick={addTier}>
+            <Plus className="h-4 w-4" aria-hidden /> Add tier
           </button>
         </div>
       )}
@@ -454,10 +478,15 @@ function TierField({
   disabled?: boolean;
 }) {
   return (
-    <div>
-      <span className="mb-1 block text-xs text-slate-500 sm:hidden dark:text-slate-400">
-        {label}
-      </span>
+    // `min-w-0` because this is a grid child holding a field: a grid item
+    // defaults to `min-width: auto` and refuses to shrink under its content, so
+    // without it two of these in a 2-column row on a 360px phone push the row
+    // wider than the dialog rather than sharing the width.
+    <div className="min-w-0">
+      {/* The field's name, only below `sm` — above it the column head says it
+          once for the whole table. A running head rather than a bare grey line:
+          it is the same label gesture the head row uses, one size down. */}
+      <span className="runhead mb-1 sm:hidden">{label}</span>
       <input
         className={classNames('input', error && 'border-red-600 focus:border-red-600')}
         disabled={disabled}

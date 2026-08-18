@@ -6,6 +6,11 @@ import { classNames, networkLabel } from '@/lib/format';
  * that says `tone="purple"` breaks — but the four semantic names are what NEW
  * code should use: they name the MEANING rather than a hue, which is the only
  * thing that survives a palette change.
+ *
+ * THE UNION IS NOW THE MERCHANT PANEL'S, exactly. It was missing `indigo`, which
+ * meant a component copied between the two panels failed to typecheck in this
+ * direction only — the kind of divergence that costs nothing to create and an
+ * afternoon to find.
  */
 type Tone =
   | 'gray'
@@ -14,13 +19,14 @@ type Tone =
   | 'blue'
   | 'red'
   | 'purple'
+  | 'indigo'
   | 'neutral'
   | 'settled'
   | 'waiting'
   | 'failed';
 
 /**
- * SIX HUES COLLAPSED ONTO FOUR MEANINGS — byte-for-byte the same collapse the
+ * SEVEN HUES COLLAPSED ONTO FOUR MEANINGS — byte-for-byte the same collapse the
  * merchant panel's Badge makes, because these two components render the same
  * statuses and an operator with both panels open must not see two greens.
  *
@@ -30,9 +36,14 @@ type Tone =
  *   emerald  funds arrived / healthy      amber  waiting on someone or something
  *   red      it failed, or it is unsafe   slate  everything else
  *
- * So `blue` (confirming, processing) and `purple` (swept, and the old network
- * chips) resolve into the semantic set rather than adding two more colours to a
- * screen that already has four.
+ * So `blue` (confirming, processing) and `purple` (partial) resolve to amber —
+ * both are states where something is still owed — and `indigo` resolves to
+ * slate, because indigo is the BRAND hue and brand means "you can act on this",
+ * never a state.
+ *
+ * `purple` USED TO RESOLVE TO SLATE HERE and to amber over there, on the same
+ * word. Nothing in this console passes it, so aligning it is free; leaving the
+ * two mappings forked was a silent trap for the first page that did.
  *
  * The 600 step for light text and the 400 step for dark: the 500 step measures
  * below AA on this ground and never carries text.
@@ -40,26 +51,38 @@ type Tone =
 const toneInk: Record<Tone, string> = {
   gray: 'text-slate-600 dark:text-slate-400',
   neutral: 'text-slate-600 dark:text-slate-400',
-  purple: 'text-slate-600 dark:text-slate-400',
+  indigo: 'text-slate-600 dark:text-slate-400',
   green: 'text-emerald-600 dark:text-emerald-400',
   settled: 'text-emerald-600 dark:text-emerald-400',
   yellow: 'text-amber-600 dark:text-amber-400',
   waiting: 'text-amber-600 dark:text-amber-400',
   blue: 'text-amber-600 dark:text-amber-400',
+  purple: 'text-amber-600 dark:text-amber-400',
   red: 'text-red-600 dark:text-red-400',
   failed: 'text-red-600 dark:text-red-400',
 };
 
 /**
- * Amber states are drawn as a HOLLOW RING, everything else as a solid disc.
+ * WHICH TONES ARE STILL IN FLIGHT.
  *
- * This is the second carrier under the word: colour is never allowed to be the
- * only thing separating two states, and in a greyscale print or for a
- * red/green-blind operator an open ring against a filled dot is a difference you
- * can still see. "Still moving" is hollow; settled, failed and archival are
- * filled.
+ * These get `.st-live`, which pulses the dot's halo. It is the one looping
+ * animation this design permits on a console route, and it earns the exception
+ * by being INFORMATION: it marks exactly the rows an operator is actively
+ * waiting on — a payout still broadcasting, a webhook still retrying — and it is
+ * the difference between a table you read and a table you scan. It travels
+ * nowhere and animates box-shadow only, so it cannot reflow anything, and
+ * `prefers-reduced-motion` switches it off.
+ *
+ * Nothing terminal pulses. A settled payment that kept blinking would train the
+ * operator to ignore the blink, which would cost the states that need it.
+ *
+ * This replaces the HOLLOW ring the outgoing badge drew for the same set. The
+ * ring was the right second carrier for a design made of hairlines; on a lozenge
+ * the shape carrier is motion, and it is a stronger one — a ring and a disc are
+ * two 6px marks that differ by a hairline, while a pulse is unmistakable at a
+ * glance down a column of forty rows.
  */
-const HOLLOW: ReadonlySet<Tone> = new Set<Tone>(['yellow', 'waiting', 'blue']);
+const LIVE: ReadonlySet<Tone> = new Set<Tone>(['yellow', 'waiting', 'blue', 'purple']);
 
 /**
  * Every status string this console renders, mapped onto a meaning.
@@ -106,25 +129,39 @@ export function statusTone(status?: string): Tone {
 }
 
 /**
- * A status, set as a MARK AND A WORD rather than a filled pill.
+ * A status, set as a LIT LOZENGE.
  *
- * The pill was a coloured rectangle with the word inside it; at a glance an
- * operator read the colour and the word was decoration. Ranged as small caps
- * against a dot, the WORD is what you read and the colour and shape are what
- * confirm it — which is the right way round, and it also stops six pills
- * fighting the hairlines for attention down a ledger column.
+ * The previous system set a status as a bare word and a dot, which was right for
+ * a page built from hairlines and wrong for one built from surfaces: on a lit
+ * card a bare word reads as a label rather than as a state, and down a ledger
+ * column it disappeared into the rows.
+ *
+ * THREE CARRIERS, AND COLOUR IS NEVER THE ONE THAT MATTERS:
+ *   the WORD    always present, and it is what you actually read
+ *   the SHAPE   in-flight states pulse; terminal states are still
+ *   the COLOUR  confirms the other two
+ *
+ * That ordering is what keeps the ledger readable in greyscale and for a
+ * red/green-blind operator.
+ *
+ * `dot` NOW DEFAULTS TO FALSE, matching the merchant panel. It defaulted to true
+ * here, which is the second half of the same fork as the tone union: the same
+ * component, given the same props, rendered differently in the two windows of
+ * one product. Every existing call site in this console relies on the old
+ * default and therefore needs `dot` added explicitly — they are listed in the
+ * handover report, because they live in page files this pass does not own.
  */
 export default function Badge({
   children,
   tone,
   status,
-  dot = true,
+  dot = false,
   className,
 }: {
   children?: ReactNode;
   tone?: Tone;
   status?: string;
-  /** The mark. On by default; turn it off where an icon already carries shape. */
+  /** The lit mark. Off by default; pass it on any row-level status readout. */
   dot?: boolean;
   className?: string;
 }) {
@@ -132,20 +169,13 @@ export default function Badge({
   return (
     <span
       className={classNames(
-        'inline-flex items-center gap-1.5 whitespace-nowrap text-[11px] font-medium uppercase tracking-[0.1em]',
+        'st',
         toneInk[resolved],
+        dot && LIVE.has(resolved) && 'st-live',
         className,
       )}
     >
-      {dot &&
-        (HOLLOW.has(resolved) ? (
-          <span
-            className="h-2 w-2 shrink-0 rounded-full border-[1.5px] border-current"
-            aria-hidden
-          />
-        ) : (
-          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current" aria-hidden />
-        ))}
+      {dot && <span className="st-dot" aria-hidden />}
       {children ?? status}
     </span>
   );
@@ -159,6 +189,10 @@ export default function Badge({
  * were the same colour, in the same table, meaning nothing in common. Here the
  * chain is ink and the human name of it is the quiet half, which also stops the
  * two networks reading as two severities.
+ *
+ * It is deliberately NOT a `.st` lozenge for the same reason: the lozenge is the
+ * shape this product uses to say "this is a state", and spending it on a chain
+ * name would put a fifth meaning into a vocabulary that has exactly four.
  *
  * `full` prints "BEP20 · BSC"; the short form is for a column that already has
  * the chain in its header.

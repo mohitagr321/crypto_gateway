@@ -11,9 +11,9 @@ import type { ReactNode } from 'react';
  * re-rendered on a theme flip instead of just recolouring.
  *
  * Nothing below is a hex. Every value is either a Tailwind class resolved
- * against the ramp or `currentColor` inherited from a wrapper that carries one,
- * so a chart re-grounds with the rest of the product and flips with the theme
- * for free.
+ * against the ramp, a custom property from the ramp itself, or `currentColor`
+ * inherited from a wrapper that carries one — so a chart re-grounds with the
+ * rest of the product and flips with the theme for free.
  */
 
 /** Axis tick size. Not a colour, but it belongs with the rest of the axis. */
@@ -41,16 +41,55 @@ export const AXIS_INK_CLASS = '[&_.recharts-cartesian-axis-tick-value]:fill-slat
 export const MONEY_INK_CLASS = 'text-emerald-600 dark:text-emerald-400';
 
 /**
- * The SECOND series, as a custom property rather than a hex, so it flips with
- * the theme the same way everything else does. Slate: commission is a share of
- * a figure that is already on the chart, not a fifth kind of money, and the
- * dashed stroke it is drawn with means the two series are separable without
- * reading colour at all.
+ * The SECOND series, as a custom property so it flips with the theme the same
+ * way everything else does. Slate: commission is a share of a figure that is
+ * already on the chart, not a fifth kind of money, and the dashed stroke it is
+ * drawn with means the two series are separable without reading colour at all.
+ *
+ * IT NAMES THE RAMP'S CUSTOM PROPERTY DIRECTLY RATHER THAN GOING THROUGH
+ * `theme()`. To be precise about why, because the obvious reason is wrong: the
+ * `theme()` spelling this replaced DOES still work. Verified against the built
+ * stylesheet rather than assumed — inside an arbitrary property Tailwind
+ * resolves `theme('colors.slate.500')` and substitutes `1` for the
+ * `<alpha-value>` slot, emitting `--series-2: oklch(var(--n-500) / 1)`.
+ *
+ * It is changed anyway because `theme()` for a colour is now context-dependent
+ * in a way that is easy to get wrong: the same call inside src/index.css, where
+ * it is plain CSS rather than a utility, yields a literal `<alpha-value>` and a
+ * declaration the browser drops — which is why tailwind.config.js tells you not
+ * to reintroduce it and why index.css names the properties directly throughout.
+ * One spelling, one behaviour, and this line reads the same as the stylesheet
+ * beside it. The output is identical bar an explicit `/ 1`.
  */
 export const SECOND_INK_VARS =
-  '[--series-2:theme(colors.slate.500)] dark:[--series-2:theme(colors.slate.400)]';
+  '[--series-2:oklch(var(--n-500))] dark:[--series-2:oklch(var(--n-400))]';
 export const SECOND_INK_SWATCH = 'bg-slate-500 dark:bg-slate-400';
 export const MONEY_INK_SWATCH = 'bg-emerald-600 dark:bg-emerald-400';
+
+/**
+ * THE AXIS PROPS EVERY CHART IN THIS CONSOLE SHOULD SPREAD, and the reason they
+ * are exported rather than left to each page: under 400px a recharts axis stops
+ * being an axis unless it is told not to.
+ *
+ * `minTickGap` is what does the work. Without it recharts draws every label
+ * whatever the width, so on a phone fourteen dates overlap into a grey smear.
+ * With it, labels are dropped until each has 28px of clearance — fewer ticks,
+ * all legible. `preserveStartEnd` guarantees the first and last survive that
+ * culling, which are the two the reader needs in order to know what window they
+ * are looking at.
+ *
+ * `Y_AXIS_WIDTH` is 40 rather than the 56 the console's charts used: on a 320px
+ * plot, 56px of gutter was taking a sixth of the chart to print four labels.
+ */
+export const X_AXIS_PROPS = {
+  tick: { fontSize: AXIS_TICK_SIZE },
+  tickLine: false,
+  axisLine: false,
+  interval: 'preserveStartEnd' as const,
+  minTickGap: 28,
+};
+
+export const Y_AXIS_WIDTH = 40;
 
 interface Tip {
   tipHead: string;
@@ -67,6 +106,16 @@ interface Tip {
  * and flips like everything else. Each datum carries its own pre-formatted
  * `tipHead`/`tipValue`, so formatting lives with the data and no chart needs a
  * bespoke formatter.
+ *
+ * `.surface` + `shadow-float` rather than a hand-written border and fill: a
+ * tooltip genuinely IS a sheet raised above the page — the floating plane — so
+ * it is the one readout in this file that gets the heavy cast. It is NOT
+ * `.glass`, because glass costs a backdrop repaint per frame and this element
+ * moves with the pointer.
+ *
+ * A TOOLTIP IS NEVER THE ONLY WAY TO A VALUE. Touch has no hover, so anything
+ * reachable only through this is unreachable on a phone — pair every chart with
+ * a `<ChartKey>` or a ledger underneath it.
  */
 export function ChartTip({
   active,
@@ -78,7 +127,7 @@ export function ChartTip({
   const d = active ? payload?.[0]?.payload : undefined;
   if (!d?.tipHead) return null;
   return (
-    <div className="rounded border border-slate-200 bg-white px-3 py-2 shadow-soft dark:border-slate-700 dark:bg-slate-900">
+    <div className="surface px-3 py-2 shadow-float">
       <span className="runhead">{d.tipHead}</span>
       <p className="num mt-1 text-sm font-medium text-slate-900 dark:text-slate-50">
         {d.tipValue}
@@ -99,7 +148,10 @@ export function ChartEmpty({ children }: { children: ReactNode }) {
   );
 }
 
-/** The key that replaces recharts' `<Legend>`, so a series name is never a colour alone. */
+/**
+ * The key that replaces recharts' `<Legend>`, so a series name is never a colour
+ * alone — and so its values exist somewhere a finger can reach them.
+ */
 export function ChartKey({
   items,
 }: {

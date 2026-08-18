@@ -81,23 +81,42 @@ const GROUPS: NavGroup[] = [
 ];
 
 /**
- * The console's SPINE, set as a broadsheet index.
+ * THE RAIL.
  *
- * It used to be a white panel of nine rounded pills floating on the page. Now it
- * is a column of the same sheet the content is printed on — one vertical
- * hairline divides them, each section is opened by a horizontal rule and named
- * by a running head, and destinations are ruled entries rather than boxes. That
- * is the treatment the merchant panel's spine already uses, which is the whole
- * point of this phase: no visible seam between the two windows of one product.
+ * It sits on the CANVAS plane, not the surface plane: no fill, no shadow, one
+ * hairline separating it from the page. That is deliberate and it is what makes
+ * the depth field read as continuous behind the whole app — a filled rail would
+ * cut a rectangle out of the atmosphere and the illusion would end at its edge.
+ * The outgoing version painted slate-50 / slate-950 straight onto
+ * the column, which is exactly that rectangle; the fill now survives only below
+ * `lg`, where the rail is a DRAWER over the page and needs to be opaque so the
+ * route behind it does not read through.
  *
- * WORKING DENSITY, NOT EDITORIAL THEATRE. An operator opens this dozens of times
- * a day, so nothing here has a hero, nothing enters on mount, and the rules buy
- * their whitespace at 12px, not 48px.
+ * WORKING DENSITY, NOT THEATRE. An operator opens this dozens of times a day, so
+ * nothing here has a hero, nothing enters on mount, and the groups buy their
+ * whitespace at 12px rather than 48.
  *
- * THE ACTIVE ITEM IS MARKED THREE WAYS — a brand rail in the margin, ink type
- * where the rest of the list is secondary, and `aria-current="page"`, which
- * NavLink sets for us. Brand is correct on that rail: this is navigation, a
- * thing you act on, not a state. Colour is never the only carrier.
+ * THE ACTIVE ITEM IS MARKED THREE WAYS — a lit rail in the margin, a brand wash
+ * behind the row, and `aria-current="page"`, which NavLink sets for us. Colour
+ * is never the only carrier.
+ *
+ * ON MOBILE it is a drawer, and VISIBILITY IS PART OF THE DRAWER rather than
+ * just its transform. Off-screen is not hidden: the closed drawer kept all nine
+ * links in the tab order, so a keyboard operator tabbed through an invisible nav
+ * before reaching the page. `invisible` fixes that, and transitioning it
+ * alongside the transform is what keeps the slide-out visible — a discrete
+ * property flips at the START going visible and at the END going hidden, which
+ * is exactly the behaviour a drawer wants.
+ *
+ * 180ms: a drawer must travel its own width, so the 8px cap in the motion law
+ * cannot apply to it — the DURATION budget does, and this sits under it. It is
+ * user-initiated, off-screen-only, and never runs on desktop.
+ *
+ * SAFE AREAS. The drawer is `fixed inset-y-0`, so on a notched phone it spans
+ * the notch and the home indicator. It pays the top, bottom and left insets
+ * itself; without the bottom one the last nav item sits in the home-indicator
+ * strip, which is the classic drawer bug and is invisible until someone with a
+ * modern iPhone tries to tap "Webhook logs".
  */
 export default function Sidebar({
   open,
@@ -117,73 +136,72 @@ export default function Sidebar({
     <>
       {open && (
         <div
-          className="fixed inset-0 z-30 bg-slate-950/60 backdrop-blur-sm lg:hidden"
+          className="fixed inset-0 z-30 bg-slate-950/70 backdrop-blur-sm lg:hidden"
           onClick={onClose}
           aria-hidden
         />
       )}
 
-      {/*
-        THE COLUMN RULE. `border-r` is the only thing separating the spine from
-        the page — same ground, same paper, one hairline. A panel colour and a
-        shadow would say "this is a different surface", which is not true.
-
-        VISIBILITY IS PART OF THE DRAWER, not just its transform. Off-screen is
-        not hidden: the closed mobile drawer kept every link in the tab order, so
-        a keyboard operator tabbed through an invisible nav before reaching the
-        page. Transitioning `visibility` alongside the transform is what keeps
-        the slide-out visible — a discrete property flips at the START going
-        visible and at the END going hidden, which is exactly what a drawer
-        wants. `lg:visible` wins on desktop, where the element is static.
-
-        180ms: a drawer must travel its own width, so the 8px cap in the motion
-        law cannot apply to it — the DURATION budget does, and this sits under
-        it. It is user-initiated, off-screen-only, and never runs on desktop.
-      */}
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-slate-200 bg-slate-50 transition-[transform,visibility] duration-[var(--dur-pop)] ease-[var(--ease-out)] lg:visible lg:static lg:translate-x-0 dark:border-slate-800 dark:bg-slate-950 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-[17rem] flex-col border-r border-[var(--line-soft)] bg-[var(--ground)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pt-[env(safe-area-inset-top)] transition-[transform,visibility] duration-[var(--dur-pop)] ease-[var(--ease-out)] lg:visible lg:static lg:z-10 lg:translate-x-0 lg:bg-transparent ${
           open ? 'visible translate-x-0' : 'invisible -translate-x-full'
         }`}
         aria-label="Main"
       >
-        {/* The flag. Same 4rem height and same closing hairline as the topbar
-            beside it, so the rule runs unbroken across the top of the app and
-            reads as one masthead rather than two panels that happen to align.
+        {/* The flag, on the same 4rem line as the topbar beside it so the two
+            read as one masthead rather than as two panels that happen to align.
 
-            Asset-neutral mark: the ₮ tile and the "USDT · BEP20" subtitle both
-            predate ERC20, Bitcoin and the native coins — an operator
-            reconciling a BTC payout should not be told this is a USDT gateway. */}
-        <div className="flex h-16 shrink-0 items-center justify-between gap-2 border-b border-slate-200 px-5 dark:border-slate-800">
+            THE TILE IS A LIGHT SOURCE, NOT AN ELEVATED OBJECT, which is why it
+            carries a coloured bloom rather than a grey shadow. The z-plane law
+            says nothing outside the floating plane casts — but a bloom is not a
+            cast, it is the light the mark itself throws, and it is the same
+            statement `.rail-brand` makes further down this file. Brand -> accent
+            is the sanctioned travel for it, and the gradient and the ring are
+            copied from the merchant panel's BrandMark rather than reinvented:
+            the two apps must show one mark.
+
+            Asset-neutral glyph: the ₮ tile this replaced predated ERC20, Bitcoin
+            and the native coins, and an operator reconciling a BTC payout should
+            not be told this is a USDT gateway. */}
+        <div className="flex h-16 shrink-0 items-center justify-between gap-2 px-4">
           <div className="flex min-w-0 items-center gap-2.5">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 text-white">
+            <span
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-brand-500 to-accent-600 text-white shadow-[0_0_0_1px_oklch(var(--b-400)/0.35),0_6px_18px_-8px_oklch(var(--b-500)/0.85)]"
+              aria-hidden
+            >
               <PayCrypoMark size={17} />
-            </div>
-            <div className="min-w-0 leading-tight">
-              <p className="truncate text-sm font-semibold text-slate-900 dark:text-slate-50">
+            </span>
+            <span className="min-w-0 leading-tight">
+              <span className="block truncate text-[15px] font-semibold text-slate-900 dark:text-slate-50">
                 {BRAND_NAME}
-              </p>
-              <p className="truncate text-[11px] text-slate-500 dark:text-slate-400">
+              </span>
+              <span className="block truncate text-[11px] text-slate-500 dark:text-slate-400">
                 {BRAND_CONSOLE_LABEL}
-              </p>
-            </div>
+              </span>
+            </span>
           </div>
+          {/* 44px, not the 26px a `p-1` around an 18px glyph computed to. This
+              control only exists on a touch device, so there is no pointer case
+              to relax it for. */}
           <button
             type="button"
             onClick={onClose}
-            className="-mr-1 rounded-md p-1 text-slate-500 outline-none transition-colors duration-[var(--dur-press)] hover:text-slate-900 focus-visible:ring-2 focus-visible:ring-brand-500 lg:hidden dark:text-slate-400 dark:hover:text-slate-100"
+            className="-mr-1 grid h-11 w-11 shrink-0 place-items-center rounded-lg text-slate-500 transition-colors duration-[var(--dur-press)] hover:bg-[var(--hover)] hover:text-slate-900 lg:hidden dark:text-slate-400 dark:hover:text-slate-100"
             aria-label="Close menu"
           >
-            <X size={18} />
+            <X size={18} aria-hidden />
           </button>
         </div>
 
-        {/* The index. Entries range to the ends of the column so the hover band
-            and the active rail meet the rules, the way a ledger row does. */}
-        <nav className="flex-1 overflow-y-auto pb-4">
+        {/* The index. `px-3` on the nav rather than full-bleed rows: the active
+            wash is now a rounded lozenge behind the row, so it needs a margin to
+            be a shape at all — which is the whole difference between "a lit
+            object marking where you are" and "a tinted stripe". */}
+        <nav className="flex-1 overflow-y-auto px-3 pb-4">
           {sections.map((group, gi) => (
-            <div key={group.heading} className={gi === 0 ? 'pt-4' : 'rule mt-3 pt-3'}>
-              <p className="runhead px-5">{group.heading}</p>
-              <div className="mt-1.5">
+            <div key={group.heading} className={gi === 0 ? '' : 'mt-4'}>
+              <p className="runhead px-3 pb-1.5">{group.heading}</p>
+              <div className="space-y-0.5">
                 {group.items.map((item) => (
                   <NavItemLink key={item.to} item={item} onClose={onClose} />
                 ))}
@@ -194,18 +212,22 @@ export default function Sidebar({
 
         {/* The colophon. Which role you are signed in as decides what half this
             console will let you do, so it is a standing fact about the session
-            rather than a decoration — set as one line of ink under a running
-            head. */}
-        <div className="rule shrink-0 px-5 py-3.5">
-          <h2 className="runhead">Signed in as</h2>
-          <p className="mt-1.5 text-xs capitalize leading-relaxed text-slate-700 dark:text-slate-300">
-            {role?.replace('_', ' ') ?? 'Unknown role'}
+            rather than a decoration. It sits in a `--surface-2` well rather than
+            over a `.rule`, for the reason the whole redesign exists: a rule
+            printed on the canvas gives the eye nothing to land on, and this is
+            the one piece of standing state on the rail. */}
+        <div className="shrink-0 px-3 pb-4">
+          <div className="rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3.5 py-3">
+            <h2 className="runhead">Signed in as</h2>
+            <p className="mt-1.5 text-xs capitalize leading-relaxed text-slate-700 dark:text-slate-300">
+              {role?.replace('_', ' ') ?? 'Unknown role'}
+            </p>
             {role === 'ops' && (
-              <span className="block text-slate-500 dark:text-slate-400">
+              <p className="mt-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
                 Read-only for client and commission changes
-              </span>
+              </p>
             )}
-          </p>
+          </div>
         </div>
       </aside>
     </>
@@ -213,16 +235,25 @@ export default function Sidebar({
 }
 
 /**
- * One entry in the index.
+ * One entry in the rail.
  *
- * No pill, no tint, no radius: a destination is a line of type, and the only
- * ornament it gets is the 2px brand rail that appears when you are standing on
- * it. The rail scales from its centre — transform only, 120ms — so it draws
- * rather than resizes, and it is keyed to the ROUTE changing rather than to this
- * component mounting, which is what the data-driven law asks for.
+ * `.nav-item` / `.nav-item-on` rather than a hand-written stack of utilities.
+ * That class has existed in index.css the whole time and was dead CSS in both
+ * panels, which is also how this row's touch target ended up at ~36px: the
+ * class carries `min-height: 38px` and nothing was applying it.
  *
- * The hover band is deliberately the same slate-100 the ledger's clickable rows
- * use, full-bleed to the column rules. One hover language across the product.
+ * 44px BELOW `lg`, 38px FROM IT. The drawer is the only place this row is ever
+ * touched — above `lg` the rail is a static column beside a pointer — so the
+ * thumb floor is paid exactly where a thumb exists, and on desktop the row is
+ * byte-identical to the merchant panel's. This is the same relaxation `.btn`
+ * and `.input` make, at the breakpoint where the drawer stops being a drawer
+ * rather than at `sm`.
+ *
+ * The lit rail in the margin is drawn with `scaleY` from the centre — transform
+ * only, 120ms — so it DRAWS rather than resizes, and it is keyed to the ROUTE
+ * changing rather than to this component mounting, which is what the data-driven
+ * motion law asks for. `-left-3` reaches back through the nav's own `px-3` so
+ * the rail lands on the column edge while the lozenge keeps its margin.
  */
 function NavItemLink({ item, onClose }: { item: NavItem; onClose: () => void }) {
   const { to, label, icon: Icon, end } = item;
@@ -232,26 +263,22 @@ function NavItemLink({ item, onClose }: { item: NavItem; onClose: () => void }) 
       end={end}
       onClick={onClose}
       className={({ isActive }) =>
-        `group relative flex items-center gap-3 px-5 py-2 text-sm outline-none transition-colors duration-[var(--dur-press)] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500 ${
-          isActive
-            ? 'font-medium text-slate-900 dark:text-slate-50'
-            : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100'
-        }`
+        `nav-item group min-h-11 lg:min-h-[38px] ${isActive ? 'nav-item-on' : ''}`
       }
     >
       {({ isActive }) => (
         <>
           <span
-            className={`absolute inset-y-0 left-0 w-0.5 origin-center rail-brand transition-transform duration-[var(--dur-press)] ease-[var(--ease-out)] ${
+            className={`rail-brand absolute inset-y-1.5 -left-3 w-[3px] origin-center rounded-r-full transition-transform duration-[var(--dur-press)] ease-[var(--ease-out)] ${
               isActive ? 'scale-y-100' : 'scale-y-0'
             }`}
             aria-hidden
           />
           <Icon
             size={16}
-            className={`shrink-0 ${
+            className={`shrink-0 transition-colors ${
               isActive
-                ? 'text-slate-900 dark:text-slate-50'
+                ? 'text-brand-600 dark:text-brand-400'
                 : 'text-slate-400 group-hover:text-slate-500 dark:group-hover:text-slate-300'
             }`}
             aria-hidden
