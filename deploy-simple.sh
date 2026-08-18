@@ -20,6 +20,12 @@ die(){ printf '\033[1;31m[fail]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # REQUIRED in $SRC_ENV. Refuses to invent a mnemonic — losing it loses every
 # deposit, so it must be a value you generated and backed up offline.
+# Running the whole script as root is what breaks this deploy: $HOME becomes
+# /root, .env is written root:root 600, and PM2 then runs as ubuntu and cannot
+# read a single variable — the app restart-loops reporting every var Required.
+# sudo is called where it is actually needed, and nowhere else.
+[ "$(id -u)" -ne 0 ] || die "Do not run this with sudo. Run it as your normal user: bash $(basename "$0")"
+
 [ -f "$SRC_ENV" ] || die "Missing $SRC_ENV. It must contain HD_WALLET_MNEMONIC, CENTRAL_WALLET_ADDRESS, GAS_STATION_PRIVATE_KEY."
 grep -q '^HD_WALLET_MNEMONIC=' "$SRC_ENV" || die "$SRC_ENV has no HD_WALLET_MNEMONIC."
 sudo -n true 2>/dev/null || die "passwordless sudo is not working — fix that first (see /etc/sudoers.d/90-cloud-init-users)."
@@ -72,7 +78,22 @@ set_env REDIS_URL "redis://localhost:6379/0"
 set_env PUBLIC_PANEL_URL "https://$CLIENT_DOMAIN"
 grep -q '^JWT_SECRET=.\{16,\}' "$ENV" || set_env JWT_SECRET "$(openssl rand -hex 32)"
 grep -qE '^MASTER_ENCRYPTION_KEY=[0-9a-fA-F]{64}$' "$ENV" || set_env MASTER_ENCRYPTION_KEY "$(openssl rand -hex 32)"
+chown "$USER":"$USER" "$ENV" 2>/dev/null || sudo chown "$USER":"$USER" "$ENV"
 chmod 600 "$ENV"
+
+# Verify the env actually landed and is readable BY THIS USER before spending
+# five minutes building against it. The failure this catches is silent: the app
+# boots, dotenv finds nothing, and every var reports "Required" as though the
+# file had never been written.
+[ -r "$ENV" ] || die "$ENV is not readable by $USER — check ownership."
+missing=""
+for v in DATABASE_URL REDIS_URL JWT_SECRET MASTER_ENCRYPTION_KEY BSC_HTTP_RPC \
+         USDT_CONTRACT HD_WALLET_MNEMONIC CENTRAL_WALLET_ADDRESS; do
+  grep -q "^$v=." "$ENV" || missing="$missing $v"
+done
+[ -z "$missing" ] || die "$ENV is missing required values:$missing
+Add them to $SRC_ENV and re-run."
+echo "env ok — all required values present and readable by $USER"
 
 say "7/9  Migrations (every file, in order — order matters)"
 export PGPASSWORD="$PG_PW"
