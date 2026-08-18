@@ -94,13 +94,13 @@ for p in client-panel admin-panel; do
 done
 cd "$APP"
 pm2 delete cg-api cg-worker cg-listener cg-listener-tron cg-listener-eth cg-listener-btc >/dev/null 2>&1 || true
-pm2 start backend/dist/index.js                       --name cg-api           --cwd "$APP/backend"
-pm2 start backend/dist/workers/index.js               --name cg-worker        --cwd "$APP/backend"
+pm2 start "$APP/backend/dist/index.js" --name cg-api           --cwd "$APP/backend"
+pm2 start "$APP/backend/dist/workers/index.js" --name cg-worker        --cwd "$APP/backend"
 # ONE instance each — every listener is the sole writer of its own chain cursor.
-pm2 start backend/dist/blockchain/listener.js         --name cg-listener      --cwd "$APP/backend"
-pm2 start backend/dist/blockchain/tronListener.js     --name cg-listener-tron --cwd "$APP/backend"
-pm2 start backend/dist/blockchain/ethListener.js      --name cg-listener-eth  --cwd "$APP/backend"
-pm2 start backend/dist/blockchain/bitcoinListener.js  --name cg-listener-btc  --cwd "$APP/backend"
+pm2 start "$APP/backend/dist/blockchain/listener.js" --name cg-listener      --cwd "$APP/backend"
+pm2 start "$APP/backend/dist/blockchain/tronListener.js" --name cg-listener-tron --cwd "$APP/backend"
+pm2 start "$APP/backend/dist/blockchain/ethListener.js" --name cg-listener-eth  --cwd "$APP/backend"
+pm2 start "$APP/backend/dist/blockchain/bitcoinListener.js" --name cg-listener-btc  --cwd "$APP/backend"
 pm2 save; sudo env PATH="$PATH" pm2 startup systemd -u "$USER" --hp "$HOME" >/dev/null
 
 say "9/9  Apache + TLS"
