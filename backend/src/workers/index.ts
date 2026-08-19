@@ -20,6 +20,7 @@ import { bullConnectionOptions } from '../db/redis';
 import { config } from '../config/env';
 import { logger } from '../config/logger';
 import { query, queryOne } from '../db/pool';
+import { reapExpiredApprovals } from '../services/loginApprovalService';
 import {
   QUEUE_NAMES,
   scheduleExpiryJob,
@@ -577,6 +578,22 @@ async function processExpiry(): Promise<void> {
         'merchants will never be told, and the rows are already `expired` so no ' +
         'later tick re-selects them',
     );
+  }
+
+  // Housekeeping for login_approvals, ridden along on the existing minute tick
+  // rather than given a queue of its own: it is one DELETE with no fan-out and
+  // no webhooks, and a second repeatable would be more moving parts than the
+  // job deserves.
+  //
+  // Nothing depends on this running. An un-reaped row is inert — every
+  // statement in loginApprovalService filters on `expires_at > now()`, so a
+  // stale row cannot authorise anything. This keeps the table from growing
+  // without bound, which is a disk concern, not a security one.
+  try {
+    const reaped = await reapExpiredApprovals();
+    if (reaped > 0) logger.debug({ reaped }, 'expiry: reaped login approvals');
+  } catch (err) {
+    logger.warn({ err }, 'expiry: login-approval reap failed');
   }
 }
 

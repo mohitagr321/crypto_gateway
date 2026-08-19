@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { login as apiLogin, setUnauthorizedHandler, tokenStore } from '@/lib/api';
-import type { LoginInput } from '@/types';
+import type { LoginInput, LoginResponse } from '@/types';
 
 interface JwtClaims {
   sub?: string;
@@ -36,7 +36,14 @@ interface AuthContextValue {
   mfaRequired: boolean;
   /** false while a self-registered merchant has not clicked their email link. */
   emailVerified: boolean;
-  login: (input: LoginInput) => Promise<{ mfaRequired: boolean; emailVerified: boolean }>;
+  login: (input: LoginInput) => Promise<{
+    mfaRequired: boolean;
+    emailVerified: boolean;
+    /** Non-null when the sign-in is waiting on an emailed approval. */
+    approval: { challenge: string; sentTo: string; expiresAt: string } | null;
+  }>;
+  /** Adopt the session a pending approval finally produced. */
+  completeApproval: (res: LoginResponse) => boolean;
   /**
    * Adopt a token pair obtained WITHOUT a password — currently only from
    * /auth/verify-email, which signs the merchant in as part of confirming their
@@ -85,23 +92,65 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setEmailVerified(verified);
   }, []);
 
+  /**
+   * Adopt a token pair from any successful authentication. Shared by the direct
+   * login path and the approval-collect path so the two cannot drift in what
+   * they set up.
+   */
+  const acceptTokens = useCallback(
+    (res: LoginResponse) => {
+      // Older API builds omit the field; absent means "not applicable", not
+      // "unverified" — treat it as verified so nothing regresses.
+      const verified = res.emailVerified !== false;
+      tokenStore.set(res.accessToken!, res.refreshToken!);
+      setToken(res.accessToken!);
+      setMfaRequired(false);
+      markVerified(verified);
+      return verified;
+    },
+    [markVerified],
+  );
+
   const login = useCallback(
     async (input: LoginInput) => {
       const res = await apiLogin(input);
       if (res.mfaRequired && !input.mfaToken) {
         setMfaRequired(true);
-        return { mfaRequired: true, emailVerified: true };
+        return { mfaRequired: true, emailVerified: true, approval: null };
       }
-      // Older API builds omit the field; absent means "not applicable", not
-      // "unverified" — treat it as verified so nothing regresses.
-      const verified = res.emailVerified !== false;
-      tokenStore.set(res.accessToken, res.refreshToken);
-      setToken(res.accessToken);
-      setMfaRequired(false);
-      markVerified(verified);
-      return { mfaRequired: false, emailVerified: verified };
+
+      // THE PASSWORD WAS RIGHT AND THERE IS STILL NO SESSION. An email has gone
+      // to the account and the server is holding a pending request; the
+      // challenge is this browser's claim on it. It is returned to the caller
+      // and held in component state — never written to storage, because a
+      // persisted challenge would let a stolen browser profile finish somebody
+      // else's half-completed sign-in.
+      if (res.approvalRequired && res.challenge) {
+        setMfaRequired(false);
+        return {
+          mfaRequired: false,
+          emailVerified: true,
+          approval: {
+            challenge: res.challenge,
+            sentTo: res.sentTo ?? '',
+            expiresAt: res.expiresAt ?? '',
+          },
+        };
+      }
+
+      const verified = acceptTokens(res);
+      return { mfaRequired: false, emailVerified: verified, approval: null };
     },
-    [markVerified],
+    [acceptTokens],
+  );
+
+  /**
+   * Finish a sign-in that was waiting on an emailed approval. Called by the
+   * pending screen's poll on the one response that carries a session.
+   */
+  const completeApproval = useCallback(
+    (res: LoginResponse) => acceptTokens(res),
+    [acceptTokens],
   );
 
   const adoptSession = useCallback(
@@ -124,10 +173,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       mfaRequired,
       emailVerified,
       login,
+      completeApproval,
       adoptSession,
       logout,
     }),
-    [token, user, mfaRequired, emailVerified, login, adoptSession, logout],
+    [token, user, mfaRequired, emailVerified, login, completeApproval, adoptSession, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

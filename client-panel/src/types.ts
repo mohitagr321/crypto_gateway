@@ -122,14 +122,67 @@ export interface LoginInput {
   mfaToken?: string;
 }
 
+/**
+ * A login now has THREE possible outcomes, and the fields are optional because
+ * exactly one shape arrives:
+ *
+ *   mfaRequired      collect a TOTP and resubmit
+ *   approvalRequired the password was right; an email has gone to the account
+ *                    and the session is waiting on it. `challenge` is this
+ *                    browser's claim on that pending request — it is the only
+ *                    thing that can collect the session, and it must never
+ *                    leave this tab.
+ *   tokens           only when login approval is disabled server-side
+ */
 export interface LoginResponse {
-  accessToken: string;
-  refreshToken: string;
+  accessToken?: string;
+  refreshToken?: string;
   mfaRequired?: boolean;
   /** false for a self-registered merchant who has not clicked the email link. */
   emailVerified?: boolean;
   /** 'pending' until the email is verified; 'approved' once it is. */
   clientStatus?: string | null;
+
+  approvalRequired?: boolean;
+  challenge?: string;
+  expiresAt?: string;
+  /** "d****w@example.com" — which inbox to open, without printing the address. */
+  sentTo?: string;
+}
+
+/**
+ * A session that is GUARANTEED to exist. `/auth/verify-email` signs the merchant
+ * in as part of confirming their address and always returns a pair, so it keeps
+ * required fields rather than inheriting LoginResponse's optional ones — the
+ * call site should not have to assert what the route promises.
+ *
+ * Login approval does not apply there: clicking a link in a verification email
+ * already proves control of the mailbox, which is the same thing an approval
+ * asks for. Requiring a second email would be asking the same question twice.
+ */
+export interface SessionTokens {
+  accessToken: string;
+  refreshToken: string;
+  emailVerified?: boolean;
+  clientStatus?: string | null;
+}
+
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'consumed' | 'expired';
+
+/** The poll response. Carries the session on the one poll that finds it. */
+export interface CollectResponse extends LoginResponse {
+  status?: ApprovalStatus;
+}
+
+/** What the approval page renders — deliberately says nothing about the account. */
+export interface ApprovalRequest {
+  status: ApprovalStatus;
+  device: string | null;
+  deviceKind: string | null;
+  ip: string | null;
+  panel: string | null;
+  requestedAt: string;
+  expiresAt: string;
 }
 
 // ---- Self-registration ----

@@ -265,12 +265,29 @@ const EnvSchema = z.object({
   // Where the merchant-facing panel is served. Used ONLY to build the links in
   // outbound email — APP_BASE_URL points at the API, which is a different host.
   PUBLIC_PANEL_URL: z.string().url().default('http://localhost:5174'),
+  // Where the OPERATOR console is served. Same job as PUBLIC_PANEL_URL and a
+  // separate value because the two panels are separate deployments — a login
+  // approval for an admin must open the admin console, not the merchant one.
+  PUBLIC_ADMIN_URL: z.string().url().default('http://localhost:5173'),
   EMAIL_VERIFY_TTL_HOURS: numberish(24),
   PASSWORD_RESET_TTL_MINUTES: numberish(60),
   // Commission applied to a self-registered merchant at signup. An operator can
   // change it afterwards from the admin panel; the point is that a merchant is
   // never silently on 0%.
   SIGNUP_DEFAULT_COMMISSION_PERCENT: z.string().default('1'),
+
+  // ---- Login approval ----
+  // Every sign-in is confirmed from the account's own mailbox: a correct
+  // password opens a pending request and an email, and the session is issued
+  // only when that email is approved. See sql/migrations/027_login_approvals.sql.
+  //
+  // THE KILL SWITCH IS HERE FOR ONE REASON: this feature makes the mail
+  // transport load-bearing for authentication. A deployment whose provider is
+  // down can no longer sign anybody in, INCLUDING the operator who needs to get
+  // in and fix it. Turning this off is the documented way out of that, and it
+  // is why the flag exists rather than the behaviour being unconditional.
+  LOGIN_APPROVAL_ENABLED: boolish.default(true),
+  LOGIN_APPROVAL_TTL_MINUTES: numberish(10),
 
   // ---- Outbound email: Brevo (preferred) ----
   // Setting BREVO_API_KEY selects Brevo's transactional API and SMTP is not
@@ -412,6 +429,26 @@ const EnvSchema = z.object({
         path: ['SMTP_FROM'],
         message:
           'SIGNUP_ENABLED=true in production requires SMTP_FROM (the sender address).',
+      });
+    }
+  })
+  // The same guard for login approval, and it matters MORE than the signup one.
+  // A production gateway with LOGIN_APPROVAL_ENABLED and no transport cannot
+  // sign ANYBODY in — not a new merchant, not an existing one, and not the
+  // operator who would need to get in and turn the flag off. Signup failing
+  // strands new accounts; this locks the door with the keys inside.
+  .superRefine((e, ctx) => {
+    if (e.NODE_ENV !== 'production' || !e.LOGIN_APPROVAL_ENABLED) return;
+    if (e.BREVO_API_KEY) return;
+    if (!e.SMTP_HOST) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SMTP_HOST'],
+        message:
+          'LOGIN_APPROVAL_ENABLED=true in production requires an email transport — ' +
+          'set BREVO_API_KEY (preferred) or SMTP_HOST. Without one every sign-in ' +
+          'would fail, including yours. Set LOGIN_APPROVAL_ENABLED=false to run ' +
+          'password-only.',
       });
     }
   });
@@ -606,6 +643,13 @@ export const config = {
     max: env.RATE_LIMIT_MAX,
     signupMax: env.SIGNUP_RATE_LIMIT_MAX,
     apiKeyMax: env.API_KEY_RATE_LIMIT_MAX,
+  },
+
+  loginApproval: {
+    enabled: env.LOGIN_APPROVAL_ENABLED,
+    ttlMinutes: env.LOGIN_APPROVAL_TTL_MINUTES,
+    panelUrl: env.PUBLIC_PANEL_URL.replace(/\/+$/, ''),
+    adminUrl: env.PUBLIC_ADMIN_URL.replace(/\/+$/, ''),
   },
 
   signup: {

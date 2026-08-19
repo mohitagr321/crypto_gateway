@@ -523,3 +523,91 @@ export async function sendApiKeyCreatedEmail(opts: {
     { event: 'email.api_key_created' },
   );
 }
+
+/**
+ * THE LOGIN APPROVAL. The only email in this product that a person is expected
+ * to act on within minutes, and the only one where the CORRECT action is
+ * sometimes "reject".
+ *
+ * IT IS WRITTEN TO BE ANSWERED, NOT READ. Someone glancing at a phone
+ * notification needs to answer one question — "is this me?" — so the device,
+ * the address it came from and the time are stated as a plain table above the
+ * button, not buried in prose underneath it. A merchant who cannot tell what
+ * they are approving will approve it, which would make the whole mechanism
+ * theatre.
+ *
+ * BOTH ANSWERS ARE OFFERED, and reject is a real link rather than a "if this
+ * wasn't you, contact support" sentence. The moment someone reads this email is
+ * the moment they are best placed to act, and an attacker holding the password
+ * is still holding it after the reader closes the mail.
+ *
+ * NO ONE-CLICK APPROVE. The button opens a page in the panel that shows these
+ * same details and requires a press there. Mail providers fetch the links in a
+ * message to scan them, so a link that approved on sight would be approved by a
+ * robot before the human saw it — see the note in the 027 migration.
+ */
+export async function sendLoginApprovalEmail(opts: {
+  to: string;
+  panelUrl: string;
+  token: string;
+  deviceLabel: string;
+  deviceKind: string;
+  ip: string;
+  at: Date;
+  minutes: number;
+}): Promise<boolean> {
+  const url = `${opts.panelUrl}/login-approval?token=${encodeURIComponent(opts.token)}`;
+
+  // UTC, and labelled as UTC. The reader's timezone is not knowable from here,
+  // and an unlabelled local-looking time is the one detail that would make a
+  // legitimate sign-in look wrong (or worse, an illegitimate one look right).
+  const when = `${opts.at.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+
+  const row = (k: string, v: string) => `
+    <tr>
+      <td style="padding:6px 16px 6px 0;font-size:13px;color:#64748b;white-space:nowrap">${escapeHtml(k)}</td>
+      <td style="padding:6px 0;font-size:14px;color:#0f172a;font-weight:600">${escapeHtml(v)}</td>
+    </tr>`;
+
+  const details = `
+    <table role="presentation" cellpadding="0" cellspacing="0"
+           style="width:100%;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;margin:4px 0 4px">
+      ${row('Device', opts.deviceLabel)}
+      ${row('Type', opts.deviceKind)}
+      ${row('IP address', opts.ip)}
+      ${row('Requested', when)}
+    </table>`;
+
+  return send(
+    {
+      to: opts.to,
+      subject: `Approve sign-in to ${BRAND}`,
+      html: layout({
+        heading: 'Approve this sign-in',
+        body:
+          `Someone entered the correct password for your ${escapeHtml(BRAND)} account.
+           <strong>No one is signed in yet</strong> — that only happens if you approve it below.` +
+          details +
+          `<span style="color:#334155">If this was you, approve it. If it was not,
+           reject it and change your password immediately — someone else knows it.</span>`,
+        cta: { label: 'Review and approve', url },
+        footNote:
+          `This request expires in ${opts.minutes} minutes and can be answered once. ` +
+          `Approving and rejecting are both on the page the button opens. ` +
+          `Ignoring this email is safe: an unanswered request expires and no session is created.`,
+      }),
+      text:
+        `Approve this sign-in to ${BRAND}\n\n` +
+        `Someone entered the correct password for your account. No one is signed in yet —\n` +
+        `that only happens if you approve it.\n\n` +
+        `  Device:     ${opts.deviceLabel}\n` +
+        `  Type:       ${opts.deviceKind}\n` +
+        `  IP address: ${opts.ip}\n` +
+        `  Requested:  ${when}\n\n` +
+        `Approve or reject here:\n${url}\n\n` +
+        `If this was not you, reject it and change your password immediately — someone else knows it.\n` +
+        `This request expires in ${opts.minutes} minutes. Ignoring it is safe: nothing is created.`,
+    },
+    { event: 'auth.login_approval' },
+  );
+}

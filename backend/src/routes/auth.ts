@@ -49,6 +49,7 @@
  * other changes; migration 023 therefore deliberately stops at refresh_tokens.
  */
 import { Router } from 'express';
+import type { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import speakeasy from 'speakeasy';
 import { z } from 'zod';
@@ -60,8 +61,18 @@ import {
   signRefreshToken,
   verifyToken,
 } from '../middleware/jwtAuth';
-import { authRateLimiter } from '../middleware/rateLimit';
+import { authRateLimiter, loginPollLimiter } from '../middleware/rateLimit';
 import { writeAudit } from '../services/auditService';
+import { config } from '../config/env';
+import { parseUserAgent, formatIp } from '../utils/deviceInfo';
+import { sendLoginApprovalEmail, mailTransport } from '../services/emailService';
+import {
+  createApproval,
+  findByActionToken,
+  decide,
+  pollStatus,
+  consume,
+} from '../services/loginApprovalService';
 import { logger } from '../config/logger';
 import { redis } from '../db/redis';
 
@@ -173,36 +184,329 @@ router.post(
       await verifyMfaToken(user.id, user.mfa_secret, mfaToken);
     }
 
-    const claims = { sub: user.id, role: user.role_name, email: user.email };
-    const accessToken = signAccessToken(claims);
-    const refreshToken = signRefreshToken(claims);
+    // ---------------------------------------------------------------------
+    // THE PASSWORD IS NOT THE END OF THE FLOW.
+    //
+    // Everything above proves possession of the password (and of the second
+    // factor, where one exists). That now buys a PENDING REQUEST and an email
+    // to the address on the account — not a session. See
+    // sql/migrations/027_login_approvals.sql for why, and for why the emailed
+    // link cannot itself hand out tokens.
+    //
+    // Order matters here: the approval row is written and the mail is sent only
+    // AFTER the credentials check. Sending first would make this endpoint an
+    // email bomb aimed at any address an attacker cares to type, and the
+    // presence or absence of the mail would leak which accounts exist.
+    // ---------------------------------------------------------------------
+    if (config.loginApproval.enabled) {
+      const panel = user.role_name === 'merchant' ? 'merchant' : 'admin';
+      const device = parseUserAgent(req.get('user-agent'));
+      const ip = formatIp(req.ip);
 
-    // Start a new token family for this login. Failure here is logged, never
-    // fatal: an untracked token still works (see ALLOW_UNTRACKED_REFRESH), and
-    // refusing to log a user in because an audit row would not insert is the
-    // wrong trade.
-    await storeRefreshToken(user.id, refreshToken, null);
+      const { challenge, actionToken, expiresAt } = await createApproval({
+        userId: user.id,
+        ip,
+        userAgent: req.get('user-agent') ?? null,
+        device,
+        panel,
+      });
 
-    await query(`UPDATE users SET last_login_at = now() WHERE id = $1`, [user.id]);
-    await writeAudit({
-      actorUserId: user.id,
-      action: 'auth.login',
-      entityType: 'user',
-      entityId: user.id,
-      ip: req.ip,
+      // The link's HOST is chosen from the user's ROLE, never from anything in
+      // the request. A `panel` field in the body would be an attacker-supplied
+      // string interpolated into a URL inside an email we sign with our own
+      // domain, which is a phishing kit with extra steps.
+      const sent = await sendLoginApprovalEmail({
+        to: user.email,
+        panelUrl:
+          panel === 'admin'
+            ? config.loginApproval.adminUrl
+            : config.loginApproval.panelUrl,
+        token: actionToken,
+        deviceLabel: device.label,
+        deviceKind: device.kind,
+        ip,
+        at: new Date(),
+        minutes: config.loginApproval.ttlMinutes,
+      });
+
+      await writeAudit({
+        actorUserId: user.id,
+        action: 'auth.login_requested',
+        entityType: 'user',
+        entityId: user.id,
+        ip: req.ip,
+        metadata: { device: device.label, kind: device.kind, mailSent: sent },
+      });
+
+      // A FALSE RETURN MEANS TWO DIFFERENT THINGS, and conflating them breaks
+      // local development completely.
+      //
+      // With a real transport configured, false is a genuine delivery failure:
+      // the mail transport is load-bearing for authentication now, so reporting
+      // success would leave the browser polling for an approval link that
+      // nobody will ever receive. That has to be an explicit error.
+      //
+      // In LOG mode there is no transport by design — emailService renders the
+      // message to the log, returns false, and the whole signup flow is already
+      // documented as walkable that way by copying the link out of the console.
+      // Treating that as an outage would make it impossible to sign in at all
+      // on a developer machine. Production cannot reach this branch: the
+      // superRefine in config/env.ts refuses to boot with this feature enabled
+      // and no transport.
+      if (!sent && mailTransport() !== 'log') {
+        throw AppError.internal(
+          'Could not send the approval email. Try again, or contact support if this persists.',
+        );
+      }
+
+      res.status(200).json({
+        approvalRequired: true,
+        challenge,
+        expiresAt: expiresAt.toISOString(),
+        // Masked so the pending screen can say WHICH inbox to open without
+        // printing the full address on a screen an attacker may be looking at.
+        sentTo: maskEmail(user.email),
+        mfaRequired: false,
+      });
+      return;
+    }
+
+    await issueSession(req, res, {
+      id: user.id,
+      email: user.email,
+      role_name: user.role_name,
+      email_verified: user.email_verified,
+      client_status: user.client_status,
     });
+  }),
+);
 
-    // A self-registered merchant who has not clicked the verification link can
-    // still sign in — they land on a "confirm your email" screen with a resend
-    // button rather than a dead end. They cannot transact: the client row is
-    // still `pending`, which `requireApprovedClient` rejects.
+/**
+ * "m****t@example.com" — enough for the account holder to recognise their own
+ * inbox, not enough to be useful to somebody reading over their shoulder.
+ */
+function maskEmail(email: string): string {
+  const [local, domain] = email.split('@');
+  if (!domain) return '***';
+  const head = local.slice(0, 1);
+  const tail = local.length > 1 ? local.slice(-1) : '';
+  return `${head}${'*'.repeat(Math.max(1, local.length - 2))}${tail}@${domain}`;
+}
+
+/**
+ * Mint the session and reply. The single place tokens are issued for a
+ * password login, reached either directly (approval disabled) or from the
+ * collect step once an approval lands — so the two paths cannot drift in what
+ * they set up or what they return.
+ */
+async function issueSession(
+  req: Request,
+  res: Response,
+  user: {
+    id: string;
+    email: string;
+    role_name: string;
+    email_verified: boolean;
+    client_status: string | null;
+  },
+): Promise<void> {
+  const claims = { sub: user.id, role: user.role_name, email: user.email };
+  const accessToken = signAccessToken(claims);
+  const refreshToken = signRefreshToken(claims);
+
+  // Start a new token family for this login. Failure here is logged, never
+  // fatal: an untracked token still works (see ALLOW_UNTRACKED_REFRESH), and
+  // refusing to log a user in because an audit row would not insert is the
+  // wrong trade.
+  await storeRefreshToken(user.id, refreshToken, null);
+
+  await query(`UPDATE users SET last_login_at = now() WHERE id = $1`, [user.id]);
+  await writeAudit({
+    actorUserId: user.id,
+    action: 'auth.login',
+    entityType: 'user',
+    entityId: user.id,
+    ip: req.ip,
+  });
+
+  // A self-registered merchant who has not clicked the verification link can
+  // still sign in — they land on a "confirm your email" screen with a resend
+  // button rather than a dead end. They cannot transact: the client row is
+  // still `pending`, which `requireApprovedClient` rejects.
+  res.status(200).json({
+    accessToken,
+    refreshToken,
+    mfaRequired: false,
+    emailVerified: user.email_verified,
+    clientStatus: user.client_status,
+  });
+}
+
+/* ==========================================================================
+ * LOGIN APPROVAL
+ *
+ * Three endpoints, and the split between them is the security model rather
+ * than tidiness:
+ *
+ *   GET  /login/request   read-only, takes the EMAIL token. Renders the
+ *                         decision page. Safe for a mail scanner to fetch,
+ *                         because it changes nothing.
+ *   POST /login/decision  takes the EMAIL token. Approves or rejects. POST so
+ *                         that a scanner following links cannot trigger it.
+ *   POST /login/collect   takes the BROWSER challenge. Polls, and mints the
+ *                         session once the answer is "approved".
+ *
+ * Neither token can do the other's job. See the 027 migration.
+ * ======================================================================== */
+
+const ActionTokenSchema = z.object({ token: z.string().min(1).max(200) });
+const DecisionSchema = ActionTokenSchema.extend({
+  decision: z.enum(['approve', 'reject']),
+});
+const ChallengeSchema = z.object({ challenge: z.string().min(1).max(200) });
+
+/**
+ * What the approval page shows. Deliberately NOT the email address or anything
+ * else about the account: this endpoint is reachable by anyone holding the
+ * link, and the link travels through mail servers. It answers "what am I being
+ * asked to approve", nothing more.
+ */
+router.get(
+  '/login/request',
+  authRateLimiter,
+  asyncHandler(async (req: Request, res: Response) => {
+    const { token } = ActionTokenSchema.parse(req.query);
+    const row = await findByActionToken(token);
+
+    if (!row) {
+      throw AppError.notFound('This approval link is not valid.');
+    }
+
+    // An expired row still reports its real status so the page can distinguish
+    // "you already approved this" from "this timed out", which are different
+    // things for a reader deciding whether to worry.
+    const expired = row.status === 'pending' && row.expires_at.getTime() <= Date.now();
+
     res.status(200).json({
-      accessToken,
-      refreshToken,
-      mfaRequired: false,
-      emailVerified: user.email_verified,
-      clientStatus: user.client_status,
+      status: expired ? 'expired' : row.status,
+      device: row.device_label,
+      deviceKind: row.device_kind,
+      ip: row.ip,
+      panel: row.panel,
+      requestedAt: row.created_at,
+      expiresAt: row.expires_at,
     });
+  }),
+);
+
+/**
+ * The decision. POST-only, and that is load-bearing: Gmail, Outlook and most
+ * corporate mail gateways fetch the links in a message to scan them, so a GET
+ * that approved would be approved by a robot within seconds of delivery,
+ * before the account holder ever saw it.
+ *
+ * `decide` resolves the race in SQL — a double-tap, or an approve in one tab
+ * against a reject in another, produces exactly one winner and the loser gets
+ * null.
+ */
+router.post(
+  '/login/decision',
+  authRateLimiter,
+  asyncHandler(async (req: Request, res: Response) => {
+    const { token, decision } = DecisionSchema.parse(req.body);
+    const wanted = decision === 'approve' ? 'approved' : 'rejected';
+
+    const row = await decide(token, wanted);
+    if (!row) {
+      // Already answered, expired, or never existed. All three collapse to one
+      // message: telling the holder of a link WHICH it was would let them probe
+      // for live requests.
+      throw AppError.badRequest('This request has already been answered or has expired.');
+    }
+
+    await writeAudit({
+      actorUserId: row.user_id,
+      action: decision === 'approve' ? 'auth.login_approved' : 'auth.login_rejected',
+      entityType: 'user',
+      entityId: row.user_id,
+      ip: req.ip,
+      metadata: { device: row.device_label, requestIp: row.ip },
+    });
+
+    if (decision === 'reject') {
+      logger.warn(
+        { userId: row.user_id, requestIp: row.ip, device: row.device_label },
+        'login attempt rejected by account holder',
+      );
+    }
+
+    res.status(200).json({ status: wanted });
+  }),
+);
+
+/**
+ * The waiting browser's endpoint. Polled every couple of seconds while the
+ * pending screen is open, so it stays cheap: one indexed lookup, and a second
+ * statement only on the one poll that finds an approval.
+ *
+ * THE SESSION IS MINTED HERE, not at the moment of approval, and that is the
+ * point of the whole two-token split — the tokens are handed to whoever proved
+ * they knew the password, never to whoever opened the email. `consume` flips
+ * the row to 'consumed' in the same statement that authorises it, so a
+ * challenge replayed from two tabs yields one session.
+ */
+router.post(
+  '/login/collect',
+  // NOT authRateLimiter — this endpoint is polled every two seconds by a
+  // browser waiting for an approval, which the auth limiter would cut off
+  // within the first fifteen seconds. See the note on loginPollLimiter.
+  loginPollLimiter,
+  asyncHandler(async (req: Request, res: Response) => {
+    const { challenge } = ChallengeSchema.parse(req.body);
+    const status = await pollStatus(challenge);
+
+    if (status !== 'approved') {
+      // 200 for every non-approved state: this is a poll, and a browser polling
+      // a pending request every two seconds should not be generating a stream
+      // of 4xx in the logs of a security-relevant endpoint.
+      res.status(200).json({ status });
+      return;
+    }
+
+    const claimed = await consume(challenge);
+    if (!claimed) {
+      // Lost a race with another tab, or the row aged out between the two
+      // statements. Both mean there is no session to hand over.
+      res.status(200).json({ status: 'expired' });
+      return;
+    }
+
+    const user = await queryOne<{
+      id: string;
+      email: string;
+      role_name: string;
+      status: string;
+      email_verified: boolean;
+      client_status: string | null;
+    }>(
+      `SELECT u.id, u.email, r.name AS role_name, u.status, u.email_verified,
+              c.status::text AS client_status
+         FROM users u
+         JOIN roles r ON r.id = u.role_id
+         LEFT JOIN clients c ON c.user_id = u.id
+        WHERE u.id = $1`,
+      [claimed.userId],
+    );
+
+    // Re-checked at COLLECT, not just at login. An account suspended during the
+    // minutes between entering the password and approving the email must not
+    // get a session out of the approval — the status check at the top of /login
+    // is already stale by then.
+    if (!user || user.status !== 'active') {
+      throw AppError.unauthorized('This account is not active.');
+    }
+
+    await issueSession(req, res, user);
   }),
 );
 

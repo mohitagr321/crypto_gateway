@@ -32,6 +32,9 @@ import type {
   CreatePayoutInput,
   LoginInput,
   LoginResponse,
+  CollectResponse,
+  ApprovalRequest,
+  SessionTokens,
   OnboardingState,
   Paginated,
   Payment,
@@ -149,6 +152,44 @@ export async function login(input: LoginInput): Promise<LoginResponse> {
   return data;
 }
 
+/**
+ * Poll a pending sign-in. Returns `{ status }` until the account holder answers
+ * the email, and the session on the one call that finds an approval.
+ *
+ * The challenge is this browser's claim on the request and is deliberately NOT
+ * persisted anywhere — it lives in component state for the life of the pending
+ * screen. Writing it to localStorage would make a stolen browser profile enough
+ * to complete somebody else's half-finished login.
+ */
+export async function collectLogin(challenge: string): Promise<CollectResponse> {
+  const { data } = await http.post<CollectResponse>('/auth/login/collect', { challenge });
+  return data;
+}
+
+/** Read-only: what the approval page shows. Safe for a mail scanner to fetch. */
+export async function getApprovalRequest(token: string): Promise<ApprovalRequest> {
+  const { data } = await http.get<ApprovalRequest>('/auth/login/request', {
+    params: { token },
+  });
+  return data;
+}
+
+/**
+ * Answer a sign-in request. POST, and that is the point — mail providers fetch
+ * the links in a message to scan them, so a GET here would be answered by a
+ * robot before the account holder saw the email.
+ */
+export async function decideApproval(
+  token: string,
+  decision: 'approve' | 'reject',
+): Promise<{ status: string }> {
+  const { data } = await http.post<{ status: string }>('/auth/login/decision', {
+    token,
+    decision,
+  });
+  return data;
+}
+
 // ---- Self-registration ----
 // Note: register / resendVerification / forgotPassword all resolve to the SAME
 // acknowledgement whether or not the address exists. That is deliberate on the
@@ -171,8 +212,8 @@ export async function register(input: RegisterInput): Promise<AcceptedResponse> 
   return data;
 }
 
-export async function verifyEmail(token: string): Promise<LoginResponse> {
-  const { data } = await http.post<LoginResponse>('/auth/verify-email', { token });
+export async function verifyEmail(token: string): Promise<SessionTokens> {
+  const { data } = await http.post<SessionTokens>('/auth/verify-email', { token });
   return data;
 }
 

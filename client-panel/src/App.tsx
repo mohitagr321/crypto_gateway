@@ -45,6 +45,10 @@ const CheckEmail = lazy(() => import('./pages/public/CheckEmail'));
 const VerifyEmail = lazy(() => import('./pages/public/VerifyEmail'));
 const ForgotPassword = lazy(() => import('./pages/public/ForgotPassword'));
 const ResetPassword = lazy(() => import('./pages/public/ResetPassword'));
+// The page the login-approval email opens. Public and unauthenticated by
+// necessity: the whole point is that it is reachable by someone who is NOT
+// signed in — they are deciding whether a session gets created at all.
+const LoginApproval = lazy(() => import('./pages/public/LoginApproval'));
 // Hosted checkout. Its own route with NO chrome and no auth: a customer paying
 // a link has no account and must never be redirected to a login screen.
 const Checkout = lazy(() => import('./pages/public/Checkout'));
@@ -80,6 +84,7 @@ export default function App() {
               <Route path="/verify-email" element={<VerifyEmail />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
               <Route path="/reset-password" element={<ResetPassword />} />
+              <Route path="/login-approval" element={<LoginApproval />} />
 
               {/* ---- Hosted checkout (public, unauthenticated) ---- */}
               <Route path="/pay/:token" element={<Checkout />} />

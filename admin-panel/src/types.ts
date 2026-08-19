@@ -11,11 +11,45 @@ export interface AuthUser {
   name?: string;
 }
 
+/**
+ * A login has three possible outcomes; exactly one shape arrives.
+ *
+ *   mfaRequired      collect a TOTP and resubmit
+ *   approvalRequired the password was right; an email has gone to the account
+ *                    and the session is waiting on it. `challenge` is this
+ *                    browser's claim on that pending request and must never
+ *                    leave the tab.
+ *   tokens           only when login approval is disabled server-side
+ */
 export interface LoginResponse {
   accessToken?: string;
   refreshToken?: string;
   mfaRequired?: boolean;
   user?: AuthUser;
+
+  approvalRequired?: boolean;
+  challenge?: string;
+  expiresAt?: string;
+  /** "a****n@example.com" — which inbox to open, without printing the address. */
+  sentTo?: string;
+}
+
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'consumed' | 'expired';
+
+/** The poll response. Carries the session on the one poll that finds it. */
+export interface CollectResponse extends LoginResponse {
+  status?: ApprovalStatus;
+}
+
+/** What the approval page renders — deliberately says nothing about the account. */
+export interface ApprovalRequest {
+  status: ApprovalStatus;
+  device: string | null;
+  deviceKind: string | null;
+  ip: string | null;
+  panel: string | null;
+  requestedAt: string;
+  expiresAt: string;
 }
 
 // ---- Clients ----

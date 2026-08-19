@@ -14,9 +14,10 @@ import {
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import AuthShell, { Notice } from '@/components/AuthShell';
+import AwaitingApproval from '@/components/AwaitingApproval';
 import { getSignupStatus } from '@/lib/api';
 import type { ApiError } from '@/lib/api';
-import type { LoginInput } from '@/types';
+import type { LoginInput, LoginResponse } from '@/types';
 
 /**
  * Merchant sign-in.
@@ -77,11 +78,16 @@ interface LocationState {
 }
 
 export default function Login() {
-  const { isAuthenticated, login, mfaRequired } = useAuth();
+  const { isAuthenticated, login, completeApproval, mfaRequired } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [approval, setApproval] = useState<{
+    challenge: string;
+    sentTo: string;
+    expiresAt: string;
+  } | null>(null);
   const [showPassword, setShowPassword] = useState(false);
 
   const { data: signupEnabled } = useQuery({
@@ -110,6 +116,14 @@ export default function Login() {
         setError(MFA_PROMPT);
         return;
       }
+      // The password was right and there is still no session: an email has gone
+      // to the account and the server is holding a pending request. The
+      // challenge is this browser's claim on it and stays in component state
+      // for the life of the waiting screen — never persisted.
+      if (res.approval) {
+        setApproval(res.approval);
+        return;
+      }
       // A merchant who signed up but never clicked their confirmation link goes
       // to the onboarding checklist, whose first step is exactly that. Sending
       // them to a dashboard they cannot transact from would just confuse.
@@ -128,6 +142,36 @@ export default function Login() {
 
   // Waiting on the user, not a failure — see MFA_PROMPT above.
   const awaitingCode = error === MFA_PROMPT;
+
+  /** Where the merchant was heading before the login form interrupted them. */
+  const intended = (location.state as LocationState)?.from?.pathname ?? '/dashboard';
+
+  // THE FORM IS REPLACED, NOT COVERED. Once a request is pending, the password
+  // fields have no job left — leaving them on screen invites a second submit
+  // that would supersede the very request the user is being asked to approve.
+  if (approval) {
+    return (
+      <AuthShell
+        runhead="Sign in"
+        title="Check your email"
+        subtitle="One more step before you're signed in."
+      >
+        <AwaitingApproval
+          challenge={approval.challenge}
+          sentTo={approval.sentTo}
+          expiresAt={approval.expiresAt}
+          onApproved={(res: LoginResponse) => {
+            const verified = completeApproval(res);
+            navigate(verified ? intended : '/onboarding', { replace: true });
+          }}
+          onCancel={() => {
+            setApproval(null);
+            setError(null);
+          }}
+        />
+      </AuthShell>
+    );
+  }
 
   return (
     <AuthShell

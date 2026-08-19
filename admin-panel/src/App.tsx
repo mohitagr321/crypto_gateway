@@ -11,6 +11,10 @@ import Clients from '@/pages/Clients';
 import Commissions from '@/pages/Commissions';
 import Dashboard from '@/pages/Dashboard';
 import Login from '@/pages/Login';
+// The page the login-approval email opens. Public and unauthenticated by
+// necessity: the operator answering it is deciding whether a session gets
+// created at all, so they cannot already have one.
+import LoginApproval from '@/pages/LoginApproval';
 import Payouts from '@/pages/Payouts';
 import Revenue from '@/pages/Revenue';
 import Transactions from '@/pages/Transactions';
@@ -35,6 +39,7 @@ export default function App() {
           <BrowserRouter>
             <Routes>
               <Route path="/login" element={<Login />} />
+              <Route path="/login-approval" element={<LoginApproval />} />
 
               {/* Authenticated area */}
               <Route element={<ProtectedRoute />}>

@@ -6,6 +6,8 @@ import type {
   CommissionBalance,
   CreateClientInput,
   LoginResponse,
+  CollectResponse,
+  ApprovalRequest,
   Paginated,
   Payout,
   SetCommissionInput,
@@ -80,6 +82,44 @@ export async function login(
     email,
     password,
     ...(mfaToken ? { mfaToken } : {}),
+  });
+  return data;
+}
+
+/**
+ * Poll a pending sign-in. Returns `{ status }` until the account holder answers
+ * the email, and the session on the one call that finds an approval.
+ *
+ * The challenge is this browser's claim on the request and is deliberately NOT
+ * persisted — it lives in component state for the life of the pending screen.
+ * Storing it would make a stolen browser profile enough to complete somebody
+ * else's half-finished login.
+ */
+export async function collectLogin(challenge: string): Promise<CollectResponse> {
+  const { data } = await api.post<CollectResponse>('/auth/login/collect', { challenge });
+  return data;
+}
+
+/** Read-only: what the approval page shows. Safe for a mail scanner to fetch. */
+export async function getApprovalRequest(token: string): Promise<ApprovalRequest> {
+  const { data } = await api.get<ApprovalRequest>('/auth/login/request', {
+    params: { token },
+  });
+  return data;
+}
+
+/**
+ * Answer a sign-in request. POST, and that is the point — mail providers fetch
+ * the links in a message to scan them, so a GET here would be answered by a
+ * robot before the operator saw the email.
+ */
+export async function decideApproval(
+  token: string,
+  decision: 'approve' | 'reject',
+): Promise<{ status: string }> {
+  const { data } = await api.post<{ status: string }>('/auth/login/decision', {
+    token,
+    decision,
   });
   return data;
 }

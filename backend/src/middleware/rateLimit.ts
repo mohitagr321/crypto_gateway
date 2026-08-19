@@ -454,6 +454,37 @@ export const authRateLimiter = rateLimit({
 });
 
 /**
+ * THE POLLING LIMITER, for /auth/login/collect only.
+ *
+ * `authRateLimiter` is deliberately brutal — a handful of attempts per window,
+ * to blunt credential stuffing — and it is exactly wrong for this one endpoint.
+ * A browser sitting on the "check your email" screen polls collect every two
+ * seconds for up to the approval's ten-minute life, which is ~300 requests for
+ * ONE legitimate sign-in. Under the auth limiter the honest user is locked out
+ * within the first fifteen seconds of waiting.
+ *
+ * It is safe to be generous here, and that is a property of the endpoint rather
+ * than a concession: collect takes a 32-byte random challenge that the server
+ * itself minted moments earlier and handed to exactly one browser. It is not
+ * guessable, it is not a credential the caller chose, and a wrong value reveals
+ * nothing — every unknown challenge answers `expired`, the same as a real one
+ * that timed out. There is nothing to brute force.
+ *
+ * The ceiling is still a ceiling: 400 per window per IP is roughly one polling
+ * session plus headroom, so a script cannot use this route as a free way to
+ * hammer the database.
+ */
+export const loginPollLimiter = rateLimit({
+  ...failOpen,
+  windowMs: config.rateLimit.windowMs,
+  max: 400,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: buildStore('rl:loginpoll:'),
+  message: { error: 'rate_limited', message: 'Too many status checks' },
+});
+
+/**
  * Signup / verification / password-reset limiter — per IP, per HOUR.
  *
  * Much tighter than the others because these routes send email to an

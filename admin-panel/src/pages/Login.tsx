@@ -7,6 +7,8 @@ import DepthField from '@/components/DepthField';
 import FormError, { FieldError } from '@/components/FormError';
 import PayCrypoMark from '@/components/PayCrypoMark';
 import ThemeToggle from '@/components/ThemeToggle';
+import AwaitingApproval from '@/components/AwaitingApproval';
+import type { LoginResponse } from '@/types';
 import { useAuth } from '@/context/AuthContext';
 import { apiErrorMessage } from '@/lib/api';
 import { BRAND_CONSOLE_LABEL, BRAND_NAME } from '@/lib/brand';
@@ -62,12 +64,17 @@ interface FormValues {
  * the product holds itself to, which is a real cost for a decorative signal.
  */
 export default function Login() {
-  const { login, isAuthenticated } = useAuth();
+  const { login, completeApproval, isAuthenticated } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const from = (location.state as { from?: { pathname: string } })?.from?.pathname ?? '/';
 
   const [mfaRequired, setMfaRequired] = useState(false);
+  const [approval, setApproval] = useState<{
+    challenge: string;
+    sentTo: string;
+    expiresAt: string;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
 
@@ -87,6 +94,13 @@ export default function Login() {
       const res = await login(values.email, values.password, values.mfaToken);
       if (res.mfaRequired) {
         setMfaRequired(true);
+        return;
+      }
+      // The password was right and there is still no session: an email has gone
+      // to the operator's address. The challenge is this browser's claim on the
+      // pending request and stays in component state — never persisted.
+      if (res.approval) {
+        setApproval(res.approval);
         return;
       }
       navigate(from, { replace: true });
@@ -156,6 +170,23 @@ export default function Login() {
               panel that fills the reader's field of view is a wash rather than a
               highlight. It would also cost the rim — `.spot::after` and
               `.surface::after` are the same pseudo-element. */}
+          {approval ? (
+            <div className="mt-6">
+              <AwaitingApproval
+                challenge={approval.challenge}
+                sentTo={approval.sentTo}
+                expiresAt={approval.expiresAt}
+                onApproved={(res: LoginResponse) => {
+                  completeApproval(res);
+                  navigate(from, { replace: true });
+                }}
+                onCancel={() => {
+                  setApproval(null);
+                  setError(null);
+                }}
+              />
+            </div>
+          ) : (
           <form onSubmit={handleSubmit(onSubmit)} className="surface mt-6 space-y-4 p-5 sm:p-7">
             {error && <FormError title="Could not sign in">{error}</FormError>}
 
@@ -246,6 +277,7 @@ export default function Login() {
               {mfaRequired ? 'Verify & sign in' : 'Sign in'}
             </button>
           </form>
+          )}
 
           {/* Small print, set as small print, on the canvas — it is context for
               the panel above, not part of the task. The panel's own edge

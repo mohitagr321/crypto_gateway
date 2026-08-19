@@ -15,7 +15,17 @@ interface AuthContextValue {
   role: Role | null;
   isAuthenticated: boolean;
   /** Returns { mfaRequired } — when true the caller should collect a TOTP token and retry. */
-  login: (email: string, password: string, mfaToken?: string) => Promise<{ mfaRequired: boolean }>;
+  login: (
+    email: string,
+    password: string,
+    mfaToken?: string
+  ) => Promise<{
+    mfaRequired: boolean;
+    /** Non-null when the sign-in is waiting on an emailed approval. */
+    approval: { challenge: string; sentTo: string; expiresAt: string } | null;
+  }>;
+  /** Adopt the session a pending approval finally produced. */
+  completeApproval: (res: LoginResponse) => void;
   logout: () => void;
 }
 
@@ -70,11 +80,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const res = await apiLogin(email, password, mfaToken);
       // Admin login can return an MFA challenge before issuing a token.
       if (res.mfaRequired && !res.accessToken) {
-        return { mfaRequired: true };
+        return { mfaRequired: true, approval: null };
       }
+
+      // THE PASSWORD WAS RIGHT AND THERE IS STILL NO SESSION. An email has gone
+      // to the operator's address and the server is holding a pending request;
+      // the challenge is this browser's claim on it. Returned to the caller and
+      // held in component state — never persisted, because a stored challenge
+      // would let a stolen browser profile finish somebody else's sign-in.
+      if (res.approvalRequired && res.challenge) {
+        return {
+          mfaRequired: false,
+          approval: {
+            challenge: res.challenge,
+            sentTo: res.sentTo ?? '',
+            expiresAt: res.expiresAt ?? '',
+          },
+        };
+      }
+
       persistSession(res);
-      return { mfaRequired: false };
+      return { mfaRequired: false, approval: null };
     },
+    [persistSession]
+  );
+
+  /**
+   * Finish a sign-in that was waiting on an emailed approval. Called by the
+   * pending screen's poll on the one response that carries a session.
+   */
+  const completeApproval = useCallback(
+    (res: LoginResponse) => persistSession(res),
     [persistSession]
   );
 
@@ -93,9 +129,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       role: user?.role ?? null,
       isAuthenticated: Boolean(token),
       login,
+      completeApproval,
       logout,
     }),
-    [user, token, login, logout]
+    [user, token, login, completeApproval, logout]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
