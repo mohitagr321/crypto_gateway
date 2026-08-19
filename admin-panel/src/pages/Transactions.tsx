@@ -184,7 +184,7 @@ export default function Transactions() {
           </span>
         }
       >
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] gap-3">
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-2.5 sm:grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] sm:gap-3">
           <div className="min-w-0">
             <label className="label" htmlFor="tx-status">
               Status

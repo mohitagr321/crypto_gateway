@@ -64,7 +64,20 @@ export default function PageHeader({
 
       {(actions || meta) && (
         <div className="flex shrink-0 flex-col gap-2 sm:items-end">
-          {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+          {/* THE ACTION ROW STRETCHES ON A PHONE.
+              `[&>*]:flex-1` makes every child share the width equally instead
+              of shrink-wrapping to its label, which is what left a lone
+              "New payment" sitting at 146px against a 343px page looking like
+              it had been dropped there. From `sm` the children go back to
+              their natural width and range right, which is correct where
+              there is a pointer and the label is the target.
+              `min-w-0` on the children is what lets a long label actually
+              shrink rather than pushing the row wider than the page. */}
+          {actions && (
+            <div className="flex flex-wrap items-center gap-2 [&>*]:min-w-0 max-sm:[&>*]:flex-1">
+              {actions}
+            </div>
+          )}
           {meta && (
             <div className="num text-xs leading-snug text-slate-500 dark:text-slate-400">
               {meta}

@@ -102,8 +102,8 @@ export default function StatCard({
 }: StatCardProps) {
   return (
     <div
-      className={`surface spot flex h-full min-w-0 flex-col p-4 sm:p-[1.125rem] ${
-        wide ? 'sm:col-span-2' : ''
+      className={`surface spot flex h-full min-w-0 flex-col p-3.5 sm:p-[1.125rem] ${
+        wide ? 'col-span-2' : ''
       }`}
     >
       <div className="flex items-start justify-between gap-2">

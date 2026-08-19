@@ -443,7 +443,7 @@ export default function DataTable<T>({
                     }
                   : undefined
               }
-              className={`py-3.5 outline-none ${
+              className={`py-3 sm:py-3.5 outline-none ${
                 onRowClick
                   ? 'cursor-pointer focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500'
                   : ''

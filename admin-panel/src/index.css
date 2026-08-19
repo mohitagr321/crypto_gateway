@@ -692,11 +692,23 @@
    * `:focus-visible` rule in the base layer rather than respelled here.
    * ================================================================== */
   .btn {
-    @apply inline-flex select-none items-center justify-center gap-2 whitespace-nowrap
+    @apply inline-flex max-w-full select-none items-center justify-center gap-2
            rounded-lg px-4 py-2.5 text-sm font-medium
            transition-[transform,background-color,box-shadow,border-color,color]
            duration-[var(--dur-press)] ease-[var(--ease-out)]
+           sm:whitespace-nowrap
            active:scale-[0.975] disabled:pointer-events-none disabled:opacity-45;
+    /* `max-w-full` is a HARD GUARANTEE and the reason it is on the base class
+       rather than at call sites: a button is sized by its label, and a label
+       long enough to exceed its container used to simply hang out of the card
+       — measured at 320px, "Add a settlement wallet" rendered 210px wide
+       inside a 202px parent. `max-width` alone cannot fix that while the label
+       is `nowrap`, so nowrap is now a `sm:` concern: below it a long label
+       WRAPS rather than overflowing.
+       Wrapping is the safety net, not the design. A primary action whose label
+       is long should be `w-full sm:w-auto` at its call site, which is what the
+       CTAs in this product now do — a full-width button on a phone reads as
+       deliberate, whereas a two-line one reads as a mistake. */
     /* 44px is the touch-target floor and this is where it is enforced, once,
        for every control in the console. This class carried NO min-height at
        all and computed to about 40px, which is a miss with a thumb — and an
@@ -905,7 +917,12 @@
    * truncated on a phone.
    */
   .figure-lg {
-    font-size: clamp(1.625rem, 1.25rem + 1.1vw, 2.125rem);
+    /* The FLOOR is 1.375rem, not the 1.625 it started at, and only the floor
+       moved — the ceiling and the slope are unchanged, so nothing above ~700px
+       renders differently. The floor was set when a metric tile was full-width
+       on a phone; the tiles are two-up now, and 26px of tabular figures in a
+       ~150px tile is what pushed a four-digit balance onto a second line. */
+    font-size: clamp(1.375rem, 1.05rem + 1.25vw, 2.125rem);
     line-height: 1;
     letter-spacing: -0.04em;
     font-weight: 620;

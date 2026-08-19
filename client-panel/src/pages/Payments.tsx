@@ -288,31 +288,40 @@ export default function Payments() {
           // Enough ghost rows to fill the box, so nothing jumps when data lands.
           skeletonRows={10}
           renderMobile={(p) => (
+            /* TWO LINES A COLUMN, NOT THREE.
+               The status used to sit on its own third line under the amount,
+               which made every row 98px — 20 rows was 1,960px of scroll on a
+               phone. Pairing it with the date on the left balances the columns
+               at two lines each and takes the row to ~72px, for the same five
+               facts.
+               The type is the ledger's 13.5px rather than the inherited 16px:
+               this is a table row wearing a different layout, and it should
+               read at the size the table does. */
             <div className="flex items-baseline justify-between gap-3">
               <span className="min-w-0">
                 {/* `break-words`, not `truncate`. An order id is the merchant's
                     own reference and the only thing identifying the row; half of
                     one is worse than a second line. It breaks only where it has
                     to, so an ordinary reference still sets on one line. */}
-                <span className="block break-words font-medium text-slate-900 dark:text-slate-50">
+                <span className="block break-words text-[13.5px] font-medium text-slate-900 dark:text-slate-50">
                   {p.orderId}
                 </span>
-                <span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">
-                  {formatDate(p.createdAt)}
+                <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="num text-[11.5px] text-slate-500 dark:text-slate-400">
+                    {formatDate(p.createdAt)}
+                  </span>
+                  <PaymentStatusBadge status={p.status} />
                 </span>
               </span>
               {/* `min-w-0` rather than `shrink-0`: a money figure must never be
                   clipped by its own column, so the amount side yields width and
                   wraps instead of overflowing the row. */}
               <span className="min-w-0 text-right">
-                <span className="num lining-nums block break-words font-medium text-slate-900 dark:text-slate-50">
+                <span className="num lining-nums block break-words text-[13.5px] font-medium text-slate-900 dark:text-slate-50">
                   {formatAmount(p.amount)}
                 </span>
-                <span className="mt-0.5 block text-xs">
+                <span className="mt-0.5 block text-[11.5px]">
                   <AssetOnNetwork asset={p.asset ?? p.currency} network={p.network} />
-                </span>
-                <span className="mt-1.5 block">
-                  <PaymentStatusBadge status={p.status} />
                 </span>
               </span>
             </div>

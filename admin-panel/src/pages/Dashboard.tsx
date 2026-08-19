@@ -247,7 +247,7 @@ export default function Dashboard() {
           a grid item defaults to `min-width: auto` and refuses to shrink under
           its own content.
           ============================================================ */}
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))] gap-3">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-2.5 sm:grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))] sm:gap-3">
         <StatCard
           wide
           label="Total volume processed"

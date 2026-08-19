@@ -217,7 +217,7 @@ export default function ClientDetail() {
           asking a money figure to fit in 148px of it. `min-w-0` on the track
           is what lets StatCard's `break-words` work at all.
           ============================================================ */}
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))] gap-3">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-2.5 sm:grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))] sm:gap-3">
         <StatCard
           label="Available balance"
           value={

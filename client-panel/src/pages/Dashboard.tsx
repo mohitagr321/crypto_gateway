@@ -147,6 +147,30 @@ const assetColumns: Column<AnalyticsAssetRow>[] = [
   },
 ];
 
+/**
+ * The per-asset row, stacked. It had no `renderMobile` and fell back to the
+ * generic title + definition-list layout, which is the right default and the
+ * wrong shape for three fields: ~110px a row, so six pairs cost 730px on a
+ * phone. The pair, its count and its volume fit on two lines.
+ */
+function assetMobileRow(r: AnalyticsAssetRow) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <span className="min-w-0 truncate text-[13.5px] font-medium text-slate-900 dark:text-slate-100">
+        {r.asset} · {r.network}
+      </span>
+      <span className="shrink-0 text-right">
+        <span className="amount-in block text-[13.5px]">
+          {formatAmount(Number(r.volume))} {r.asset}
+        </span>
+        <span className="num block text-[11.5px] text-slate-500 dark:text-slate-400">
+          {r.count} {r.count === 1 ? 'payment' : 'payments'}
+        </span>
+      </span>
+    </div>
+  );
+}
+
 const paymentAmount = (p: Payment) => Number(p.amountReceived || p.amount || 0);
 
 const paymentColumns: Column<Payment>[] = [
@@ -203,7 +227,12 @@ const paymentColumns: Column<Payment>[] = [
   },
 ];
 
-/** Below `md` the five-column ledger becomes a stacked, ruled list. */
+/**
+ * Below `md` the five-column ledger becomes a stacked, ruled list — two lines a
+ * column, so the row costs ~72px rather than the ~98px a third line for the
+ * status badge used to add. Set at the ledger's own 13.5px: this is a table row
+ * wearing a different layout, not body copy.
+ */
 function paymentMobileRow(p: Payment) {
   return (
     <div className="flex items-start justify-between gap-3">
@@ -211,24 +240,24 @@ function paymentMobileRow(p: Payment) {
         <Link
           to={`/payments/${p.paymentId}`}
           onClick={(e) => e.stopPropagation()}
-          className="block truncate font-medium text-slate-900 hover:underline dark:text-slate-100"
+          className="block truncate text-[13.5px] font-medium text-slate-900 hover:underline dark:text-slate-100"
         >
           {p.orderId}
         </Link>
-        <p className="num mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-          {formatDate(p.createdAt)}
-        </p>
-      </div>
-      <div className="shrink-0 text-right">
-        <p className="num text-sm font-medium text-slate-900 dark:text-slate-100">
-          {formatAmount(paymentAmount(p))}
-        </p>
-        <p className="text-xs text-slate-500 dark:text-slate-400">
-          {p.asset ?? p.currency} · {p.network}
-        </p>
-        <span className="mt-1 flex justify-end">
+        <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="num text-[11.5px] text-slate-500 dark:text-slate-400">
+            {formatDate(p.createdAt)}
+          </span>
           <PaymentStatusBadge status={p.status} />
         </span>
+      </div>
+      <div className="min-w-0 shrink-0 text-right">
+        <p className="num text-[13.5px] font-medium text-slate-900 dark:text-slate-100">
+          {formatAmount(paymentAmount(p))}
+        </p>
+        <p className="text-[11.5px] text-slate-500 dark:text-slate-400">
+          {p.asset ?? p.currency} · {p.network}
+        </p>
       </div>
     </div>
   );
@@ -261,6 +290,14 @@ export default function Dashboard() {
     queryFn: getOnboarding,
     retry: false,
   });
+
+  // Charts are shorter on a phone. A 240px plot is a third of a 748px viewport
+  // spent on fourteen points, and the same series reads fine at 180. Measured
+  // once at mount rather than on resize: a chart that re-measures while the
+  // address bar collapses is a layout thrash for no gain.
+  const narrow = typeof window !== 'undefined' && window.innerWidth < 640;
+  const chartH = narrow ? 180 : 240;
+  const donutH = narrow ? 165 : 190;
 
   const recent: Payment[] = paymentsQuery.data?.data ?? [];
   const a = analyticsQuery.data;
@@ -339,7 +376,12 @@ export default function Dashboard() {
           <>
             <Link to="/payment-links" className="btn-secondary">
               <Link2 size={16} />
-              <span className="hidden sm:inline">New link</span>
+              {/* The label used to be hidden below `sm`, back when this button
+                  shrink-wrapped to its icon and space was the constraint. The
+                  action row stretches its children on a phone now, so hiding it
+                  buys nothing and costs the label: a 168px button containing a
+                  lone chain glyph. */}
+              New link
             </Link>
             <Link to="/payments/new" className="btn-primary">
               <PlusCircle size={16} />
@@ -380,7 +422,7 @@ export default function Dashboard() {
           five numbers at identical weight, so none of them is the point; this
           page has exactly one headline figure and it should look like it.
           ============================================================ */}
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))] gap-3">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-2.5 sm:grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))] sm:gap-3">
         <StatCard
           wide
           label="Received · last 30 days"
@@ -473,7 +515,7 @@ export default function Dashboard() {
       <div className="mt-4 grid gap-3 lg:grid-cols-3">
         <Section className="lg:col-span-2" title="Volume received · last 14 days">
           {loading ? (
-            <span className="ghost h-[240px] w-full opacity-60" aria-hidden />
+            <span className="ghost w-full opacity-60" style={{ height: chartH }} aria-hidden />
           ) : volumeSeries.length === 0 ? (
             <p className="measure py-16 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
               Nothing has settled in this period yet. The first confirmed payment
@@ -485,7 +527,7 @@ export default function Dashboard() {
                reach into its DOM — and follow the theme with no JS. The axis ink
                is the one class that has to reach in; see lib/chartTheme.ts. */
             <div className={`${VOLUME_INK_CLASS} ${AXIS_INK_CLASS}`}>
-              <ResponsiveContainer width="100%" height={240}>
+              <ResponsiveContainer width="100%" height={chartH}>
                 <AreaChart data={volumeSeries} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
                   <defs>
                     <linearGradient id="vol" x1="0" y1="0" x2="0" y2="1">
@@ -540,7 +582,7 @@ export default function Dashboard() {
 
         <Section title="Payment status · last 30 days">
           {loading ? (
-            <span className="ghost h-[200px] w-full opacity-60" aria-hidden />
+            <span className="ghost w-full opacity-60" style={{ height: donutH }} aria-hidden />
           ) : statusGroups.length === 0 ? (
             <p className="measure py-16 text-sm leading-relaxed text-slate-500 dark:text-slate-400">
               No payments yet.
@@ -548,7 +590,7 @@ export default function Dashboard() {
           ) : (
             <>
               <div className={AXIS_INK_CLASS}>
-                <ResponsiveContainer width="100%" height={190}>
+                <ResponsiveContainer width="100%" height={donutH}>
                   <PieChart>
                     <Pie
                       data={statusGroups}
@@ -634,6 +676,7 @@ export default function Dashboard() {
             rowKey={(r) => `${r.network}:${r.asset}`}
             loading={loading}
             skeletonRows={3}
+            renderMobile={assetMobileRow}
             label="Settled volume by asset and network"
             emptyLabel="Nothing has settled in the last 30 days."
           />

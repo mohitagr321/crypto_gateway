@@ -231,7 +231,7 @@ export default function Analytics() {
           as the replacement. One figure at 56px costs a whole band of ledger on
           a console, and this page has three ledgers below it.
           ============================================================ */}
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))] gap-3">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-2.5 sm:grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))] sm:gap-3">
         <StatCard
           wide
           label="Total commission earned"

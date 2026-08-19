@@ -24,7 +24,11 @@ interface StatCardProps {
   invertDelta?: boolean;
   /** Anything that belongs under the figure — a sparkline, a mini key. */
   children?: ReactNode;
-  /** Span two columns in the metric grid. For the one figure that leads a page. */
+  /**
+   * Span two columns in the metric grid. For the one figure that leads a page.
+   * Two of four on a desktop grid, and the full width of the two-column grid a
+   * phone gets — so the lead figure reads as the lead at every size.
+   */
   wide?: boolean;
 }
 
@@ -85,23 +89,23 @@ export default function StatCard({
 }: StatCardProps) {
   return (
     <div
-      className={`surface spot flex h-full min-w-0 flex-col p-4 sm:p-[1.125rem] ${
-        wide ? 'sm:col-span-2' : ''
+      className={`surface spot flex h-full min-w-0 flex-col p-3.5 sm:p-[1.125rem] ${
+        wide ? 'col-span-2' : ''
       }`}
     >
       <div className="flex items-start justify-between gap-2">
-        <span className="runhead min-w-0">{label}</span>
+        <span className="runhead min-w-0 leading-[1.35]">{label}</span>
         {Icon && <Icon size={14} className={`mt-px shrink-0 ${toneInk[tone]}`} aria-hidden />}
       </div>
 
       {loading ? (
         <span className="ghost mt-3.5 h-7 w-2/3" aria-hidden />
       ) : (
-        <p className="figure-lg mt-2.5 break-words">{value}</p>
+        <p className="figure-lg mt-2 break-words">{value}</p>
       )}
 
       {!loading && (delta !== null || sub) && (
-        <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
           {delta !== null && <Delta value={delta} invert={invertDelta} />}
           {(deltaLabel || sub) && (
             <span className="min-w-0 text-xs leading-snug text-slate-500 dark:text-slate-400">

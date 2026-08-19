@@ -29,10 +29,32 @@ import { formatAmount } from '@/lib/format';
  * missing. `break-words` plus `min-w-0` on the grid child lets the tile grow
  * instead.
  *
- * THE GRID IS `auto-fit`, NOT `grid-cols-2`. Two columns of money at 360px is
- * about 148px each, which is where the truncation above came from in the first
- * place — the fix is a track that cannot be squeezed below the width a figure
- * needs, so the strip reflows to one column on a phone with no breakpoint.
+ * THE GRID IS `auto-fit`, NOT `grid-cols-2` — but the floor is 10rem, not the
+ * 13rem it started at, and that change is worth explaining because it reverses
+ * an earlier decision.
+ *
+ * 13rem guaranteed one column on any phone, on the reasoning that two columns
+ * of money at 360px is ~148px each and a figure would be squeezed. That
+ * protects a balance like "1,234,567.89" — and it charged every merchant a
+ * strip 830px tall on a 375px screen to do it, which is more than a full
+ * viewport for six numbers. It was optimising for the rare figure at the
+ * expense of every common one.
+ *
+ * 7.5rem is what actually fits two columns, and the number is measured rather
+ * than chosen: this strip sits inside a Section, so it loses the page gutter
+ * AND the section's padding — 258px of usable width on a 320px phone, not 320.
+ * Two 10rem tracks plus the gap needed 332px and silently fell back to one
+ * column on exactly the screens the change was for.
+ *
+ * The guarantee that makes a floor this low safe is already in place above:
+ * the figure WRAPS. A seven-digit balance takes two lines and its tile grows,
+ * which is a visible, honest degradation — and it is rare, where a strip
+ * 800px tall was not.
+ *
+ * THE 13rem FLOOR IS STILL THERE, from `sm` up. `auto-fit` packs in as many
+ * tracks as fit, so carrying 7.5rem onto a desktop would not keep the strip at
+ * a sensible four across — it would pack in eight narrow ones. The low floor
+ * exists to buy a second column on a phone, and nothing above it.
  */
 export default function BalanceStrip() {
   const { data, isLoading } = useQuery({
@@ -43,7 +65,7 @@ export default function BalanceStrip() {
 
   if (isLoading) {
     return (
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] gap-3">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,7.5rem),1fr))] gap-2.5 sm:grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] sm:gap-3">
         {[0, 1, 2].map((i) => (
           <div key={i} className="well min-w-0 p-3.5" aria-busy="true">
             <span className="ghost h-3 w-24" aria-hidden />
@@ -76,7 +98,7 @@ export default function BalanceStrip() {
 
   return (
     <div>
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] gap-3">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,7.5rem),1fr))] gap-2.5 sm:grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] sm:gap-3">
         {data.map((b) => {
           const pending = Number(b.pending) > 0;
           return (

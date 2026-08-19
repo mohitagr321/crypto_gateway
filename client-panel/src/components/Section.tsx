@@ -45,11 +45,11 @@ export default function Section({
 }: SectionProps) {
   return (
     <section className={`surface min-w-0 ${className}`}>
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-3.5 sm:px-5">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-3.5 py-3 sm:px-5 sm:py-3.5">
         <h2 className="runhead text-slate-700 dark:text-slate-200">{title}</h2>
         {aside}
       </div>
-      <div className={flush ? 'px-4 pb-2 sm:px-5' : 'px-4 pb-4 sm:px-5 sm:pb-5'}>{children}</div>
+      <div className={flush ? 'px-3.5 pb-2 sm:px-5' : 'px-3.5 pb-3.5 sm:px-5 sm:pb-5'}>{children}</div>
     </section>
   );
 }
