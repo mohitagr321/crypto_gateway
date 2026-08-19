@@ -35,6 +35,7 @@ import type {
   CollectResponse,
   ApprovalRequest,
   SessionTokens,
+  SessionInfo,
   OnboardingState,
   Paginated,
   Payment,
@@ -123,13 +124,87 @@ export function setUnauthorizedHandler(fn: (() => void) | null) {
   onUnauthorized = fn;
 }
 
+/* ==========================================================================
+ * SILENT REFRESH.
+ *
+ * The access token lives fifteen minutes. Until now nothing renewed it: the
+ * refresh token was stored at login and never presented, so a 401 went straight
+ * to `onUnauthorized` and the merchant was thrown back to the sign-in form every
+ * quarter of an hour, mid-task. The whole rotation mechanism existed server-side
+ * and had no client.
+ *
+ * SINGLE-FLIGHT IS NOT AN OPTIMISATION HERE, IT IS THE CORRECTNESS CONDITION.
+ * The server ROTATES refresh tokens and treats a re-presented one as theft —
+ * presenting the same token twice revokes the entire family, which signs the
+ * merchant out of that device completely. A dashboard fires several requests at
+ * once (analytics, payments, balances), so when the access token expires they
+ * all 401 within milliseconds of each other. Naively refreshing per failed
+ * request would present the same refresh token three or four times and trip
+ * reuse detection on every single expiry — turning a silent renewal into a
+ * forced logout, and looking exactly like an attack in the audit log.
+ *
+ * So the first 401 starts ONE refresh and every other caller awaits that same
+ * promise. There is a REUSE_GRACE_MS window server-side that would soften this,
+ * but relying on a race being narrow enough is not a design.
+ * ======================================================================== */
+
+/** The in-flight refresh, shared by every request waiting on it. */
+let refreshInFlight: Promise<string> | null = null;
+
+async function refreshAccessToken(): Promise<string> {
+  const refreshToken = tokenStore.getRefresh();
+  if (!refreshToken) throw new Error('no refresh token');
+
+  // A BARE axios call, deliberately not `http`. Going through the instance
+  // would attach the dead access token and, worse, route a 401 from the refresh
+  // endpoint itself back into this interceptor — recursing until the stack ends.
+  const { data } = await axios.post<{ accessToken: string; refreshToken?: string }>(
+    `${API_BASE_URL}/auth/refresh`,
+    { refreshToken },
+    { headers: { 'Content-Type': 'application/json' }, timeout: 20000 },
+  );
+  tokenStore.set(data.accessToken, data.refreshToken);
+  return data.accessToken;
+}
+
 http.interceptors.response.use(
   (res) => res,
-  (err: AxiosError<{ error?: string; message?: string }>) => {
+  async (err: AxiosError<{ error?: string; message?: string }>) => {
     const status = err.response?.status ?? 0;
-    if (status === 401 && onUnauthorized) {
+    const original = err.config as (InternalAxiosRequestConfig & { _retried?: boolean }) | undefined;
+
+    // Try exactly once per request. `_retried` is what stops a request whose
+    // retry ALSO 401s (a revoked family, a suspended account) from looping.
+    const canRetry =
+      status === 401 &&
+      original &&
+      !original._retried &&
+      !original.url?.includes('/auth/refresh') &&
+      !original.url?.includes('/auth/login') &&
+      Boolean(tokenStore.getRefresh());
+
+    if (canRetry) {
+      original._retried = true;
+      try {
+        refreshInFlight = refreshInFlight ?? refreshAccessToken();
+        const fresh = await refreshInFlight;
+        original.headers.set('Authorization', `Bearer ${fresh}`);
+        return http(original);
+      } catch {
+        // The refresh itself failed: the family is revoked, the token expired,
+        // or the account is no longer active. Nothing left to try — drop the
+        // credentials and let the app send them to sign in.
+        tokenStore.clear();
+        if (onUnauthorized) onUnauthorized();
+      } finally {
+        // Cleared whether it resolved or rejected, so the NEXT expiry starts a
+        // fresh attempt rather than re-awaiting a settled promise forever.
+        refreshInFlight = null;
+      }
+    } else if (status === 401 && onUnauthorized) {
       onUnauthorized();
     }
+
     const apiError: ApiError = {
       status,
       error: err.response?.data?.error,
@@ -187,6 +262,32 @@ export async function decideApproval(
     token,
     decision,
   });
+  return data;
+}
+
+/* ---- Devices and sessions ----
+ * A session is a refresh-token family: one login, rotating a token every
+ * fifteen minutes for as long as the browser stays open. Signing a device out
+ * revokes that family, which is the same operation reuse detection performs.
+ */
+export async function listSessions(): Promise<SessionInfo[]> {
+  const { data } = await http.get<SessionInfo[]>('/account/sessions');
+  return data;
+}
+
+/** Sign one device out. Allowed for the current device too — see Settings. */
+export async function revokeSession(id: string): Promise<{ current: boolean }> {
+  const { data } = await http.delete<{ success: boolean; current: boolean }>(
+    `/account/sessions/${id}`,
+  );
+  return data;
+}
+
+/** Sign out everywhere except here. Deliberately keeps the caller signed in. */
+export async function revokeOtherSessions(): Promise<{ revoked: number }> {
+  const { data } = await http.post<{ success: boolean; revoked: number }>(
+    '/account/sessions/revoke-others',
+  );
   return data;
 }
 

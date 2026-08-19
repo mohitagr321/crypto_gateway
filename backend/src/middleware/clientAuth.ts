@@ -69,7 +69,16 @@ export async function clientAuth(
     // lookup below is scoped by `decoded.sub` regardless, so this adds no
     // authority, only attribution. API-key requests still have no `req.user`,
     // correctly: a machine credential is not a person.
-    req.user = { userId: decoded.sub, role: decoded.role, email: decoded.email };
+    // `familyId` is carried for the same attribution reason as the rest, and is
+    // what lets /account/sessions mark one row "this device". Dashboard sessions
+    // only: an API-key request has no `req.user` at all, correctly — a machine
+    // credential is not a person and does not appear in a device list.
+    req.user = {
+      userId: decoded.sub,
+      role: decoded.role,
+      email: decoded.email,
+      familyId: decoded.fid,
+    };
 
     const client = await queryOne<{
       id: string;

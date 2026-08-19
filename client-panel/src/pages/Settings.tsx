@@ -16,6 +16,7 @@ import type { ApiError } from '@/lib/api';
 import { isValidBep20Address, isValidTrc20Address, isValidUrl } from '@/lib/format';
 import type { ChangePasswordInput, UpdateAccountSettings } from '@/types';
 import PageHeader from '@/components/PageHeader';
+import SessionsCard from '@/components/SessionsCard';
 import Section from '@/components/Section';
 import Spinner from '@/components/Spinner';
 import IpAllowlistCard from '@/components/IpAllowlistCard';
@@ -564,6 +565,12 @@ export default function Settings() {
           />
 
           <PasswordSection />
+
+          {/* Directly after the password control on purpose: "change my
+              password" and "sign out the device that had it" are one action in
+              the merchant's head, and separating them is how the second half
+              gets forgotten. */}
+          <SessionsCard />
         </div>
       )}
     </>

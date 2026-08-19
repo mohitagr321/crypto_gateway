@@ -166,17 +166,45 @@ export async function pollStatus(challenge: string): Promise<ApprovalStatus | 'e
  * request that is pending, rejected, expired or already consumed returns null
  * and the caller issues nothing.
  */
-export async function consume(challenge: string): Promise<{ userId: string } | null> {
-  const row = await queryOne<{ user_id: string }>(
+export async function consume(challenge: string): Promise<{
+  userId: string;
+  device: { label: string | null; kind: string | null; ip: string | null; userAgent: string | null };
+} | null> {
+  const row = await queryOne<{
+    user_id: string;
+    device_label: string | null;
+    device_kind: string | null;
+    ip: string | null;
+    user_agent: string | null;
+  }>(
     `UPDATE login_approvals
         SET status = 'consumed', consumed_at = now()
       WHERE challenge_hash = $1
         AND status = 'approved'
         AND expires_at > now()
-      RETURNING user_id`,
+      RETURNING user_id, device_label, device_kind, ip, user_agent`,
     [sha256Hex(challenge)],
   );
-  return row ? { userId: row.user_id } : null;
+  if (!row) return null;
+
+  // THE DEVICE COMES BACK OUT WITH THE APPROVAL, and that is the point of
+  // returning it rather than re-reading the collecting request's headers.
+  //
+  // Collect is a separate HTTP call from login. In a browser both come from the
+  // same window so the User-Agent matches, but nothing enforces that — and the
+  // value recorded here is the one shown in the session list, which the merchant
+  // compares against the device named in the approval email. If those two ever
+  // disagreed, the list would be describing a device that never asked for
+  // anything, which is precisely the confusion a session list exists to prevent.
+  return {
+    userId: row.user_id,
+    device: {
+      label: row.device_label,
+      kind: row.device_kind,
+      ip: row.ip,
+      userAgent: row.user_agent,
+    },
+  };
 }
 
 /**

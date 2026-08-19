@@ -1011,3 +1011,185 @@ router.get(
 );
 
 export default router;
+
+/* ==========================================================================
+ * SESSIONS — the devices signed in to this account, and how to end one.
+ *
+ * A SESSION IS A REFRESH-TOKEN FAMILY. One login opens one family; the family
+ * then rotates a token every fifteen minutes for as long as the browser stays
+ * open. So "sign this device out" is "revoke this family", which is the exact
+ * operation reuse detection already performs — the merchant is reaching for a
+ * mechanism the auth system was built around, not a parallel one.
+ *
+ * DASHBOARD-SESSION ONLY, all three. An API key must not be able to enumerate
+ * the devices a human is signed in from, and it certainly must not be able to
+ * sign them out: a leaked key would otherwise be able to lock the merchant out
+ * of the panel they would use to revoke it.
+ * ======================================================================== */
+
+interface SessionRow {
+  family_id: string;
+  device_label: string | null;
+  device_kind: string | null;
+  ip: string | null;
+  issued_at: Date;
+  last_used_at: Date | null;
+  expires_at: Date;
+}
+
+router.get(
+  '/account/sessions',
+  clientAuth,
+  requireDashboardSession,
+  asyncHandler(async (req, res) => {
+    const userId = req.user!.userId;
+
+    // ONE ROW PER FAMILY — the newest live token in each. A family holds every
+    // token it has ever rotated through, so without DISTINCT ON a merchant who
+    // has been signed in for a week sees the same laptop several hundred times.
+    //
+    // `expires_at > now()` is what makes this list "signed in" rather than
+    // "has ever signed in": a family whose last token has aged out is a browser
+    // that will be asked for a password next time, so showing it as an active
+    // session would be a lie.
+    const rows = await query<SessionRow>(
+      `SELECT DISTINCT ON (family_id)
+              family_id, device_label, device_kind, ip,
+              issued_at, last_used_at, expires_at
+         FROM refresh_tokens
+        WHERE user_id = $1
+          AND revoked_at IS NULL
+          AND expires_at > now()
+        ORDER BY family_id, issued_at DESC`,
+      [userId],
+    );
+
+    // Sorted by recency in JS rather than SQL: DISTINCT ON dictates the ORDER BY
+    // (it must lead with the distinct key), so the display order has to be
+    // applied afterwards.
+    const sessions = rows
+      .map((r) => ({
+        id: r.family_id,
+        device: r.device_label,
+        deviceKind: r.device_kind,
+        ip: r.ip,
+        signedInAt: r.issued_at,
+        lastUsedAt: r.last_used_at,
+        expiresAt: r.expires_at,
+        // The one row the merchant must not be encouraged to revoke by
+        // accident — and the one the panel labels "This device".
+        current: Boolean(req.user!.familyId && r.family_id === req.user!.familyId),
+      }))
+      .sort((a, b) => {
+        if (a.current !== b.current) return a.current ? -1 : 1;
+        const at = new Date(a.lastUsedAt ?? a.signedInAt).getTime();
+        const bt = new Date(b.lastUsedAt ?? b.signedInAt).getTime();
+        return bt - at;
+      });
+
+    res.status(200).json(sessions);
+  }),
+);
+
+const SessionIdSchema = z.object({ id: z.string().uuid() });
+
+/**
+ * Sign one device out.
+ *
+ * SCOPED TO THE CALLER'S OWN ROWS. The `user_id = $2` clause is the
+ * authorisation, not decoration: without it, a family id — which is a plain
+ * uuid that travels in an access token — would be enough for any signed-in
+ * merchant to sign out any other merchant's device. The id in the URL selects;
+ * the session authorises.
+ *
+ * Revoking the CURRENT session is allowed and is a real thing to want ("I am on
+ * a shared machine, end this now"). The panel confirms it and then logs out
+ * locally, because the access token stays valid until it expires — revocation
+ * kills the ability to REFRESH, not the token already issued. That is the
+ * documented latency of this design (one access-token lifetime, 15 minutes by
+ * default) and it is why the panel discards its tokens rather than waiting.
+ */
+router.delete(
+  '/account/sessions/:id',
+  clientAuth,
+  requireDashboardSession,
+  asyncHandler(async (req, res) => {
+    const { id } = SessionIdSchema.parse(req.params);
+    const userId = req.user!.userId;
+
+    const revoked = await query<{ family_id: string }>(
+      `UPDATE refresh_tokens
+          SET revoked_at = now()
+        WHERE family_id = $1
+          AND user_id = $2
+          AND revoked_at IS NULL
+        RETURNING family_id`,
+      [id, userId],
+    );
+
+    if (revoked.length === 0) {
+      throw AppError.notFound('That session is already signed out.');
+    }
+
+    await writeAudit({
+      actorUserId: userId,
+      action: 'auth.session_revoked',
+      entityType: 'user',
+      entityId: userId,
+      ip: req.ip,
+      metadata: { familyId: id, self: id === req.user!.familyId },
+    });
+
+    res.status(200).json({ success: true, current: id === req.user!.familyId });
+  }),
+);
+
+/**
+ * Sign out everywhere else — the control someone reaches for when they think
+ * a password has leaked, immediately after changing it.
+ *
+ * It deliberately keeps the CURRENT session alive. Signing the merchant out of
+ * the tab they are using to secure their account is hostile, and it also makes
+ * the next step (rotating API keys, checking payouts) require another sign-in
+ * at the worst possible moment.
+ */
+router.post(
+  '/account/sessions/revoke-others',
+  clientAuth,
+  requireDashboardSession,
+  asyncHandler(async (req, res) => {
+    const userId = req.user!.userId;
+    const keep = req.user!.familyId ?? null;
+
+    // `$2::uuid IS NULL OR family_id <> $2` rather than two statements: an
+    // access token minted before family ids shipped has nothing to keep, and
+    // the honest behaviour there is to revoke everything — including this
+    // session — rather than to silently spare an arbitrary row.
+    const revoked = await query<{ family_id: string }>(
+      `UPDATE refresh_tokens
+          SET revoked_at = now()
+        WHERE user_id = $1
+          AND revoked_at IS NULL
+          AND ($2::uuid IS NULL OR family_id <> $2::uuid)
+        RETURNING family_id`,
+      [userId, keep],
+    );
+
+    // `RETURNING DISTINCT` is not valid PostgreSQL — RETURNING projects the rows
+    // the UPDATE touched and takes no set quantifier. The statement revokes
+    // every TOKEN, so a family that has rotated forty times returns forty rows;
+    // the merchant wants to be told how many DEVICES were signed out.
+    const families = new Set(revoked.map((r) => r.family_id));
+
+    await writeAudit({
+      actorUserId: userId,
+      action: 'auth.sessions_revoked_others',
+      entityType: 'user',
+      entityId: userId,
+      ip: req.ip,
+      metadata: { count: families.size, keptCurrent: Boolean(keep) },
+    });
+
+    res.status(200).json({ success: true, revoked: families.size, keptCurrent: Boolean(keep) });
+  }),
+);

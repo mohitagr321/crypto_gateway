@@ -1,4 +1,4 @@
-import axios, { AxiosError } from 'axios';
+import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios';
 import type {
   AdminWithdrawal,
   Analytics,
@@ -41,20 +41,89 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// On 401, clear session and bounce to /login (unless we're logging in).
+/* ==========================================================================
+ * SILENT REFRESH.
+ *
+ * The access token lives fifteen minutes and nothing renewed it: the refresh
+ * token was stored at login and never presented, so an operator was thrown back
+ * to the sign-in form every quarter of an hour, mid-investigation.
+ *
+ * SINGLE-FLIGHT IS THE CORRECTNESS CONDITION, not an optimisation. The server
+ * ROTATES refresh tokens and treats a re-presented one as theft — presenting the
+ * same token twice revokes the whole family and signs the device out. A console
+ * screen fires several requests at once, so on expiry they all 401 together;
+ * refreshing per failed request would present the same token several times and
+ * trip reuse detection on every expiry, turning a silent renewal into a forced
+ * logout that also looks like an attack in the audit log.
+ *
+ * The first 401 starts ONE refresh and every other caller awaits that promise.
+ * ======================================================================== */
+
+let refreshInFlight: Promise<string> | null = null;
+
+async function refreshAccessToken(): Promise<string> {
+  const refreshToken = localStorage.getItem(REFRESH_KEY);
+  if (!refreshToken) throw new Error('no refresh token');
+
+  // A BARE axios call, not `api`. Going through the instance would attach the
+  // dead token and route a 401 from the refresh endpoint back into this
+  // interceptor, recursing until the stack ends.
+  const { data } = await axios.post<{ accessToken: string; refreshToken?: string }>(
+    `${baseURL}/auth/refresh`,
+    { refreshToken },
+    { headers: { 'Content-Type': 'application/json' }, timeout: 20000 },
+  );
+  localStorage.setItem(TOKEN_KEY, data.accessToken);
+  if (data.refreshToken) localStorage.setItem(REFRESH_KEY, data.refreshToken);
+  return data.accessToken;
+}
+
+function dropSession(): void {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(REFRESH_KEY);
+  localStorage.removeItem(USER_KEY);
+  if (window.location.pathname !== '/login') {
+    window.location.assign('/login');
+  }
+}
+
 api.interceptors.response.use(
   (res) => res,
-  (error: AxiosError) => {
+  async (error: AxiosError) => {
     const status = error.response?.status;
     const url = error.config?.url ?? '';
-    if (status === 401 && !url.includes('/auth/login')) {
-      localStorage.removeItem(TOKEN_KEY);
-      localStorage.removeItem(REFRESH_KEY);
-      localStorage.removeItem(USER_KEY);
-      if (window.location.pathname !== '/login') {
-        window.location.assign('/login');
+    const original = error.config as
+      | (InternalAxiosRequestConfig & { _retried?: boolean })
+      | undefined;
+
+    // Try exactly once per request. `_retried` stops a request whose retry also
+    // 401s — a revoked family, a suspended account — from looping.
+    const canRetry =
+      status === 401 &&
+      original &&
+      !original._retried &&
+      !url.includes('/auth/refresh') &&
+      !url.includes('/auth/login') &&
+      Boolean(localStorage.getItem(REFRESH_KEY));
+
+    if (canRetry) {
+      original._retried = true;
+      try {
+        refreshInFlight = refreshInFlight ?? refreshAccessToken();
+        const fresh = await refreshInFlight;
+        original.headers.set('Authorization', `Bearer ${fresh}`);
+        return api(original);
+      } catch {
+        dropSession();
+      } finally {
+        // Cleared whether it resolved or rejected, so the next expiry starts a
+        // fresh attempt rather than awaiting a settled promise forever.
+        refreshInFlight = null;
       }
+    } else if (status === 401 && !url.includes('/auth/login')) {
+      dropSession();
     }
+
     return Promise.reject(error);
   }
 );

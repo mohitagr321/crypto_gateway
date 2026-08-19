@@ -309,16 +309,45 @@ async function issueSession(
     email_verified: boolean;
     client_status: string | null;
   },
+  /**
+   * The device to record against this session. Supplied by the approval path,
+   * which captured it on the LOGIN request — the same request the approval
+   * email described. Omitted on the direct path, where this request IS the
+   * login and its own headers are the right source.
+   */
+  recorded?: { label: string | null; kind: string | null; ip: string | null; userAgent: string | null },
 ): Promise<void> {
-  const claims = { sub: user.id, role: user.role_name, email: user.email };
-  const accessToken = signAccessToken(claims);
-  const refreshToken = signRefreshToken(claims);
+  const parsed = parseUserAgent(req.get('user-agent'));
+  const device = {
+    label: recorded?.label ?? parsed.label,
+    kind: recorded?.kind ?? parsed.kind,
+    ip: recorded?.ip ?? formatIp(req.ip),
+    userAgent: recorded?.userAgent ?? req.get('user-agent') ?? null,
+  };
+  const refreshToken = signRefreshToken({
+    sub: user.id,
+    role: user.role_name,
+    email: user.email,
+  });
 
-  // Start a new token family for this login. Failure here is logged, never
-  // fatal: an untracked token still works (see ALLOW_UNTRACKED_REFRESH), and
-  // refusing to log a user in because an audit row would not insert is the
-  // wrong trade.
-  await storeRefreshToken(user.id, refreshToken, null);
+  // Start a new token family for this login, tagged with the device that opened
+  // it. Failure here is logged, never fatal: an untracked token still works
+  // (see ALLOW_UNTRACKED_REFRESH), and refusing to log a user in because an
+  // audit row would not insert is the wrong trade.
+  const familyId = await storeRefreshToken(user.id, refreshToken, null, device);
+
+  // THE FAMILY ID TRAVELS IN THE ACCESS TOKEN, which is what lets the session
+  // list mark one row "this device". It is an identifier, not a credential:
+  // knowing it permits nothing, and the revoke endpoint authorises against the
+  // authenticated user rather than against this value. Absent on tokens minted
+  // before this shipped, so the panel degrades to marking nothing rather than
+  // marking the wrong row.
+  const accessToken = signAccessToken({
+    sub: user.id,
+    role: user.role_name,
+    email: user.email,
+    ...(familyId ? { fid: familyId } : {}),
+  });
 
   await query(`UPDATE users SET last_login_at = now() WHERE id = $1`, [user.id]);
   await writeAudit({
@@ -506,7 +535,7 @@ router.post(
       throw AppError.unauthorized('This account is not active.');
     }
 
-    await issueSession(req, res, user);
+    await issueSession(req, res, user, claimed.device);
   }),
 );
 
@@ -562,9 +591,14 @@ router.post(
     }
 
     const claims = { sub: user.id, role: user.role_name, email: user.email };
-    const accessToken = signAccessToken(claims);
     const nextRefresh = signRefreshToken(claims);
-    await storeRefreshToken(user.id, nextRefresh, familyId);
+    // No device passed: rotation INHERITS the family's original device rather
+    // than re-deriving it from this request. See storeRefreshToken.
+    const nextFamily = await storeRefreshToken(user.id, nextRefresh, familyId);
+    const accessToken = signAccessToken({
+      ...claims,
+      ...(nextFamily ? { fid: nextFamily } : {}),
+    });
 
     res.status(200).json({
       accessToken,
@@ -766,14 +800,51 @@ async function storeRefreshToken(
   userId: string,
   token: string,
   familyId: string | null,
-): Promise<void> {
-  if (!refreshTokensTable) return;
+  device?: { label: string; kind: string; ip: string | null; userAgent: string | null },
+): Promise<string | null> {
+  if (!refreshTokensTable) return null;
   try {
-    await query(
-      `INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
-       VALUES ($1, COALESCE($2::uuid, gen_random_uuid()), $3, $4)
-       ON CONFLICT (token_hash) DO NOTHING`,
-      [userId, familyId, sha256Hex(token), refreshExpiryOf(token)],
+    // THE DEVICE DESCRIBES THE FAMILY, so a rotation inherits it rather than
+    // re-deriving it. Re-parsing the User-Agent on every refresh would look
+    // equivalent and is not: the same session rotating from a browser that has
+    // since auto-updated would silently rename itself in the merchant's session
+    // list, and a session that changes its own name is exactly the thing the
+    // list exists to let someone notice.
+    //
+    // `COALESCE($5, prev.device_label)` reads the family's existing values when
+    // the caller passes none, which is what the refresh path does.
+    const rows = await query<{ family_id: string }>(
+      `WITH prev AS (
+         SELECT device_label, device_kind, ip, user_agent
+           FROM refresh_tokens
+          WHERE family_id = $2::uuid
+          ORDER BY issued_at DESC
+          LIMIT 1
+       )
+       INSERT INTO refresh_tokens
+         (user_id, family_id, token_hash, expires_at,
+          device_label, device_kind, ip, user_agent, last_used_at)
+       SELECT $1,
+              COALESCE($2::uuid, gen_random_uuid()),
+              $3,
+              $4,
+              COALESCE($5, (SELECT device_label FROM prev)),
+              COALESCE($6, (SELECT device_kind  FROM prev)),
+              COALESCE($7, (SELECT ip           FROM prev)),
+              COALESCE($8, (SELECT user_agent   FROM prev)),
+              now()
+       ON CONFLICT (token_hash) DO NOTHING
+       RETURNING family_id`,
+      [
+        userId,
+        familyId,
+        sha256Hex(token),
+        refreshExpiryOf(token),
+        device?.label ?? null,
+        device?.kind ?? null,
+        device?.ip ?? null,
+        device?.userAgent ?? null,
+      ],
     );
 
     // Bounded, deterministic housekeeping: only this user's already-dead rows,
@@ -787,6 +858,8 @@ async function storeRefreshToken(
           AND expires_at < now() - interval '1 day'`,
       [userId],
     );
+
+    return rows[0]?.family_id ?? familyId;
   } catch (err) {
     if (isMissingTable(err)) {
       refreshTokensTable = false;
@@ -795,10 +868,11 @@ async function storeRefreshToken(
         'refresh_tokens is missing (migration 023 not applied); issued refresh ' +
           'token is untracked and cannot be revoked',
       );
-      return;
+      return null;
     }
     logger.error({ err, userId }, 'failed to record refresh token');
   }
+  return null;
 }
 
 async function revokeFamily(familyId: string, reason: string): Promise<void> {

@@ -167,6 +167,19 @@ export interface SessionTokens {
   clientStatus?: string | null;
 }
 
+/** One signed-in device. A session is a refresh-token family, server-side. */
+export interface SessionInfo {
+  id: string;
+  device: string | null;
+  deviceKind: string | null;
+  ip: string | null;
+  signedInAt: string;
+  lastUsedAt: string | null;
+  expiresAt: string;
+  /** True for the device making the request — never offered a bare "sign out". */
+  current: boolean;
+}
+
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'consumed' | 'expired';
 
 /** The poll response. Carries the session on the one poll that finds it. */

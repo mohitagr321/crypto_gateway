@@ -28,6 +28,12 @@ declare global {
       userId: string;
       role: string;
       email: string;
+      /**
+       * Which signed-in device this request came from — the refresh-token family
+       * id, when the access token carries one. Used only to mark the current
+       * row in the session list; never to authorise anything.
+       */
+      familyId?: string;
     }
     interface Request {
       /** Raw request body captured for HMAC verification (see index.ts json verify). */
