@@ -7,7 +7,7 @@
  */
 import path from 'path';
 import dotenv from 'dotenv';
-import { Wallet } from 'ethers';
+import { Mnemonic, Wallet } from 'ethers';
 import { z } from 'zod';
 
 // Load env from the process cwd first (e.g. backend/.env if you keep one), then
@@ -218,7 +218,25 @@ const EnvSchema = z.object({
   RATE_MAX_STALE_SECONDS: numberish(86_400),
 
   // ---- HD wallet ----
-  HD_WALLET_MNEMONIC: z.string().min(1, 'HD_WALLET_MNEMONIC is required'),
+  // Validated as a real BIP-39 phrase, not merely "present". ethers only parses
+  // the mnemonic on the FIRST deposit derivation, so a truncated one used to
+  // boot cleanly and then 500 every POST /payments with "invalid mnemonic
+  // length" (utils/hdwallet.ts -> accountNode). Whitespace is normalised first:
+  // the usual damage is a phrase that was line-wrapped or double-spaced on its
+  // way into .env — and dotenv keeps only the first line of an unquoted value.
+  HD_WALLET_MNEMONIC: z
+    .string()
+    .min(1, 'HD_WALLET_MNEMONIC is required')
+    .transform((s) => s.trim().replace(/\s+/g, ' '))
+    .refine((s) => Mnemonic.isValidMnemonic(s), {
+      message:
+        'HD_WALLET_MNEMONIC is not a valid BIP-39 mnemonic. It must be 12/15/18/21/24 ' +
+        'words from the BIP-39 English wordlist with a valid checksum. A wrong word ' +
+        'count almost always means the phrase was truncated or wrapped across lines ' +
+        'in .env (quote a value that spans lines). Deriving deposit addresses from ' +
+        'the WRONG phrase would strand funds, so this refuses to boot rather than ' +
+        'failing later on the payment-creation path. The value is not echoed here.',
+    }),
   HD_DERIVATION_PATH: z.string().default("m/44'/60'/0'/0"),
   // Tron BIP-44 coin type is 195 (BSC/ETH is 60). The SAME mnemonic is reused;
   // the coin type keeps the two address spaces completely disjoint.
