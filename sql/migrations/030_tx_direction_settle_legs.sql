@@ -1,0 +1,33 @@
+-- =============================================================================
+-- 030 — tx_direction gains 'settle_net' and 'settle_fee'
+--
+-- Run with: psql "$DATABASE_URL" -f sql/migrations/030_tx_direction_settle_legs.sql
+-- Rollback:  sql/migrations/030_tx_direction_settle_legs_rollback.sql
+--
+-- !! NO BEGIN/COMMIT ON PURPOSE — see 029 for why ALTER TYPE ... ADD VALUE runs
+--    outside a transaction block.
+--
+-- WHY
+--   Direct settlement (DIRECT_SETTLEMENT_ENABLED) pays a deposit out in two
+--   legs: the net to the merchant and the commission to central. Each leg needs
+--   its own ledger row, because those rows ARE the idempotency guard — a retry
+--   performs only the legs with no row yet.
+--
+-- WHY NOT REUSE 'payout' AND 'sweep'
+--   The merchant leg looks like a payout and the commission leg looks like a
+--   sweep, and reusing them would have avoided this migration. It would also
+--   have been a trap: the two-hop sweep path treats ANY `direction = 'sweep'`
+--   row for a payment as proof that a sweep already moved the funds, and
+--   completes the payment on the strength of it (workers/index.ts, the
+--   "prior sweep tx exists" branch). A commission-leg row wearing that label
+--   would let a fallback to the two-hop path mark a payment settled when only
+--   the fee had moved — the merchant's money still at the deposit address, and
+--   nothing left re-driving it. Distinct labels make that impossible.
+--
+-- SAFE TO RE-RUN
+--   IF NOT EXISTS on both. Adding an enum value takes no table lock and rewrites
+--   nothing.
+-- =============================================================================
+
+ALTER TYPE tx_direction ADD VALUE IF NOT EXISTS 'settle_net';
+ALTER TYPE tx_direction ADD VALUE IF NOT EXISTS 'settle_fee';
