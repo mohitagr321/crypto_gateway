@@ -30,7 +30,7 @@ import {
 } from 'ethers';
 import { config } from '../config/env';
 import { logger } from '../config/logger';
-import { query } from '../db/pool';
+import { query, queryOne } from '../db/pool';
 import { deriveAddress, derivePrivateKey } from '../utils/hdwallet';
 import { withChainLock } from '../utils/chainLock';
 import { ChainAdapter, PayoutPreparation, SweepResult } from './networks';
@@ -569,6 +569,235 @@ export function createEvmAdapter(cfg: EvmChainConfig): ChainAdapter {
       await tx.wait(1);
 
       return { txHash: tx.hash, amount: balanceHuman, asset: asset.symbol };
+    },
+
+    /**
+     * DIRECT SETTLEMENT — the deposit address pays the merchant itself.
+     *
+     * The two-hop path (sweepDeposit -> central, then sendPayout central ->
+     * merchant) routes the merchant's funds through the central hot wallet.
+     * This does the same work as two transfers signed by the deposit address:
+     *
+     *     deposit -> merchant   (net)
+     *     deposit -> central    (commission)
+     *
+     * The transaction COUNT is unchanged, because the two-hop path also costs
+     * two transfers plus a top-up; the single top-up here is simply sized for
+     * both legs. What changes is that the merchant's money is never in a wallet
+     * this gateway pools funds in.
+     *
+     * ================== WHY THE MERCHANT LEG GOES FIRST =======================
+     * Whatever order these run in, a crash between them leaves one leg done. If
+     * the commission leg went first, the failure mode would be "we took our fee
+     * and the merchant is still waiting" — the gateway holding a merchant's
+     * money because of our own crash. Merchant-first inverts that: the stranded
+     * remainder is OUR commission, sitting at an address only we can spend from,
+     * and the retry below collects it. A delay in being paid our own fee is not
+     * an incident; a delay in paying a merchant is.
+     *
+     * ============================ RETRY SAFETY ===============================
+     * Every leg is guarded by its own ledger row, so this is safe to re-run at
+     * any point:
+     *   * merchant leg   -> `direction = 'settle_net'` (log_index -4)
+     *   * commission leg -> `direction = 'settle_fee'` (log_index -5)
+     * A re-run reads the rows first and performs only the legs that are missing.
+     * It never re-reads the balance to decide the SPLIT — the caller computed
+     * that from the balance at the time — so a retry after the merchant leg
+     * cannot mistake the leftover commission for a new, smaller gross and pay
+     * the merchant a second time out of it.
+     *
+     * Returns null when there is nothing to do (dust, or the balance no longer
+     * covers the split), which the caller treats exactly like a null sweep.
+     */
+    async settleDepositDirect({
+      paymentId,
+      depositAddress,
+      derivationIndex,
+      asset: assetSymbol,
+      merchantAddress,
+      netAmount,
+      commissionAmount,
+    }: {
+      paymentId: string;
+      depositAddress: string;
+      derivationIndex: number;
+      asset?: string;
+      merchantAddress: string;
+      netAmount: string;
+      commissionAmount: string;
+    }): Promise<{
+      netTxHash: string | null;
+      commissionTxHash: string | null;
+      netAmount: string;
+      commissionAmount: string;
+      asset: string;
+    } | null> {
+      const asset = chainAsset(assetSymbol);
+      if (asset.isNative) {
+        // A native settlement has to net the fee out of the amount being moved
+        // rather than fund it from outside, which is a different calculation
+        // entirely (see sweepNativeDeposit). Out of scope here: fall back.
+        return null;
+      }
+      const rpc = provider();
+
+      const netU = toBaseUnits(netAmount, asset);
+      const commissionU = toBaseUnits(commissionAmount, asset);
+      if (netU <= 0n) {
+        logger.warn(
+          { paymentId, netAmount, commissionAmount },
+          'direct settle: net amount is zero or negative; nothing to pay the merchant',
+        );
+        return null;
+      }
+
+      // Which legs are already on chain? Read BEFORE touching the balance, so a
+      // retry after a completed merchant leg is decided by the ledger and not by
+      // a balance that has legitimately shrunk.
+      const priorNet = await queryOne<{ tx_hash: string }>(
+        `SELECT tx_hash FROM blockchain_transactions
+          WHERE payment_id = $1 AND direction = 'settle_net' LIMIT 1`,
+        [paymentId],
+      );
+      const priorFee = await queryOne<{ tx_hash: string }>(
+        `SELECT tx_hash FROM blockchain_transactions
+          WHERE payment_id = $1 AND direction = 'settle_fee' LIMIT 1`,
+        [paymentId],
+      );
+      const needNet = !priorNet;
+      const needFee = !priorFee && commissionU > 0n;
+      if (!needNet && !needFee) {
+        return {
+          netTxHash: priorNet?.tx_hash ?? null,
+          commissionTxHash: priorFee?.tx_hash ?? null,
+          netAmount,
+          commissionAmount,
+          asset: asset.symbol,
+        };
+      }
+
+      const tokenRead = tokenContract(rpc, asset);
+      const balanceU: bigint = await tokenRead.balanceOf(depositAddress);
+      const required = (needNet ? netU : 0n) + (needFee ? commissionU : 0n);
+      if (balanceU < toBaseUnits(asset.minSweep, asset) && balanceU < required) {
+        logger.info(
+          { paymentId, balance: fromBaseUnits(balanceU, asset), asset: asset.symbol },
+          'direct settle: balance below the asset minimum; skipping',
+        );
+        return null;
+      }
+      if (balanceU < required) {
+        // The split was computed from a balance that is no longer there. Do not
+        // guess a new one: the caller re-splits from the live balance on its next
+        // pass, and the funds are safe at the deposit address until it does.
+        logger.warn(
+          {
+            paymentId,
+            balance: fromBaseUnits(balanceU, asset),
+            required: fromBaseUnits(required, asset),
+          },
+          'direct settle: balance no longer covers the split; deferring to the next pass',
+        );
+        return null;
+      }
+
+      const depositSigner = new Wallet(derivePrivateKey(derivationIndex), rpc);
+
+      // ---- Gas: one top-up sized for BOTH legs ----
+      // priceTokenTransfer prices ONE transfer. Two legs need two, and the top-up
+      // is a single transaction either way, so the cost of getting this wrong is
+      // a stranded half-settlement — the merchant paid and no gas left for the
+      // commission leg. Doubling here is what keeps both legs inside one funding.
+      const legs = (needNet ? 1n : 0n) + (needFee ? 1n : 0n);
+      const nativeBalance = await rpc.getBalance(depositAddress);
+      const perLeg = await requiredGasTopup(rpc, asset, depositAddress);
+      if (perLeg === null) return null;
+      const topupWei = perLeg * legs;
+      const gasShortfall = topupWei - nativeBalance;
+      if (gasShortfall > 0n) {
+        if (!cfg.gasStationPrivateKey) {
+          throw new Error('direct settle requires gas funding but no gas station key configured');
+        }
+        const fundTx = await withChainLock(cfg.network, 'gas', async () => {
+          const gasSigner = new Wallet(cfg.gasStationPrivateKey, rpc);
+          return gasSigner.sendTransaction({ to: depositAddress, value: gasShortfall });
+        });
+        await fundTx.wait(1);
+        await query(
+          `INSERT INTO blockchain_transactions
+             (payment_id, direction, tx_hash, from_address, to_address, amount, token,
+              network, status, log_index)
+           VALUES ($1, 'gas_funding', $2, $3, $4, $5, $6, $7, 'confirmed', -3)
+           ON CONFLICT (tx_hash, log_index) DO NOTHING`,
+          [
+            paymentId,
+            fundTx.hash,
+            fundTx.from,
+            depositAddress,
+            formatEther(gasShortfall),
+            cfg.feeCurrency,
+            cfg.network,
+          ],
+        );
+        logger.info(
+          { paymentId, txHash: fundTx.hash, legs: Number(legs), amount: formatEther(gasShortfall) },
+          'direct settle: gas topped up for both legs',
+        );
+      }
+
+      const token = tokenWithSigner(depositSigner, asset);
+      let netTxHash = priorNet?.tx_hash ?? null;
+      let feeTxHash = priorFee?.tx_hash ?? null;
+
+      // ---- Leg 1: the merchant. Recorded the moment it confirms, so a crash
+      //      before leg 2 can never replay it. ----
+      if (needNet) {
+        const netTx = await token.transfer(merchantAddress, netU);
+        await netTx.wait(1);
+        netTxHash = netTx.hash;
+        await query(
+          `INSERT INTO blockchain_transactions
+             (payment_id, direction, tx_hash, from_address, to_address, amount, token,
+              asset, network, status, log_index)
+           VALUES ($1, 'settle_net', $2, $3, $4, $5, $6, $6, $7, 'confirmed', -4)
+           ON CONFLICT (tx_hash, log_index) DO NOTHING`,
+          [paymentId, netTx.hash, depositAddress, merchantAddress, netAmount,
+           asset.symbol, cfg.network],
+        );
+        logger.info(
+          { paymentId, txHash: netTx.hash, to: merchantAddress, amount: netAmount },
+          'direct settle: merchant paid from the deposit address',
+        );
+      }
+
+      // ---- Leg 2: our commission. A failure here strands OUR money, not the
+      //      merchant's, and the next pass collects it. ----
+      if (needFee) {
+        const feeTx = await token.transfer(centralWalletAddress, commissionU);
+        await feeTx.wait(1);
+        feeTxHash = feeTx.hash;
+        await query(
+          `INSERT INTO blockchain_transactions
+             (payment_id, direction, tx_hash, from_address, to_address, amount, token,
+              asset, network, status, log_index)
+           VALUES ($1, 'settle_fee', $2, $3, $4, $5, $6, $6, $7, 'confirmed', -5)
+           ON CONFLICT (tx_hash, log_index) DO NOTHING`,
+          [paymentId, feeTx.hash, depositAddress, centralWalletAddress, commissionAmount,
+           asset.symbol, cfg.network],
+        );
+        logger.info(
+          { paymentId, txHash: feeTx.hash, amount: commissionAmount },
+          'direct settle: commission moved to central',
+        );
+      }
+
+      return {
+        netTxHash,
+        commissionTxHash: feeTxHash,
+        netAmount,
+        commissionAmount,
+        asset: asset.symbol,
+      };
     },
 
     async sendPayout({ to, amountHuman, asset: assetSymbol }): Promise<{ txHash: string }> {

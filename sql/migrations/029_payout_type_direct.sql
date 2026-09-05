@@ -1,0 +1,34 @@
+-- =============================================================================
+-- 029 — payout_type gains 'direct'
+--
+-- Run with: psql "$DATABASE_URL" -f sql/migrations/029_payout_type_direct.sql
+-- Rollback:  sql/migrations/029_payout_type_direct_rollback.sql  (see the note
+--            there: an enum value cannot be removed while any row uses it)
+--
+-- !! NO BEGIN/COMMIT ON PURPOSE — ALTER TYPE ... ADD VALUE cannot be used by a
+--    statement in the SAME transaction that added it, and on PostgreSQL below
+--    12 cannot run inside a transaction block at all. psql runs this file in
+--    autocommit, one statement at a time, which is what makes the value usable
+--    immediately afterwards.
+--
+-- WHY
+--   DIRECT_SETTLEMENT_ENABLED pays the merchant from the DEPOSIT address and
+--   moves only the commission to central, instead of sweeping everything to
+--   central and paying out from there. The payouts row for such a settlement is
+--   a real payout in every way the merchant and the admin panel care about, but
+--   it differs in one way that matters to reconciliation: the funds never left
+--   the central wallet, so a ledger that debits central for every payout would
+--   double-count it.
+--
+--   'auto' and 'manual' describe who TRIGGERED a payout. This third value
+--   describes where the money CAME FROM, which is why it is a new value rather
+--   than a reuse of 'auto': an operator reading the table, and any future
+--   central-balance reconciliation, must be able to tell the two apart without
+--   joining to blockchain_transactions.
+--
+-- SAFE TO RE-RUN
+--   IF NOT EXISTS makes this idempotent, and adding an enum value takes no table
+--   lock and rewrites nothing — existing rows and readers are untouched.
+-- =============================================================================
+
+ALTER TYPE payout_type ADD VALUE IF NOT EXISTS 'direct';

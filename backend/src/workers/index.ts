@@ -37,8 +37,9 @@ import {
 } from './queues';
 import { dispatch, enqueueWebhook } from '../services/webhookService';
 import { executePayout, requestPayout } from '../services/payoutService';
+import { getActiveCommission, computeSplit } from '../services/commissionService';
 import { executeAdminWithdrawal } from '../services/adminCommissionService';
-import { adapterFor, parseNetwork } from '../blockchain/networks';
+import { adapterFor, parseNetwork, ChainAdapter } from '../blockchain/networks';
 import { parseAsset } from '../blockchain/assets';
 import { reconcilePaidInvoices } from '../services/invoiceService';
 import { runDueSubscriptions } from '../services/subscriptionService';
@@ -254,6 +255,173 @@ async function reconcileSweptExcess(args: {
 }
 
 // ---------------------------------------------------------------------------
+// DIRECT SETTLEMENT
+// ---------------------------------------------------------------------------
+/**
+ * Pay the merchant straight from the deposit address, keeping only the
+ * commission for the central wallet.
+ *
+ * Returns true when the payment is fully settled and the caller must stop;
+ * false when it declined, and the two-hop sweep should run instead. It NEVER
+ * returns true on a partial result — a run that paid the merchant but could not
+ * move the commission leaves the payment `confirmed` so the next pass finishes
+ * it, and the adapter's per-leg ledger rows stop the merchant leg repeating.
+ *
+ * The split is computed HERE, from the live on-chain balance, for the same
+ * reason the two-hop path sweeps a balance rather than `amount_received`: the
+ * balance is what can physically be moved. An overpayment therefore settles at
+ * its real size instead of stranding the excess.
+ */
+async function trySettleDirect(
+  paymentId: string,
+  payment: { client_id: string; deposit_address: string; network: string; asset: string },
+  adapter: ChainAdapter,
+  derivationIndex: number,
+): Promise<boolean> {
+  if (!adapter.settleDepositDirect) return false;
+  const network = parseNetwork(payment.network);
+
+  // Destination first: no payout wallet means there is nothing to settle TO, and
+  // the two-hop path is the right answer (funds reach central and wait there for
+  // the merchant to configure one) rather than leaving them at the deposit
+  // address indefinitely.
+  const client = await queryOne<{
+    payout_wallet: string | null;
+    payout_wallet_trc20: string | null;
+    payout_wallet_erc20: string | null;
+    status: string;
+  }>(
+    `SELECT payout_wallet, payout_wallet_trc20, payout_wallet_erc20, status
+       FROM clients WHERE id = $1`,
+    [payment.client_id],
+  );
+  const merchantAddress =
+    network === 'TRC20'
+      ? client?.payout_wallet_trc20
+      : network === 'ERC20'
+        ? client?.payout_wallet_erc20
+        : client?.payout_wallet;
+  if (!client || client.status !== 'approved' || !merchantAddress) {
+    logger.info(
+      { paymentId, clientStatus: client?.status },
+      'direct settle: no approved client / payout wallet; using the two-hop sweep',
+    );
+    return false;
+  }
+  if (!adapter.isValidAddress(merchantAddress)) {
+    logger.warn(
+      { paymentId, merchantAddress },
+      'direct settle: configured payout wallet is not valid for this chain; using the two-hop sweep',
+    );
+    return false;
+  }
+
+  const gross = await adapter.balanceOf(payment.deposit_address, payment.asset);
+  if (Number(gross) <= 0) return false;
+
+  const commission = await getActiveCommission(payment.client_id, network, payment.asset);
+  let split;
+  try {
+    // networkFee '0': the deposit address pays its own gas in the chain's native
+    // currency out of the top-up, exactly as it does on the sweep path. Nothing
+    // is deducted from the token amount, so the merchant receives the full net.
+    split = computeSplit(gross, commission, '0', payment.asset);
+  } catch (err) {
+    // A commission denominated in the wrong asset. Same decision as the payout
+    // path makes: refuse, and let the funds take the two-hop route to central
+    // where they are still counted as the merchant's.
+    logger.warn(
+      { paymentId, reason: err instanceof Error ? err.message : String(err) },
+      'direct settle: commission could not be applied; using the two-hop sweep',
+    );
+    return false;
+  }
+
+  const result = await adapter.settleDepositDirect({
+    paymentId,
+    depositAddress: payment.deposit_address,
+    derivationIndex,
+    asset: payment.asset,
+    merchantAddress,
+    netAmount: split.netAmount,
+    commissionAmount: split.commissionAmount,
+  });
+  if (!result) return false;
+
+  // Both legs must be on chain before this counts as settled. A missing
+  // commission leg is not a failure the merchant can see, but calling it done
+  // would leave our own fee parked at a dead address with nothing re-driving it.
+  const feeOutstanding = Number(split.commissionAmount) > 0 && !result.commissionTxHash;
+  if (!result.netTxHash || feeOutstanding) {
+    logger.warn(
+      { paymentId, netTxHash: result.netTxHash, commissionTxHash: result.commissionTxHash },
+      'direct settle: only part of the settlement completed — payment stays confirmed ' +
+        'and the next pass finishes the remaining leg',
+    );
+    return true;
+  }
+
+  // A payouts row so the merchant, the admin panel and the commission ledger all
+  // see this settlement the same way they see a two-hop one. `type = 'direct'`
+  // records how it was paid: the funds came from the deposit address, so the row
+  // must not be reconciled against a central-wallet debit.
+  await query(
+    `INSERT INTO payouts
+       (client_id, payment_id, gross_amount, commission_amount, network_fee,
+        net_amount, to_address, network, asset, status, type, triggered_by, tx_hash,
+        broadcast_at)
+     VALUES ($1, $2, $3, $4, '0', $5, $6, $7, $8, 'confirmed', 'direct', NULL, $9, now())
+     ON CONFLICT DO NOTHING`,
+    [
+      payment.client_id,
+      paymentId,
+      gross,
+      split.commissionAmount,
+      split.netAmount,
+      merchantAddress,
+      network,
+      result.asset,
+      result.netTxHash,
+    ],
+  );
+
+  const swept = await query<{ id: string }>(
+    `UPDATE payments SET status = 'swept', settle_done_at = now()
+      WHERE id = $1 AND status = 'confirmed'
+      RETURNING id`,
+    [paymentId],
+  );
+  if (swept.length === 0) {
+    logger.error(
+      { paymentId, netTxHash: result.netTxHash, amount: split.netAmount },
+      'DIRECT SETTLE PAID THE MERCHANT BUT THE PAYMENT WAS NO LONGER `confirmed` — ' +
+        'reconcile by hand',
+    );
+  }
+
+  logger.info(
+    {
+      paymentId,
+      gross,
+      net: split.netAmount,
+      commission: split.commissionAmount,
+      netTxHash: result.netTxHash,
+      commissionTxHash: result.commissionTxHash,
+      to: merchantAddress,
+    },
+    'direct settle: merchant paid from the deposit address, commission to central',
+  );
+
+  enqueueWebhook({
+    paymentId,
+    event: 'payment.swept',
+    overrides: { status: 'swept', txHash: result.netTxHash, amount: gross },
+  }).catch((err) => logger.warn({ err, paymentId }, 'swept webhook enqueue failed'));
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // SWEEP: move a confirmed deposit's USDT balance to the central wallet.
 // Chain-specific mechanics (fee funding, signing, decimals) live in the network
 // adapter (blockchain/{bsc,tron}Adapter.ts); this worker is chain-agnostic.
@@ -302,6 +470,19 @@ async function processSweep(job: Job<SweepJob>): Promise<void> {
   // and returns null on dust. Passing the asset is load-bearing: without it the
   // adapter defaults to USDT and would move the wrong token — or nothing.
   const adapter = adapterFor(parseNetwork(payment.network));
+
+  // ---- Direct settlement, when configured and supported ----
+  // Pays the merchant from the deposit address and moves only the commission to
+  // central, so the merchant's funds never sit in a pooled hot wallet. Returns
+  // false when it declined (flag off, chain unsupported, no payout wallet, dust,
+  // stale split), and the two-hop sweep below then runs exactly as before — the
+  // fallback is deliberate, because a settlement path that can refuse but not
+  // fall back would strand funds every time one of its preconditions moved.
+  if (config.settlement.directSettlementEnabled && adapter.settleDepositDirect) {
+    const settled = await trySettleDirect(paymentId, payment, adapter, index);
+    if (settled) return;
+  }
+
   const result = await adapter.sweepDeposit({
     paymentId,
     depositAddress: payment.deposit_address,

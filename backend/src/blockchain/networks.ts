@@ -144,6 +144,42 @@ export interface ChainAdapter {
   }): Promise<SweepResult | null>;
 
   /**
+   * Settle a deposit WITHOUT routing the merchant's funds through the central
+   * wallet: two transfers signed by the deposit address itself, the net to the
+   * merchant and the commission to central.
+   *
+   * OPTIONAL. A chain that does not implement it keeps the two-hop path
+   * (sweepDeposit + sendPayout), and so does every chain when
+   * DIRECT_SETTLEMENT_ENABLED is off — callers must check for the method AND
+   * the flag, and fall back rather than fail.
+   *
+   * The caller owns the split: it reads the live balance, applies the client's
+   * commission to it, and passes the resulting amounts in. The implementation
+   * must not re-derive them, because a retry that runs after the merchant leg
+   * would then split the leftover commission as if it were a fresh gross.
+   *
+   * Implementations MUST be safe to retry, per leg: a re-run performs only the
+   * legs with no ledger row yet. Returns null when there is nothing to do (dust,
+   * or the balance no longer covers the split), which the caller treats exactly
+   * as it treats a null sweep.
+   */
+  settleDepositDirect?(params: {
+    paymentId: string;
+    depositAddress: string;
+    derivationIndex: number;
+    asset?: string;
+    merchantAddress: string;
+    netAmount: string;
+    commissionAmount: string;
+  }): Promise<{
+    netTxHash: string | null;
+    commissionTxHash: string | null;
+    netAmount: string;
+    commissionAmount: string;
+    asset: string;
+  } | null>;
+
+  /**
    * Send USDT from the central wallet to `to`. Returns the broadcast tx hash.
    *
    * PREFER preparePayout + broadcastPayout where the chain supports them. This

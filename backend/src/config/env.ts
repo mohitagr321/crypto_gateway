@@ -261,6 +261,19 @@ const EnvSchema = z.object({
 
   // ---- Settlement ----
   AUTO_PAYOUT_ENABLED: boolish.default(false),
+  // ---- Direct settlement (EVM only) ----
+  // OFF: deposit -> central (sweep), then central -> merchant (payout). Two
+  // hops, and the merchant's funds sit in the central hot wallet in between
+  // (measured at 6-10s once AUTO_PAYOUT_ENABLED is on).
+  // ON:  deposit -> merchant (net) and deposit -> central (commission), as two
+  // transfers signed by the deposit address itself. The merchant's money never
+  // enters the central wallet; only commission does. Same transaction count as
+  // the two-hop path, because the single gas top-up is sized for both legs.
+  //
+  // A flag rather than a replacement: the sweep path stays exactly as it was, so
+  // a cutover is one value and so is a rollback. Ignored on TRC20/BTC, which
+  // keep the two-hop path.
+  DIRECT_SETTLEMENT_ENABLED: boolish.default(false),
   MIN_SWEEP_AMOUNT: z.string().default('1.0'),
   GAS_TOPUP_BNB: z.string().default('0.0008'),
   // Tron settlement. A TRC20 transfer from a fresh address burns ~13-30 TRX when
@@ -645,6 +658,7 @@ export const config = {
 
   settlement: {
     autoPayoutEnabled: env.AUTO_PAYOUT_ENABLED,
+    directSettlementEnabled: env.DIRECT_SETTLEMENT_ENABLED,
     minSweepAmount: env.MIN_SWEEP_AMOUNT,
     gasTopupBnb: env.GAS_TOPUP_BNB,
   },
