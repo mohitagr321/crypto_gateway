@@ -45,6 +45,7 @@
  */
 import { config } from '../config/env';
 import { logger } from '../config/logger';
+import { paidFloorSql } from './underpayment';
 import { pool, query, queryOne } from '../db/pool';
 import { sweepQueue, SweepJob } from '../workers/queues';
 import { enqueueWebhook } from '../services/webhookService';
@@ -665,7 +666,7 @@ async function updateConfirmationsAndPromote(nowBlock: number): Promise<void> {
   // marks its incoming rows `confirmed`, so a payment with no NEW money has no
   // `pending` row left to join against and never reappears here.
   const ready = await query<{ id: string; fully_paid: boolean }>(
-    `SELECT p.id, (p.amount_received >= p.amount) AS fully_paid
+    `SELECT p.id, (p.amount_received >= ${paidFloorSql('p.amount')}) AS fully_paid
        FROM payments p
        JOIN blockchain_transactions bt ON bt.payment_id = p.id
       WHERE p.status IN ('confirming', 'partial')
@@ -691,7 +692,7 @@ async function updateConfirmationsAndPromote(nowBlock: number): Promise<void> {
       const marked = await query<{ id: string; amount: string; amount_received: string }>(
         `UPDATE payments SET status = 'partial'
           WHERE id = $1 AND status IN ('confirming', 'partial')
-            AND amount_received < amount
+            AND amount_received < ${paidFloorSql('amount')}
           RETURNING id, amount, amount_received`,
         [p.id],
       );

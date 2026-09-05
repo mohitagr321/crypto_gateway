@@ -47,6 +47,7 @@
  */
 import { Contract, WebSocketProvider, JsonRpcProvider, Log } from 'ethers';
 import { logger } from '../config/logger';
+import { paidFloorSql } from './underpayment';
 import { pool, query, queryOne } from '../db/pool';
 import {
   httpProviderFor,
@@ -1247,7 +1248,7 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
                   AND d.status <> 'reorged'
                   AND d.block_number IS NOT NULL
                   AND ($1 - d.block_number) >= p.required_confirmations
-             ), 0) >= p.amount) AS fully_paid
+             ), 0) >= ${paidFloorSql('p.amount')}) AS fully_paid
        FROM payments p
        JOIN blockchain_transactions bt ON bt.payment_id = p.id
       WHERE p.status IN ('confirming', 'partial')
@@ -1285,7 +1286,7 @@ async function updateConfirmationsAndPromote(head: number): Promise<void> {
         `UPDATE payments
             SET status = 'partial'
           WHERE id = $1 AND status IN ('confirming', 'partial')
-            AND amount_received < amount
+            AND amount_received < ${paidFloorSql('amount')}
           RETURNING id, amount, amount_received`,
         [p.id],
       );

@@ -274,6 +274,32 @@ const EnvSchema = z.object({
   // a cutover is one value and so is a rollback. Ignored on TRC20/BTC, which
   // keep the two-hop path.
   DIRECT_SETTLEMENT_ENABLED: boolish.default(false),
+  // ---- Underpayment tolerance ----
+  // How far BELOW the invoiced amount a deposit may land and still count as
+  // fully paid, as a percentage. 0 (the default) is exact-or-nothing, which is
+  // what this gateway did before the setting existed.
+  //
+  // WHY IT IS NEEDED: the sending exchange's withdrawal fee comes out of the
+  // amount the customer entered, so a customer who pays a 50 USDT invoice in
+  // good faith delivers 49.99. Exact comparison holds that at `partial`
+  // forever: the merchant is never paid, and the funds sit at a deposit address
+  // until someone recovers them by hand.
+  //
+  // The merchant is credited what ACTUALLY ARRIVED, never the invoiced figure —
+  // settlement is balance-based (see the sweep and direct-settle paths), so a
+  // tolerated shortfall is absorbed by the merchant, not invented by the
+  // gateway.
+  //
+  // Capped at 5: this is a rounding allowance for third-party fees. A larger
+  // value is a typo, and the cost of that typo is releasing goods for a payment
+  // that never arrived.
+  UNDERPAYMENT_TOLERANCE_PERCENT: numberish(0).pipe(
+    z
+      .number()
+      .min(0, 'UNDERPAYMENT_TOLERANCE_PERCENT cannot be negative')
+      .max(5, 'UNDERPAYMENT_TOLERANCE_PERCENT is capped at 5 — a larger value would ' +
+        'accept a materially underpaid invoice as settled'),
+  ),
   MIN_SWEEP_AMOUNT: z.string().default('1.0'),
   GAS_TOPUP_BNB: z.string().default('0.0008'),
   // Tron settlement. A TRC20 transfer from a fresh address burns ~13-30 TRX when
@@ -659,6 +685,10 @@ export const config = {
   settlement: {
     autoPayoutEnabled: env.AUTO_PAYOUT_ENABLED,
     directSettlementEnabled: env.DIRECT_SETTLEMENT_ENABLED,
+    // Pre-computed multiplier so every call site uses one definition of the
+    // threshold: `amount * this` is the least that counts as fully paid.
+    underpaymentFloorMultiplier: 1 - env.UNDERPAYMENT_TOLERANCE_PERCENT / 100,
+    underpaymentTolerancePercent: env.UNDERPAYMENT_TOLERANCE_PERCENT,
     minSweepAmount: env.MIN_SWEEP_AMOUNT,
     gasTopupBnb: env.GAS_TOPUP_BNB,
   },
