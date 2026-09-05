@@ -274,6 +274,20 @@ const EnvSchema = z.object({
   // a cutover is one value and so is a rollback. Ignored on TRC20/BTC, which
   // keep the two-hop path.
   DIRECT_SETTLEMENT_ENABLED: boolish.default(false),
+  // Adds a per-payment INTERMEDIATE address between the deposit address and the
+  // two settlement legs. Only meaningful when DIRECT_SETTLEMENT_ENABLED is on.
+  //
+  //   off: deposit -> merchant (net) + deposit -> central (commission)   3 txs
+  //   on:  deposit -> intermediate, then intermediate -> merchant
+  //        + intermediate -> central                                     5 txs
+  //
+  // It costs roughly double the gas and buys no key security — the intermediate
+  // is derived from the SAME mnemonic, so anyone who can spend from one can
+  // spend from the other. What it does buy is that the merchant's payout no
+  // longer leaves the address the customer paid into, so a customer watching
+  // the chain cannot read the merchant's settlement or the commission taken off
+  // it. Enable it for that reason or leave it off.
+  SETTLEMENT_INTERMEDIATE_ENABLED: boolish.default(false),
   // ---- Underpayment tolerance ----
   // How far BELOW the invoiced amount a deposit may land and still count as
   // fully paid, as a percentage. 0 (the default) is exact-or-nothing, which is
@@ -685,6 +699,7 @@ export const config = {
   settlement: {
     autoPayoutEnabled: env.AUTO_PAYOUT_ENABLED,
     directSettlementEnabled: env.DIRECT_SETTLEMENT_ENABLED,
+    intermediateEnabled: env.SETTLEMENT_INTERMEDIATE_ENABLED,
     // Pre-computed multiplier so every call site uses one definition of the
     // threshold: `amount * this` is the least that counts as fully paid.
     underpaymentFloorMultiplier: 1 - env.UNDERPAYMENT_TOLERANCE_PERCENT / 100,

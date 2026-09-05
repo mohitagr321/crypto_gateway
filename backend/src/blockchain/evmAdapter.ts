@@ -31,7 +31,12 @@ import {
 import { config } from '../config/env';
 import { logger } from '../config/logger';
 import { query, queryOne } from '../db/pool';
-import { deriveAddress, derivePrivateKey } from '../utils/hdwallet';
+import {
+  deriveAddress,
+  derivePrivateKey,
+  deriveSettlementAddress,
+  deriveSettlementPrivateKey,
+} from '../utils/hdwallet';
 import { withChainLock } from '../utils/chainLock';
 import { ChainAdapter, PayoutPreparation, SweepResult } from './networks';
 import {
@@ -275,6 +280,64 @@ export function createEvmAdapter(cfg: EvmChainConfig): ChainAdapter {
       return null;
     }
     return fee;
+  }
+
+  /**
+   * Top an address up to what `legs` token transfers out of it will cost, and
+   * report whether it is now funded.
+   *
+   * Shared by both direct-settlement forms, which fund up to three addresses
+   * between them (the deposit address for its hop, and the intermediate for its
+   * two legs). The rules that make it safe are the sweep path's, kept in one
+   * place rather than pasted per call site:
+   *
+   *   * Fund the SHORTFALL. Native currency already sitting there — the residue
+   *     of an earlier top-up, or a customer's stray transfer — pays for a
+   *     transfer just as well as new money, and sending the full requirement on
+   *     top of it strands a second remainder at the same address.
+   *   * Serialise on the gas station key. Several settlements run at once and
+   *     every top-up is signed by that ONE wallet; without the lock they read
+   *     the same pending nonce and all but one are rejected, failing
+   *     settlements that had nothing wrong with them.
+   *   * A price the node cannot give is a DEFERRAL, not a failure: returns false
+   *     with nothing broadcast, and the settle tick retries.
+   */
+  async function fundForTransfers(
+    rpc: JsonRpcProvider,
+    asset: Asset,
+    address: string,
+    legs: bigint,
+    paymentId: string,
+  ): Promise<boolean> {
+    const perLeg = await requiredGasTopup(rpc, asset, address);
+    if (perLeg === null) return false;
+    const needed = perLeg * legs;
+    const held = await rpc.getBalance(address);
+    const shortfall = needed - held;
+    if (shortfall <= 0n) return true;
+
+    if (!cfg.gasStationPrivateKey) {
+      throw new Error('settlement requires gas funding but no gas station key configured');
+    }
+    const fundTx = await withChainLock(cfg.network, 'gas', async () => {
+      const gasSigner = new Wallet(cfg.gasStationPrivateKey, rpc);
+      return gasSigner.sendTransaction({ to: address, value: shortfall });
+    });
+    await fundTx.wait(1);
+    await query(
+      `INSERT INTO blockchain_transactions
+         (payment_id, direction, tx_hash, from_address, to_address, amount, token,
+          network, status, log_index)
+       VALUES ($1, 'gas_funding', $2, $3, $4, $5, $6, $7, 'confirmed', -3)
+       ON CONFLICT (tx_hash, log_index) DO NOTHING`,
+      [paymentId, fundTx.hash, fundTx.from, address, formatEther(shortfall),
+       cfg.feeCurrency, cfg.network],
+    );
+    logger.info(
+      { paymentId, address, legs: Number(legs), amount: formatEther(shortfall) },
+      'settlement: gas topped up',
+    );
+    return true;
   }
 
   /**
@@ -794,6 +857,214 @@ export function createEvmAdapter(cfg: EvmChainConfig): ChainAdapter {
       return {
         netTxHash,
         commissionTxHash: feeTxHash,
+        netAmount,
+        commissionAmount,
+        asset: asset.symbol,
+      };
+    },
+
+    /**
+     * Direct settlement WITH a per-payment intermediate address:
+     *
+     *     deposit -> intermediate            (the whole balance)
+     *     intermediate -> merchant           (net)
+     *     intermediate -> central            (commission)
+     *
+     * Five transactions against the three the hop-less form needs, for roughly
+     * double the gas. It buys no key security — the intermediate is derived from
+     * the SAME mnemonic — and the reason to run it is narrower than that: the
+     * merchant's payout no longer leaves the address the customer paid into, so
+     * a customer reading the chain cannot see what the merchant settled for or
+     * what commission came off it.
+     *
+     * The intermediate is HD-derived from the deposit index (settlementIndexFor),
+     * so nothing has to be stored to find it again and recover.ts reaches it from
+     * the index alone.
+     *
+     * ============================ RETRY SAFETY ===============================
+     * Three legs, three ledger rows, each checked before it runs:
+     *   settle_hop (-6)  deposit -> intermediate
+     *   settle_net (-4)  intermediate -> merchant
+     *   settle_fee (-5)  intermediate -> central
+     * A retry performs only what is missing. The merchant leg still goes before
+     * the commission leg, so an interruption strands OUR fee at an address only
+     * we can spend from rather than leaving a merchant unpaid.
+     *
+     * The extra failure state this mode adds — funds parked at the intermediate
+     * with neither leg done — is recoverable without special handling: the hop
+     * row exists, so the next pass skips the hop, reads the intermediate's live
+     * balance and pays out from there.
+     */
+    async settleDepositViaIntermediate({
+      paymentId,
+      depositAddress,
+      derivationIndex,
+      asset: assetSymbol,
+      merchantAddress,
+      netAmount,
+      commissionAmount,
+    }: {
+      paymentId: string;
+      depositAddress: string;
+      derivationIndex: number;
+      asset?: string;
+      merchantAddress: string;
+      netAmount: string;
+      commissionAmount: string;
+    }): Promise<{
+      hopTxHash: string | null;
+      netTxHash: string | null;
+      commissionTxHash: string | null;
+      intermediateAddress: string;
+      netAmount: string;
+      commissionAmount: string;
+      asset: string;
+    } | null> {
+      const asset = chainAsset(assetSymbol);
+      if (asset.isNative) return null; // same exclusion as the hop-less form
+      const rpc = provider();
+
+      const netU = toBaseUnits(netAmount, asset);
+      const commissionU = toBaseUnits(commissionAmount, asset);
+      if (netU <= 0n) {
+        logger.warn({ paymentId, netAmount }, 'intermediate settle: net is zero; nothing to pay');
+        return null;
+      }
+
+      const intermediate = deriveSettlementAddress(derivationIndex);
+      const priorRow = async (direction: string) =>
+        queryOne<{ tx_hash: string }>(
+          `SELECT tx_hash FROM blockchain_transactions
+            WHERE payment_id = $1 AND direction = $2 LIMIT 1`,
+          [paymentId, direction],
+        );
+      const priorHop = await priorRow('settle_hop');
+      const priorNet = await priorRow('settle_net');
+      const priorFee = await priorRow('settle_fee');
+      const needHop = !priorHop;
+      const needNet = !priorNet;
+      const needFee = !priorFee && commissionU > 0n;
+      if (!needHop && !needNet && !needFee) {
+        return {
+          hopTxHash: priorHop?.tx_hash ?? null,
+          netTxHash: priorNet?.tx_hash ?? null,
+          commissionTxHash: priorFee?.tx_hash ?? null,
+          intermediateAddress: intermediate.address,
+          netAmount,
+          commissionAmount,
+          asset: asset.symbol,
+        };
+      }
+
+      let hopTxHash = priorHop?.tx_hash ?? null;
+
+      // ---- Leg 0: deposit -> intermediate, the whole balance ----
+      if (needHop) {
+        const balanceU: bigint = await tokenContract(rpc, asset).balanceOf(depositAddress);
+        if (balanceU < netU + commissionU) {
+          logger.warn(
+            {
+              paymentId,
+              balance: fromBaseUnits(balanceU, asset),
+              required: fromBaseUnits(netU + commissionU, asset),
+            },
+            'intermediate settle: deposit balance no longer covers the split; deferring',
+          );
+          return null;
+        }
+        if (!(await fundForTransfers(rpc, asset, depositAddress, 1n, paymentId))) return null;
+        const depositSigner = new Wallet(derivePrivateKey(derivationIndex), rpc);
+        const hopTx = await tokenWithSigner(depositSigner, asset).transfer(
+          intermediate.address,
+          balanceU,
+        );
+        await hopTx.wait(1);
+        hopTxHash = hopTx.hash;
+        await query(
+          `INSERT INTO blockchain_transactions
+             (payment_id, direction, tx_hash, from_address, to_address, amount, token,
+              asset, network, status, log_index)
+           VALUES ($1, 'settle_hop', $2, $3, $4, $5, $6, $6, $7, 'confirmed', -6)
+           ON CONFLICT (tx_hash, log_index) DO NOTHING`,
+          [paymentId, hopTx.hash, depositAddress, intermediate.address,
+           fromBaseUnits(balanceU, asset), asset.symbol, cfg.network],
+        );
+        logger.info(
+          { paymentId, txHash: hopTx.hash, to: intermediate.address, path: intermediate.path },
+          'intermediate settle: moved the deposit to its settlement address',
+        );
+      }
+
+      // ---- Legs 1 and 2, both signed by the intermediate ----
+      const legs = (needNet ? 1n : 0n) + (needFee ? 1n : 0n);
+      let netTxHash = priorNet?.tx_hash ?? null;
+      let feeTxHash = priorFee?.tx_hash ?? null;
+
+      if (legs > 0n) {
+        const held: bigint = await tokenContract(rpc, asset).balanceOf(intermediate.address);
+        const required = (needNet ? netU : 0n) + (needFee ? commissionU : 0n);
+        if (held < required) {
+          logger.warn(
+            {
+              paymentId,
+              intermediate: intermediate.address,
+              held: fromBaseUnits(held, asset),
+              required: fromBaseUnits(required, asset),
+            },
+            'intermediate settle: settlement address does not hold the split yet; deferring',
+          );
+          return null;
+        }
+        if (!(await fundForTransfers(rpc, asset, intermediate.address, legs, paymentId))) {
+          return null;
+        }
+        const midSigner = new Wallet(deriveSettlementPrivateKey(derivationIndex), rpc);
+        const token = tokenWithSigner(midSigner, asset);
+
+        if (needNet) {
+          const netTx = await token.transfer(merchantAddress, netU);
+          await netTx.wait(1);
+          netTxHash = netTx.hash;
+          await query(
+            `INSERT INTO blockchain_transactions
+               (payment_id, direction, tx_hash, from_address, to_address, amount, token,
+                asset, network, status, log_index)
+             VALUES ($1, 'settle_net', $2, $3, $4, $5, $6, $6, $7, 'confirmed', -4)
+             ON CONFLICT (tx_hash, log_index) DO NOTHING`,
+            [paymentId, netTx.hash, intermediate.address, merchantAddress, netAmount,
+             asset.symbol, cfg.network],
+          );
+          logger.info(
+            { paymentId, txHash: netTx.hash, to: merchantAddress, amount: netAmount },
+            'intermediate settle: merchant paid from the settlement address',
+          );
+        }
+
+        if (needFee) {
+          const feeTx = await token.transfer(centralWalletAddress, commissionU);
+          await feeTx.wait(1);
+          feeTxHash = feeTx.hash;
+          await query(
+            `INSERT INTO blockchain_transactions
+               (payment_id, direction, tx_hash, from_address, to_address, amount, token,
+                asset, network, status, log_index)
+             VALUES ($1, 'settle_fee', $2, $3, $4, $5, $6, $6, $7, 'confirmed', -5)
+             ON CONFLICT (tx_hash, log_index) DO NOTHING`,
+            [paymentId, feeTx.hash, intermediate.address, centralWalletAddress,
+             commissionAmount, asset.symbol, cfg.network],
+          );
+          logger.info(
+            { paymentId, txHash: feeTx.hash, amount: commissionAmount },
+            'intermediate settle: commission moved to central',
+          );
+        }
+      }
+
+      return {
+        hopTxHash,
+        netTxHash,
+        commissionTxHash: feeTxHash,
+        intermediateAddress: intermediate.address,
         netAmount,
         commissionAmount,
         asset: asset.symbol,

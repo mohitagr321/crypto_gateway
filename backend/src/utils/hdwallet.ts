@@ -269,6 +269,46 @@ export function deriveAddress(index: number | bigint): DerivedAddress {
 }
 
 /**
+ * Where the SETTLEMENT branch starts.
+ *
+ * When settlement routes through a per-payment intermediate address, that
+ * address is derived from the same account node as the deposit addresses, just
+ * a billion children along. Deposit indexes are handed out by a sequence that
+ * starts at 0 and counts up, so an offset this large cannot be reached by real
+ * traffic: at one payment per second it is thirty-one years of collisions away.
+ *
+ * A high offset rather than a separate path element on purpose — it is the
+ * convention this wallet already uses (BTC_CENTRAL_DERIVATION_INDEX sits at
+ * 2,000,000,000 for the same reason), it reuses the cached account node so the
+ * derivation stays a ~0.3ms child step, and it keeps every address in the tree
+ * an operator already backs up. The pairing is fixed and needs nothing stored:
+ * payment at deposit index N always settles through settlement index
+ * OFFSET + N, so recover.ts reaches it from the index alone.
+ */
+const SETTLEMENT_INDEX_OFFSET = 1_000_000_000;
+
+/** The settlement-branch child index for a deposit index. */
+export function settlementIndexFor(depositIndex: number | bigint): number {
+  return SETTLEMENT_INDEX_OFFSET + checkedIndex(depositIndex);
+}
+
+/**
+ * Derive the per-payment settlement (intermediate) address for a DEPOSIT index.
+ * Pure function of mnemonic + index, exactly like deriveAddress.
+ */
+export function deriveSettlementAddress(depositIndex: number | bigint): DerivedAddress {
+  return deriveAddress(settlementIndexFor(depositIndex));
+}
+
+/**
+ * Private key for a settlement address. Used only by the settlement worker to
+ * sign the two legs out of it. Never store or log the return value.
+ */
+export function deriveSettlementPrivateKey(depositIndex: number | bigint): string {
+  return derivePrivateKey(settlementIndexFor(depositIndex));
+}
+
+/**
  * Derive the private key (0x-hex) for a given index. Used ONLY by the sweep worker.
  * Never store or log the return value.
  */

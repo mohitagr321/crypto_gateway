@@ -1,0 +1,26 @@
+-- =============================================================================
+-- 031 — tx_direction gains 'settle_hop'
+--
+-- Run with: psql "$DATABASE_URL" -f sql/migrations/031_tx_direction_settle_hop.sql
+-- Rollback:  sql/migrations/031_tx_direction_settle_hop_rollback.sql
+--
+-- !! NO BEGIN/COMMIT ON PURPOSE — see 029.
+--
+-- WHY
+--   SETTLEMENT_INTERMEDIATE_ENABLED moves a deposit to a per-payment
+--   intermediate address before paying the merchant and taking commission out
+--   of it. That first move needs its own ledger row for the same reason the
+--   other legs do: the rows ARE the retry guard, and a leg with no row is a leg
+--   that runs again.
+--
+--   It is NOT 'sweep': the two-hop path completes a payment on the strength of
+--   any 'sweep' row (workers/index.ts, the "prior sweep tx exists" branch), and
+--   a hop row wearing that label would let a fallback declare a payment settled
+--   when the money had only moved one address along, with the merchant unpaid
+--   and nothing re-driving it.
+--
+-- SAFE TO RE-RUN
+--   IF NOT EXISTS; adding an enum value takes no lock and rewrites nothing.
+-- =============================================================================
+
+ALTER TYPE tx_direction ADD VALUE IF NOT EXISTS 'settle_hop';

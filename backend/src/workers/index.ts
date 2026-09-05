@@ -278,7 +278,10 @@ async function trySettleDirect(
   adapter: ChainAdapter,
   derivationIndex: number,
 ): Promise<boolean> {
-  if (!adapter.settleDepositDirect) return false;
+  const viaIntermediate = config.settlement.intermediateEnabled;
+  if (viaIntermediate ? !adapter.settleDepositViaIntermediate : !adapter.settleDepositDirect) {
+    return false;
+  }
   const network = parseNetwork(payment.network);
 
   // Destination first: no payout wallet means there is nothing to settle TO, and
@@ -337,7 +340,7 @@ async function trySettleDirect(
     return false;
   }
 
-  const result = await adapter.settleDepositDirect({
+  const args = {
     paymentId,
     depositAddress: payment.deposit_address,
     derivationIndex,
@@ -345,8 +348,15 @@ async function trySettleDirect(
     merchantAddress,
     netAmount: split.netAmount,
     commissionAmount: split.commissionAmount,
-  });
+  };
+  const result = viaIntermediate
+    ? await adapter.settleDepositViaIntermediate!(args)
+    : await adapter.settleDepositDirect!(args);
   if (!result) return false;
+  // Present only on the intermediate form; used for logging and for the payout
+  // row's provenance, never for a decision.
+  const intermediateAddress =
+    'intermediateAddress' in result ? result.intermediateAddress : null;
 
   // Both legs must be on chain before this counts as settled. A missing
   // commission leg is not a failure the merchant can see, but calling it done
@@ -408,8 +418,11 @@ async function trySettleDirect(
       netTxHash: result.netTxHash,
       commissionTxHash: result.commissionTxHash,
       to: merchantAddress,
+      intermediateAddress,
     },
-    'direct settle: merchant paid from the deposit address, commission to central',
+    intermediateAddress
+      ? 'direct settle: merchant paid from the settlement address, commission to central'
+      : 'direct settle: merchant paid from the deposit address, commission to central',
   );
 
   enqueueWebhook({

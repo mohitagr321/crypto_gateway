@@ -180,6 +180,38 @@ export interface ChainAdapter {
   } | null>;
 
   /**
+   * The same settlement, routed through a per-payment INTERMEDIATE address:
+   * deposit -> intermediate, then intermediate -> merchant and -> central.
+   *
+   * OPTIONAL, and only reached when SETTLEMENT_INTERMEDIATE_ENABLED is on as
+   * well as DIRECT_SETTLEMENT_ENABLED. Costs roughly double the gas of the
+   * hop-less form and adds no key security (the intermediate comes from the same
+   * mnemonic); what it buys is that the merchant's payout does not leave the
+   * address the customer paid into.
+   *
+   * Same contract as settleDepositDirect in every other respect: the caller owns
+   * the split, implementations retry per leg, and null means "declined, use the
+   * two-hop path" rather than "failed".
+   */
+  settleDepositViaIntermediate?(params: {
+    paymentId: string;
+    depositAddress: string;
+    derivationIndex: number;
+    asset?: string;
+    merchantAddress: string;
+    netAmount: string;
+    commissionAmount: string;
+  }): Promise<{
+    hopTxHash: string | null;
+    netTxHash: string | null;
+    commissionTxHash: string | null;
+    intermediateAddress: string;
+    netAmount: string;
+    commissionAmount: string;
+    asset: string;
+  } | null>;
+
+  /**
    * Send USDT from the central wallet to `to`. Returns the broadcast tx hash.
    *
    * PREFER preparePayout + broadcastPayout where the chain supports them. This
