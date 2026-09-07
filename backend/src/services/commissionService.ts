@@ -190,10 +190,39 @@ export function validateTiers(tiers: CommissionTier[]): CommissionTier[] {
 
   norm.sort((a, b) => Number(a.minAmount) - Number(b.minAmount));
 
+  // ===================== THE SLABS MUST COVER EVERY AMOUNT ==================
+  // pickTier returns null when no slab contains the gross, and computeSplit
+  // reads that as a commission of ZERO. So a hole between two slabs is not a
+  // validation nicety — it is a rate of 0% that nothing reports.
+  //
+  // This check used to reject only OVERLAP (`min < prevMax`), which let
+  // `1-10` and `11-20` through: every amount from 10.01 to 10.99 fell out of
+  // the table and settled free. It was not theoretical. On this deployment 21
+  // payouts worth 286 USDT of volume took no commission that way, and their
+  // amounts (10.02, 10.03, 10.10, 10.50, 10.99, 20.01, 20.10, 20.50 …) cluster
+  // so tightly inside the two holes that they cannot be a coincidence — a hole
+  // in a fee table gets found, and then it gets used.
+  //
+  // Contiguity is therefore exact: each slab STARTS where the previous one
+  // ENDS. Equal bounds are safe rather than ambiguous because pickTier takes
+  // the first match, so an amount landing exactly on a boundary belongs to the
+  // lower slab.
+  if (Number(norm[0].minAmount) !== 0) {
+    throw AppError.badRequest(
+      `the first tier must start at 0 (got ${norm[0].minAmount}) — any amount below it ` +
+        'would match no tier and settle with zero commission',
+    );
+  }
   for (let i = 0; i < norm.length; i++) {
     const isLast = i === norm.length - 1;
     if (norm[i].maxAmount === null && !isLast) {
       throw AppError.badRequest('only the last tier may have an unbounded (null) maxAmount');
+    }
+    if (isLast && norm[i].maxAmount !== null) {
+      throw AppError.badRequest(
+        'the last tier must be unbounded (maxAmount null) — otherwise every amount ' +
+          `above ${norm[i].maxAmount} would match no tier and settle with zero commission`,
+      );
     }
     if (i > 0) {
       const prevMax = norm[i - 1].maxAmount;
@@ -202,6 +231,14 @@ export function validateTiers(tiers: CommissionTier[]): CommissionTier[] {
       }
       if (Number(norm[i].minAmount) < Number(prevMax)) {
         throw AppError.badRequest('tiers must not overlap (next minAmount >= previous maxAmount)');
+      }
+      if (Number(norm[i].minAmount) > Number(prevMax)) {
+        throw AppError.badRequest(
+          `tiers must leave no gap: tier ${i} starts at ${norm[i].minAmount} but the ` +
+            `previous one ends at ${prevMax}. Amounts between them would match no tier ` +
+            'and settle with zero commission. Set this minAmount to ' +
+            `${prevMax}.`,
+        );
       }
     }
   }
