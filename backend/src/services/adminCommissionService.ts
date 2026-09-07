@@ -104,10 +104,22 @@ export async function getCommissionBalance(
   asset: string = defaultAssetFor(network),
 ): Promise<CommissionBalance> {
   const symbol = String(asset).toUpperCase();
+  // BOTH ways money reaches the central wallet.
+  //
+  // 'sweep' is the two-hop path: the whole deposit lands in central and the
+  // merchant is paid out of it afterwards. 'settle_fee' is direct settlement,
+  // where ONLY the commission is sent to central and the merchant is paid
+  // straight from the deposit (or its per-payment settlement address).
+  //
+  // Counting sweeps alone was correct until direct settlement existed and wrong
+  // the moment it was switched on: the commission legs are real credits to this
+  // wallet, and leaving them out understates the balance by every fee taken that
+  // way. See the matching `type <> 'direct'` exclusion below — the two changes
+  // only make sense together.
   const collectedRow = await queryOne<{ total: string }>(
     `SELECT COALESCE(SUM(amount),0)::text AS total
        FROM blockchain_transactions
-      WHERE direction = 'sweep' AND status = 'confirmed'
+      WHERE direction IN ('sweep', 'settle_fee') AND status = 'confirmed'
         AND network = $1 AND asset = $2`,
     [network, symbol],
   );
@@ -126,10 +138,21 @@ export async function getCommissionBalance(
   //
   // The admin_withdrawals list below deliberately does NOT gain 'unresolved':
   // that table has its own lifecycle and nothing writes the status to it.
+  // `type = 'direct'` is EXCLUDED, and that exclusion is what keeps this figure
+  // meaningful under direct settlement.
+  //
+  // This term exists to subtract money that central owes a merchant or has
+  // already sent one. A direct payout never touched central: the deposit (or its
+  // settlement address) paid the merchant, and central only ever received the
+  // commission leg. Counting it here subtracts a debit that this wallet never
+  // made, which drove the balance steadily negative — on this deployment to
+  // about -12,900 USDT — and made the only screen showing operator funds
+  // unreadable.
   const clientOwedRow = await queryOne<{ total: string }>(
     `SELECT COALESCE(SUM(net_amount),0)::text AS total
        FROM payouts
       WHERE status IN ('pending','processing','sent','confirmed','unresolved')
+        AND type <> 'direct'
         AND network = $1 AND asset = $2`,
     [network, symbol],
   );
@@ -187,9 +210,10 @@ function scopeKey(network: string, asset: string): string {
 export async function getAllCommissionBalances(): Promise<CommissionBalance[]> {
   const [collected, clientOwed, withdrawn] = await Promise.all([
     query<{ network: string; asset: string; total: string }>(
+      // Both credit paths — see the note in getCommissionBalance.
       `SELECT network, asset, COALESCE(SUM(amount),0)::text AS total
          FROM blockchain_transactions
-        WHERE direction = 'sweep' AND status = 'confirmed'
+        WHERE direction IN ('sweep', 'settle_fee') AND status = 'confirmed'
         GROUP BY network, asset`,
     ),
     query<{ network: string; asset: string; total: string }>(
@@ -197,9 +221,11 @@ export async function getAllCommissionBalances(): Promise<CommissionBalance[]> {
       // included — a payout whose transaction may already be on chain is money
       // owed to the merchant, never withdrawable operator commission. These two
       // lists must not drift.
+      // Direct payouts never debit central — see getCommissionBalance.
       `SELECT network, asset, COALESCE(SUM(net_amount),0)::text AS total
          FROM payouts
         WHERE status IN ('pending','processing','sent','confirmed','unresolved')
+          AND type <> 'direct'
         GROUP BY network, asset`,
     ),
     query<{ network: string; asset: string; total: string }>(
