@@ -38,6 +38,12 @@ import { config } from '../config/env';
  * comparison the gateway has always made.
  */
 export function paidFloorSql(amountExpr: string): string {
+  // CREDIT_UNDERPAID_AS_RECEIVED: no floor at all. Every confirmed deposit
+  // satisfies its invoice and settles for what arrived, so `partial` never
+  // happens and the merchant decides whether the amount is enough. A floor of
+  // zero cannot confirm a payment that received nothing: the statements using
+  // this only select payments that already have a matured incoming transfer.
+  if (config.settlement.creditUnderpaidAsReceived) return '0';
   const m = config.settlement.underpaymentFloorMultiplier;
   if (m === 1) return amountExpr;
   return `(${amountExpr} * ${m})`;

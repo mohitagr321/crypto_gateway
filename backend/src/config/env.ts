@@ -307,6 +307,27 @@ const EnvSchema = z.object({
   // Capped at 5: this is a rounding allowance for third-party fees. A larger
   // value is a typo, and the cost of that typo is releasing goods for a payment
   // that never arrived.
+  // Credit whatever arrives, however short, and let the MERCHANT decide.
+  //
+  // With this on there is no `partial` state: any confirmed deposit promotes its
+  // payment and settles for the amount that actually landed. Settlement is
+  // already balance-based, so nothing downstream needs to change — the sweep and
+  // both direct-settlement paths move what is there, and commission is taken on
+  // that. The webhook reports `amount_received` (webhookService's canonical
+  // body already prefers it over the invoice figure), so the merchant is told
+  // the real number.
+  //
+  // READ THIS BEFORE ENABLING: it moves the fulfilment decision to the
+  // merchant. A customer can pay 1 USDT against a 100 USDT invoice and the
+  // gateway will confirm it and settle the 1. If the merchant's system releases
+  // goods on `payment.swept` without comparing the amount to their own order
+  // total, that is a fraud route straight through this flag. It is the right
+  // model — it is how several hosted gateways behave — but only when the
+  // receiver checks the amount.
+  //
+  // Takes precedence over UNDERPAYMENT_TOLERANCE_PERCENT, which becomes
+  // meaningless once every shortfall is accepted.
+  CREDIT_UNDERPAID_AS_RECEIVED: boolish.default(false),
   UNDERPAYMENT_TOLERANCE_PERCENT: numberish(0).pipe(
     z
       .number()
@@ -704,6 +725,7 @@ export const config = {
     // threshold: `amount * this` is the least that counts as fully paid.
     underpaymentFloorMultiplier: 1 - env.UNDERPAYMENT_TOLERANCE_PERCENT / 100,
     underpaymentTolerancePercent: env.UNDERPAYMENT_TOLERANCE_PERCENT,
+    creditUnderpaidAsReceived: env.CREDIT_UNDERPAID_AS_RECEIVED,
     minSweepAmount: env.MIN_SWEEP_AMOUNT,
     gasTopupBnb: env.GAS_TOPUP_BNB,
   },
