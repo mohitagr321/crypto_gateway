@@ -29,12 +29,13 @@ import bcrypt from 'bcryptjs';
 import { PoolClient } from 'pg';
 import { asyncHandler, AppError } from '../utils/apiError';
 import { clientAuth, requireDashboardSession } from '../middleware/clientAuth';
-import { getAllBalances, getBalance } from '../services/payoutService';
+import { getAllBalances, getBalance, requestPayout } from '../services/payoutService';
 import { parseNetwork } from '../blockchain/networks';
 import { query, queryOne, withTransaction } from '../db/pool';
 import { encrypt, randomToken } from '../utils/crypto';
 import { writeAudit } from '../services/auditService';
 import { config } from '../config/env';
+import { logger } from '../config/logger';
 import {
   ALL_SCOPES,
   AuthMode,
@@ -728,6 +729,84 @@ router.post(
         );
       }
       await markSwept(row.id, result.txHash);
+
+      // The ledger has to see this credit. The sweep just moved real funds into
+      // the central wallet, and without a row the operator balance counts money
+      // it cannot explain — the same `direction = 'sweep'` / log_index -2 shape
+      // the settlement worker writes, so both paths read identically.
+      await query(
+        `INSERT INTO blockchain_transactions
+           (payment_id, direction, tx_hash, from_address, to_address, amount, token,
+            asset, network, status, log_index)
+         VALUES ($1, 'sweep', $2, $3, $4, $5, $6, $6, $7, 'confirmed', -2)
+         ON CONFLICT (tx_hash, log_index) DO NOTHING`,
+        [
+          row.payment_id,
+          result.txHash,
+          row.deposit_address,
+          adapter.centralWalletAddress,
+          result.amount,
+          row.asset,
+          row.network,
+        ],
+      );
+
+      // ================ A LATE PAYMENT IS STILL THE MERCHANT'S MONEY ==========
+      // Two very different things land in unexpected_deposits, and only one of
+      // them can be settled automatically:
+      //
+      //   asset === expected_asset  A LATE PAYMENT. The customer paid the right
+      //     token to the right address, just after the invoice expired. Nothing
+      //     about it is ambiguous, so it settles exactly like an on-time payment
+      //     would have: commission off the top, the rest to the merchant.
+      //     Recovering it into the central wallet and stopping there — which is
+      //     all this route used to do — took the merchant's money into the
+      //     operator's wallet and left them to ask for it back by hand.
+      //
+      //   asset !== expected_asset  THE WRONG COIN. Paying it out means either
+      //     sending the merchant a token they did not agree to receive or
+      //     converting it, which realises a price and a fee on their behalf.
+      //     That is a decision, not a default: it stays in central and a human
+      //     resolves it.
+      //
+      // requestPayout is the SAME call the settlement worker makes after an
+      // ordinary sweep, so the commission, the payout row and the webhook are
+      // the ones the merchant already knows — not a second, parallel notion of
+      // settlement that could drift from the first.
+      let settled = false;
+      const isLatePayment =
+        !!row.expected_asset &&
+        row.asset.toUpperCase() === row.expected_asset.toUpperCase();
+      if (isLatePayment) {
+        try {
+          await requestPayout({
+            clientId: client.clientId,
+            amount: result.amount,
+            paymentId: row.payment_id ?? undefined,
+            network: parseNetwork(row.network),
+            asset: row.asset,
+            type: 'auto',
+            triggeredByUserId: null,
+          });
+          settled = true;
+        } catch (err) {
+          // The funds are already safely in the central wallet, so a payout that
+          // cannot be created is a follow-up, not a failed recovery. Reporting
+          // success with `settled: false` is what tells the merchant the
+          // difference — the alternative was throwing after an irreversible
+          // transfer and leaving them to guess where their money went.
+          logger.warn(
+            {
+              unexpectedDepositId: row.id,
+              clientId: client.clientId,
+              reason: err instanceof Error ? err.message : String(err),
+            },
+            'unexpected deposit recovered but the payout could not be created; ' +
+              'funds are in the central wallet and need settling by hand',
+          );
+        }
+      }
+
       await writeAudit({
         actorUserId: req.user?.userId ?? null,
         actorType: 'user',
@@ -737,7 +816,7 @@ router.post(
         metadata: { asset: row.asset, amount: row.amount, txHash: result.txHash },
         ip: req.ip,
       });
-      res.status(200).json({ success: true, txHash: result.txHash });
+      res.status(200).json({ success: true, txHash: result.txHash, settled });
     } catch (err) {
       // Leave a readable reason on the row so the merchant sees why, and allow a
       // retry (markFailed puts it back in a claimable state).
